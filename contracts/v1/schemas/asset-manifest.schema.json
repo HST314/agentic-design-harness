@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/asset-manifest.schema.json",
+  "title": "AssetManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "asset_id",
+    "task_id",
+    "producer_instance_id",
+    "kind",
+    "role",
+    "relative_path",
+    "mime_type",
+    "size_bytes",
+    "sha256",
+    "description",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "asset_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "producer_instance_id": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["image", "presentation", "document", "archive", "other"]
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "relative_path": {
+      "$ref": "common.schema.json#/$defs/relativePath"
+    },
+    "mime_type": {
+      "type": "string",
+      "pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$"
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sha256": {
+      "$ref": "common.schema.json#/$defs/sha256"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 4000
+    },
+    "source_relative_path": {
+      "$ref": "common.schema.json#/$defs/relativePath"
+    },
+    "publication_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "published_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "producer_instance_id": {
+            "type": "string"
+          }
+        },
+        "required": ["producer_instance_id"]
+      },
+      "then": {
+        "required": [
+          "source_relative_path",
+          "publication_id",
+          "published_at"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {"required": ["source_relative_path"]},
+            {"required": ["publication_id"]},
+            {"required": ["published_at"]}
+          ]
+        }
+      }
+    }
+  ]
+}

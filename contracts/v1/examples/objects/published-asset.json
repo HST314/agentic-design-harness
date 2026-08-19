@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "asset_id": "a_key_visual",
+  "task_id": "t_image_to_ppt",
+  "producer_instance_id": "i_visual",
+  "kind": "image",
+  "role": "key_visual",
+  "relative_path": "resources/shared/a_key_visual/key-visual.png",
+  "mime_type": "image/png",
+  "size_bytes": 4096,
+  "sha256": "a3f1c32e8d9af791b4f12ce3a8f16d42e4351d77486e1859a2dca496527b03f4",
+  "description": "Image Agent 发布的新品主视觉。",
+  "source_relative_path": "instances/i_visual/outputs/key-visual.png",
+  "publication_id": "pub_key_visual",
+  "published_at": "2026-08-19T16:25:00Z",
+  "created_at": "2026-08-19T16:25:00Z"
+}

@@ -1,0 +1,2 @@
+# Preserve the reviewed RFC attachment byte-for-byte, including Markdown breaks.
+docs/rfc-v0.2.md -whitespace

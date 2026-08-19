@@ -1,0 +1,174 @@
+{
+  "schema_version": "1.0",
+  "task": {
+    "schema_version": "1.0",
+    "task_id": "t_image_only",
+    "title": "三面文化墙视觉设计",
+    "goal": "并行完成三面文化墙的独立视觉设计。",
+    "master_owner": "master_default",
+    "start_policy": "manual",
+    "status": "AWAITING_START_CONFIRMATION",
+    "created_at": "2026-08-19T16:00:00Z",
+    "updated_at": "2026-08-19T16:00:00Z",
+    "input_manifest": "inputs/manifests/input.json",
+    "plan_revision": 1
+  },
+  "stages": [
+    {
+      "schema_version": "1.0",
+      "stage_id": "s_image",
+      "task_id": "t_image_only",
+      "type": "image",
+      "position": 1,
+      "depends_on": [],
+      "required": true,
+      "status": "READY",
+      "instance_ids": ["i_wall_1", "i_wall_2", "i_wall_3"]
+    }
+  ],
+  "instances": [
+    {
+      "schema_version": "1.0",
+      "instance_id": "i_wall_1",
+      "task_id": "t_image_only",
+      "stage_id": "s_image",
+      "agent_type": "image",
+      "required": true,
+      "status": "READY",
+      "approval_mode": "human",
+      "config_revision": 1,
+      "credential_pair_ref": "cred_01",
+      "credential_pair_revision": 1,
+      "workspace_relpath": "instances/i_wall_1",
+      "task_card_relpath": "instances/i_wall_1/task-card.json",
+      "ui_url": null,
+      "process": null,
+      "created_at": "2026-08-19T16:00:01Z"
+    },
+    {
+      "schema_version": "1.0",
+      "instance_id": "i_wall_2",
+      "task_id": "t_image_only",
+      "stage_id": "s_image",
+      "agent_type": "image",
+      "required": true,
+      "status": "READY",
+      "approval_mode": "human",
+      "config_revision": 1,
+      "credential_pair_ref": "cred_02",
+      "credential_pair_revision": 1,
+      "workspace_relpath": "instances/i_wall_2",
+      "task_card_relpath": "instances/i_wall_2/task-card.json",
+      "ui_url": null,
+      "process": null,
+      "created_at": "2026-08-19T16:00:02Z"
+    },
+    {
+      "schema_version": "1.0",
+      "instance_id": "i_wall_3",
+      "task_id": "t_image_only",
+      "stage_id": "s_image",
+      "agent_type": "image",
+      "required": true,
+      "status": "READY",
+      "approval_mode": "master",
+      "config_revision": 1,
+      "credential_pair_ref": "cred_03",
+      "credential_pair_revision": 1,
+      "workspace_relpath": "instances/i_wall_3",
+      "task_card_relpath": "instances/i_wall_3/task-card.json",
+      "ui_url": null,
+      "process": null,
+      "created_at": "2026-08-19T16:00:03Z"
+    }
+  ],
+  "task_cards": [
+    {
+      "schema_version": "1.0",
+      "card_id": "card_wall_1",
+      "revision": 1,
+      "task_id": "t_image_only",
+      "stage_id": "s_image",
+      "instance_id": "i_wall_1",
+      "agent_type": "image",
+      "objective": "设计第一面文化墙：企业发展历程。",
+      "instructions": ["保持品牌蓝色主色调", "输出可用于印刷的横版视觉稿"],
+      "input_assets": [
+        {
+          "asset_id": "a_brand",
+          "manifest_relpath": "resources/manifests/a_brand.json"
+        }
+      ],
+      "expected_deliveries": [
+        {
+          "kind": "image",
+          "role": "final_artwork",
+          "required": true,
+          "accepted_mime_types": ["image/png"]
+        }
+      ],
+      "parameters": {
+        "aspect_ratio": "3:1"
+      },
+      "created_at": "2026-08-19T16:00:04Z"
+    },
+    {
+      "schema_version": "1.0",
+      "card_id": "card_wall_2",
+      "revision": 1,
+      "task_id": "t_image_only",
+      "stage_id": "s_image",
+      "instance_id": "i_wall_2",
+      "agent_type": "image",
+      "objective": "设计第二面文化墙：企业价值观。",
+      "instructions": ["使用统一品牌字体层级"],
+      "input_assets": [
+        {
+          "asset_id": "a_brand",
+          "manifest_relpath": "resources/manifests/a_brand.json"
+        }
+      ],
+      "expected_deliveries": [
+        {
+          "kind": "image",
+          "role": "final_artwork",
+          "required": true,
+          "accepted_mime_types": ["image/png"]
+        }
+      ],
+      "parameters": {
+        "aspect_ratio": "3:1"
+      },
+      "created_at": "2026-08-19T16:00:05Z"
+    },
+    {
+      "schema_version": "1.0",
+      "card_id": "card_wall_3",
+      "revision": 1,
+      "task_id": "t_image_only",
+      "stage_id": "s_image",
+      "instance_id": "i_wall_3",
+      "agent_type": "image",
+      "objective": "设计第三面文化墙：未来愿景。",
+      "instructions": ["与前两面保持系列感"],
+      "input_assets": [
+        {
+          "asset_id": "a_brand",
+          "manifest_relpath": "resources/manifests/a_brand.json"
+        }
+      ],
+      "expected_deliveries": [
+        {
+          "kind": "image",
+          "role": "final_artwork",
+          "required": true,
+          "accepted_mime_types": ["image/png"]
+        }
+      ],
+      "parameters": {
+        "aspect_ratio": "3:1"
+      },
+      "created_at": "2026-08-19T16:00:06Z"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "delivery_id": "delivery_visual",
+  "task_id": "t_image_to_ppt",
+  "stage_id": "s_visual",
+  "instance_id": "i_visual",
+  "task_card_id": "card_visual",
+  "task_card_revision": 1,
+  "status": "PUBLISHED",
+  "outputs": [
+    {
+      "source_relative_path": "instances/i_visual/outputs/key-visual.png",
+      "kind": "image",
+      "role": "key_visual",
+      "description": "新品主视觉终稿"
+    }
+  ],
+  "published_assets": [
+    {
+      "asset_id": "a_key_visual",
+      "manifest_relpath": "resources/manifests/a_key_visual.json"
+    }
+  ],
+  "created_at": "2026-08-19T16:25:00Z"
+}

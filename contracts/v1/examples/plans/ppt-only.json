@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0",
+  "task": {
+    "schema_version": "1.0",
+    "task_id": "t_ppt_only",
+    "title": "现有材料汇报 PPT",
+    "goal": "仅使用用户上传的图片和文字制作汇报 PPT。",
+    "master_owner": "master_default",
+    "start_policy": "auto",
+    "status": "BLOCKED_UNAVAILABLE",
+    "created_at": "2026-08-19T16:10:00Z",
+    "updated_at": "2026-08-19T16:10:01Z",
+    "input_manifest": "inputs/manifests/input.json",
+    "plan_revision": 1
+  },
+  "stages": [
+    {
+      "schema_version": "1.0",
+      "stage_id": "s_ppt",
+      "task_id": "t_ppt_only",
+      "type": "ppt",
+      "position": 1,
+      "depends_on": [],
+      "required": true,
+      "status": "UNAVAILABLE",
+      "instance_ids": ["i_ppt_only"]
+    }
+  ],
+  "instances": [
+    {
+      "schema_version": "1.0",
+      "instance_id": "i_ppt_only",
+      "task_id": "t_ppt_only",
+      "stage_id": "s_ppt",
+      "agent_type": "ppt",
+      "required": true,
+      "status": "UNAVAILABLE",
+      "approval_mode": "human",
+      "config_revision": 1,
+      "credential_pair_ref": "cred_01",
+      "credential_pair_revision": 1,
+      "workspace_relpath": "instances/i_ppt_only",
+      "task_card_relpath": "instances/i_ppt_only/task-card.json",
+      "ui_url": null,
+      "process": null,
+      "created_at": "2026-08-19T16:10:00Z"
+    }
+  ],
+  "task_cards": [
+    {
+      "schema_version": "1.0",
+      "card_id": "card_ppt_only",
+      "revision": 1,
+      "task_id": "t_ppt_only",
+      "stage_id": "s_ppt",
+      "instance_id": "i_ppt_only",
+      "agent_type": "ppt",
+      "objective": "将现有已登记材料组织为 12 页汇报 PPT。",
+      "instructions": ["不在线生成新视觉资源", "所有图片保留来源说明"],
+      "input_assets": [
+        {
+          "asset_id": "a_uploaded_01",
+          "manifest_relpath": "resources/manifests/a_uploaded_01.json"
+        }
+      ],
+      "expected_deliveries": [
+        {
+          "kind": "presentation",
+          "role": "final_presentation",
+          "required": true,
+          "accepted_mime_types": [
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+          ]
+        }
+      ],
+      "parameters": {
+        "slide_count": 12
+      },
+      "created_at": "2026-08-19T16:10:00Z"
+    }
+  ]
+}

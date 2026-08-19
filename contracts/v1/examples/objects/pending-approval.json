@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "approval_id": "ap_style_confirm",
+  "task_id": "t_image_only",
+  "instance_id": "i_wall_1",
+  "step_id": "style_confirm",
+  "kind": "WORKFLOW",
+  "owner": "human",
+  "status": "PENDING",
+  "payload_ref": "approvals/ap_style_confirm/request.json",
+  "created_at": "2026-08-19T16:30:00Z",
+  "sequence": 18,
+  "revision": 1
+}

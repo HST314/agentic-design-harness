@@ -1,0 +1,8 @@
+{
+  "catalog_version": "1.0",
+  "json_schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "current_schema_version": "1.0",
+  "supported_schema_versions": ["1.0"],
+  "unknown_major_version_error": "SCHEMA_VERSION_UNSUPPORTED",
+  "root_version_field": "schema_version"
+}

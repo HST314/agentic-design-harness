@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/agent-instance.schema.json",
+  "title": "AgentInstance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "instance_id",
+    "task_id",
+    "stage_id",
+    "agent_type",
+    "required",
+    "status",
+    "approval_mode",
+    "config_revision",
+    "credential_pair_ref",
+    "credential_pair_revision",
+    "workspace_relpath",
+    "task_card_relpath",
+    "ui_url",
+    "process",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "instance_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "stage_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "agent_type": {
+      "$ref": "common.schema.json#/$defs/agentType"
+    },
+    "required": {
+      "type": "boolean"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "CREATED",
+        "READY",
+        "UNAVAILABLE",
+        "STARTING",
+        "RUNNING",
+        "WAITING_APPROVAL",
+        "FAILED_TO_START",
+        "SUCCEEDED",
+        "FAILED",
+        "CRASHED",
+        "CANCELLED",
+        "SUPERSEDED",
+        "ARCHIVED"
+      ]
+    },
+    "approval_mode": {
+      "type": "string",
+      "enum": ["human", "master"]
+    },
+    "config_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "credential_pair_ref": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "credential_pair_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "workspace_relpath": {
+      "$ref": "common.schema.json#/$defs/relativePath"
+    },
+    "task_card_relpath": {
+      "$ref": "common.schema.json#/$defs/relativePath"
+    },
+    "ui_url": {
+      "type": ["string", "null"],
+      "format": "uri",
+      "pattern": "^https?://"
+    },
+    "process": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pid", "port", "launch_id", "state", "started_at"],
+          "properties": {
+            "pid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "launch_id": {
+              "$ref": "common.schema.json#/$defs/identifier"
+            },
+            "state": {
+              "type": "string",
+              "enum": ["STARTING", "RUNNING", "EXITED"]
+            },
+            "started_at": {
+              "$ref": "common.schema.json#/$defs/timestamp"
+            }
+          }
+        }
+      ]
+    },
+    "restart_required": {
+      "type": "boolean",
+      "default": false
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}

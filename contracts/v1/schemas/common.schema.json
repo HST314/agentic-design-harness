@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/common.schema.json",
+  "title": "Agentic Design Harness common definitions",
+  "$defs": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\\\).+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "agentType": {
+      "type": "string",
+      "enum": ["image", "ppt"]
+    },
+    "actorType": {
+      "type": "string",
+      "enum": ["human", "master", "system", "adapter"]
+    },
+    "assetReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id", "manifest_relpath"],
+      "properties": {
+        "asset_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "manifest_relpath": {
+          "$ref": "#/$defs/relativePath"
+        }
+      }
+    },
+    "publicParameterValue": {
+      "oneOf": [
+        {
+          "type": ["null", "boolean", "number"]
+        },
+        {
+          "type": "string",
+          "maxLength": 10000,
+          "pattern": "^(?!/)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)).*$"
+        },
+        {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/publicParameterValue"
+          }
+        },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^(?!(?:api[_-]?key|authorization|secret|password|cookie)$)[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/publicParameterValue"
+          }
+        }
+      ]
+    }
+  }
+}

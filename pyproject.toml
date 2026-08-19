@@ -1,0 +1,12 @@
+[project]
+name = "agentic-design-harness-contracts"
+version = "0.1.0"
+description = "Phase 0 contracts and contract tests for the Agentic Design Harness"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["jsonschema==4.26.0"]
+
+[tool.pyright]
+pythonVersion = "3.10"

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/main-task.schema.json",
+  "title": "MainTask",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "title",
+    "goal",
+    "master_owner",
+    "start_policy",
+    "status",
+    "created_at",
+    "updated_at",
+    "input_manifest",
+    "plan_revision"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20000
+    },
+    "master_owner": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "start_policy": {
+      "type": "string",
+      "enum": ["manual", "auto"],
+      "default": "manual"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "DRAFT",
+        "PLANNED",
+        "AWAITING_START_CONFIRMATION",
+        "RUNNING",
+        "WAITING_APPROVAL",
+        "BLOCKED_UNAVAILABLE",
+        "FAILED",
+        "SUCCEEDED",
+        "PARTIAL",
+        "CANCELLED"
+      ]
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "input_manifest": {
+      "$ref": "common.schema.json#/$defs/relativePath"
+    },
+    "plan_revision": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

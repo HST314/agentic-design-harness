@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+node_modules/
+
+# Phase 1 runtime state and secrets must never enter version control.
+control-data/
+workspace/tasks/
+.env
+.env.*
+!.env.example

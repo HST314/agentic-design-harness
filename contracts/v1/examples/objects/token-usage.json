@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "event_id": "usage_visual_01",
+  "task_id": "t_image_to_ppt",
+  "instance_id": "i_visual",
+  "agent_type": "image",
+  "request_id": "provider_req_01",
+  "model": "image-model",
+  "credential_pair_ref": "cred_01",
+  "input_tokens": 1200,
+  "output_tokens": 300,
+  "cached_input_tokens": 100,
+  "reasoning_tokens": 50,
+  "total_tokens": 1500,
+  "occurred_at": "2026-08-19T16:24:00Z"
+}

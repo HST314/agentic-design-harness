@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/task-card.schema.json",
+  "title": "TaskCard",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "card_id",
+    "revision",
+    "task_id",
+    "stage_id",
+    "instance_id",
+    "agent_type",
+    "objective",
+    "instructions",
+    "input_assets",
+    "expected_deliveries",
+    "parameters",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "card_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "stage_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "instance_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "agent_type": {
+      "$ref": "common.schema.json#/$defs/agentType"
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20000
+    },
+    "instructions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 10000
+      }
+    },
+    "input_assets": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/assetReference"
+      }
+    },
+    "expected_deliveries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "role", "required", "accepted_mime_types"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["image", "presentation", "document", "archive", "other"]
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "accepted_mime_types": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^(?!(?:api[_-]?key|authorization|secret|password|cookie)$)[a-z][a-z0-9_.-]{0,63}$"
+      },
+      "additionalProperties": {
+        "$ref": "common.schema.json#/$defs/publicParameterValue"
+      }
+    },
+    "retry_group_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}

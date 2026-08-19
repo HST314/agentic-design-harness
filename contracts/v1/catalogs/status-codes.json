@@ -1,0 +1,137 @@
+{
+  "catalog_version": "1.0",
+  "main_task": {
+    "statuses": [
+      "DRAFT",
+      "PLANNED",
+      "AWAITING_START_CONFIRMATION",
+      "RUNNING",
+      "WAITING_APPROVAL",
+      "BLOCKED_UNAVAILABLE",
+      "FAILED",
+      "SUCCEEDED",
+      "PARTIAL",
+      "CANCELLED"
+    ],
+    "terminal": ["SUCCEEDED", "PARTIAL", "CANCELLED"],
+    "transitions": {
+      "DRAFT": ["PLANNED", "CANCELLED"],
+      "PLANNED": [
+        "AWAITING_START_CONFIRMATION",
+        "RUNNING",
+        "BLOCKED_UNAVAILABLE",
+        "CANCELLED"
+      ],
+      "AWAITING_START_CONFIRMATION": [
+        "RUNNING",
+        "BLOCKED_UNAVAILABLE",
+        "CANCELLED"
+      ],
+      "RUNNING": [
+        "WAITING_APPROVAL",
+        "BLOCKED_UNAVAILABLE",
+        "FAILED",
+        "SUCCEEDED",
+        "PARTIAL",
+        "CANCELLED"
+      ],
+      "WAITING_APPROVAL": [
+        "RUNNING",
+        "BLOCKED_UNAVAILABLE",
+        "FAILED",
+        "SUCCEEDED",
+        "PARTIAL",
+        "CANCELLED"
+      ],
+      "BLOCKED_UNAVAILABLE": ["PLANNED", "RUNNING", "PARTIAL", "CANCELLED"],
+      "FAILED": ["PLANNED", "RUNNING", "PARTIAL", "CANCELLED"],
+      "SUCCEEDED": [],
+      "PARTIAL": [],
+      "CANCELLED": []
+    }
+  },
+  "stage": {
+    "statuses": [
+      "PENDING",
+      "READY",
+      "RUNNING",
+      "WAITING_APPROVAL",
+      "SUCCEEDED",
+      "FAILED",
+      "UNAVAILABLE",
+      "SKIPPED",
+      "CANCELLED"
+    ],
+    "terminal": ["SUCCEEDED", "SKIPPED", "CANCELLED"],
+    "transitions": {
+      "PENDING": ["READY", "UNAVAILABLE", "SKIPPED", "CANCELLED"],
+      "READY": ["RUNNING", "UNAVAILABLE", "SKIPPED", "CANCELLED"],
+      "RUNNING": ["WAITING_APPROVAL", "SUCCEEDED", "FAILED", "CANCELLED"],
+      "WAITING_APPROVAL": ["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"],
+      "FAILED": ["READY", "RUNNING"],
+      "UNAVAILABLE": ["READY", "SKIPPED"],
+      "SUCCEEDED": [],
+      "SKIPPED": [],
+      "CANCELLED": []
+    }
+  },
+  "agent_instance": {
+    "statuses": [
+      "CREATED",
+      "READY",
+      "UNAVAILABLE",
+      "STARTING",
+      "RUNNING",
+      "WAITING_APPROVAL",
+      "FAILED_TO_START",
+      "SUCCEEDED",
+      "FAILED",
+      "CRASHED",
+      "CANCELLED",
+      "SUPERSEDED",
+      "ARCHIVED"
+    ],
+    "terminal": ["ARCHIVED"],
+    "transitions": {
+      "CREATED": ["READY", "UNAVAILABLE"],
+      "UNAVAILABLE": ["READY", "CANCELLED", "ARCHIVED"],
+      "READY": ["STARTING", "CANCELLED"],
+      "STARTING": ["RUNNING", "FAILED_TO_START", "CRASHED", "CANCELLED"],
+      "RUNNING": [
+        "WAITING_APPROVAL",
+        "SUCCEEDED",
+        "FAILED",
+        "CRASHED",
+        "CANCELLED"
+      ],
+      "WAITING_APPROVAL": ["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"],
+      "FAILED_TO_START": ["READY", "STARTING", "SUPERSEDED", "CANCELLED", "ARCHIVED"],
+      "FAILED": ["READY", "STARTING", "SUPERSEDED", "CANCELLED", "ARCHIVED"],
+      "CRASHED": ["READY", "STARTING", "SUPERSEDED", "CANCELLED", "ARCHIVED"],
+      "SUCCEEDED": ["ARCHIVED"],
+      "CANCELLED": ["ARCHIVED"],
+      "SUPERSEDED": ["ARCHIVED"],
+      "ARCHIVED": []
+    }
+  },
+  "approval_request": {
+    "statuses": ["PENDING", "APPROVED", "REJECTED", "CANCELLED"],
+    "terminal": ["APPROVED", "REJECTED", "CANCELLED"],
+    "transitions": {
+      "PENDING": ["APPROVED", "REJECTED", "CANCELLED"],
+      "APPROVED": [],
+      "REJECTED": [],
+      "CANCELLED": []
+    }
+  },
+  "delivery": {
+    "statuses": ["CANDIDATE", "PUBLISHED", "REJECTED", "CORRUPTED"],
+    "terminal": ["REJECTED", "CORRUPTED"],
+    "transitions": {
+      "CANDIDATE": ["PUBLISHED", "REJECTED"],
+      "PUBLISHED": ["CORRUPTED"],
+      "REJECTED": [],
+      "CORRUPTED": []
+    }
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "schema_version": "1.0",
+  "task": {
+    "schema_version": "1.0",
+    "task_id": "t_image_to_ppt",
+    "title": "新品发布视觉与 PPT",
+    "goal": "先完成主视觉，再将公共交付资产用于新品发布 PPT。",
+    "master_owner": "master_default",
+    "start_policy": "auto",
+    "status": "RUNNING",
+    "created_at": "2026-08-19T16:20:00Z",
+    "updated_at": "2026-08-19T16:20:05Z",
+    "input_manifest": "inputs/manifests/input.json",
+    "plan_revision": 1
+  },
+  "stages": [
+    {
+      "schema_version": "1.0",
+      "stage_id": "s_visual",
+      "task_id": "t_image_to_ppt",
+      "type": "image",
+      "position": 1,
+      "depends_on": [],
+      "required": true,
+      "status": "RUNNING",
+      "instance_ids": ["i_visual"]
+    },
+    {
+      "schema_version": "1.0",
+      "stage_id": "s_deck",
+      "task_id": "t_image_to_ppt",
+      "type": "ppt",
+      "position": 2,
+      "depends_on": ["s_visual"],
+      "required": true,
+      "status": "PENDING",
+      "instance_ids": ["i_deck"]
+    }
+  ],
+  "instances": [
+    {
+      "schema_version": "1.0",
+      "instance_id": "i_visual",
+      "task_id": "t_image_to_ppt",
+      "stage_id": "s_visual",
+      "agent_type": "image",
+      "required": true,
+      "status": "RUNNING",
+      "approval_mode": "master",
+      "config_revision": 1,
+      "credential_pair_ref": "cred_01",
+      "credential_pair_revision": 1,
+      "workspace_relpath": "instances/i_visual",
+      "task_card_relpath": "instances/i_visual/task-card.json",
+      "ui_url": "http://127.0.0.1:18101",
+      "process": {
+        "pid": 12001,
+        "port": 18101,
+        "launch_id": "launch_visual_01",
+        "state": "RUNNING",
+        "started_at": "2026-08-19T16:20:05Z"
+      },
+      "created_at": "2026-08-19T16:20:01Z"
+    },
+    {
+      "schema_version": "1.0",
+      "instance_id": "i_deck",
+      "task_id": "t_image_to_ppt",
+      "stage_id": "s_deck",
+      "agent_type": "ppt",
+      "required": true,
+      "status": "UNAVAILABLE",
+      "approval_mode": "human",
+      "config_revision": 1,
+      "credential_pair_ref": "cred_02",
+      "credential_pair_revision": 1,
+      "workspace_relpath": "instances/i_deck",
+      "task_card_relpath": "instances/i_deck/task-card.json",
+      "ui_url": null,
+      "process": null,
+      "created_at": "2026-08-19T16:20:02Z"
+    }
+  ],
+  "task_cards": [
+    {
+      "schema_version": "1.0",
+      "card_id": "card_visual",
+      "revision": 1,
+      "task_id": "t_image_to_ppt",
+      "stage_id": "s_visual",
+      "instance_id": "i_visual",
+      "agent_type": "image",
+      "objective": "完成新品发布主视觉。",
+      "instructions": ["输出 16:9 和 1:1 两种版式"],
+      "input_assets": [
+        {
+          "asset_id": "a_product",
+          "manifest_relpath": "resources/manifests/a_product.json"
+        }
+      ],
+      "expected_deliveries": [
+        {
+          "kind": "image",
+          "role": "key_visual",
+          "required": true,
+          "accepted_mime_types": ["image/png"]
+        }
+      ],
+      "parameters": {
+        "variants": 2
+      },
+      "created_at": "2026-08-19T16:20:03Z"
+    },
+    {
+      "schema_version": "1.0",
+      "card_id": "card_deck",
+      "revision": 1,
+      "task_id": "t_image_to_ppt",
+      "stage_id": "s_deck",
+      "instance_id": "i_deck",
+      "agent_type": "ppt",
+      "objective": "使用已发布主视觉制作新品发布 PPT。",
+      "instructions": ["只引用已登记的公共资产 manifest"],
+      "input_assets": [],
+      "expected_deliveries": [
+        {
+          "kind": "presentation",
+          "role": "final_presentation",
+          "required": true,
+          "accepted_mime_types": [
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+          ]
+        }
+      ],
+      "parameters": {
+        "planned_asset_role": "key_visual"
+      },
+      "created_at": "2026-08-19T16:20:04Z"
+    }
+  ]
+}

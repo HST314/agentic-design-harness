@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/error-response.schema.json",
+  "title": "ErrorResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "error"],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "details"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "VALIDATION_ERROR",
+            "SCHEMA_VERSION_UNSUPPORTED",
+            "TASK_NOT_FOUND",
+            "INSTANCE_NOT_FOUND",
+            "REVISION_CONFLICT",
+            "IDEMPOTENCY_CONFLICT",
+            "INVALID_STATE_TRANSITION",
+            "ADAPTER_UNAVAILABLE",
+            "BUDGET_GATE_DENIED",
+            "CREDENTIAL_PAIR_UNAVAILABLE",
+            "CREDENTIAL_PAIR_INVALID",
+            "PATH_OUTSIDE_TASK_ROOT",
+            "ASSET_VALIDATION_FAILED",
+            "ASSET_CORRUPTED",
+            "PROCESS_START_FAILED",
+            "INTERNAL_ERROR"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(?!(?:api[_-]?key|authorization|secret|password|cookie)$)[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "common.schema.json#/$defs/publicParameterValue"
+          }
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "catalog_version": "1.0",
+  "errors": [
+    {
+      "code": "VALIDATION_ERROR",
+      "http_status": 422,
+      "retryable": false,
+      "meaning": "Payload or cross-object contract validation failed."
+    },
+    {
+      "code": "SCHEMA_VERSION_UNSUPPORTED",
+      "http_status": 422,
+      "retryable": false,
+      "meaning": "The payload declares an unsupported schema major or minor version."
+    },
+    {
+      "code": "TASK_NOT_FOUND",
+      "http_status": 404,
+      "retryable": false,
+      "meaning": "The requested main task does not exist."
+    },
+    {
+      "code": "INSTANCE_NOT_FOUND",
+      "http_status": 404,
+      "retryable": false,
+      "meaning": "The requested agent instance does not exist."
+    },
+    {
+      "code": "REVISION_CONFLICT",
+      "http_status": 409,
+      "retryable": true,
+      "meaning": "The supplied expected revision is stale."
+    },
+    {
+      "code": "IDEMPOTENCY_CONFLICT",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "An idempotency key was reused with a different command payload."
+    },
+    {
+      "code": "INVALID_STATE_TRANSITION",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "The requested state transition is not present in the status catalog."
+    },
+    {
+      "code": "ADAPTER_UNAVAILABLE",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "The task plan is valid but the required agent adapter is not available."
+    },
+    {
+      "code": "BUDGET_GATE_DENIED",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "An automatic retry would exceed count, Token, or cost policy."
+    },
+    {
+      "code": "CREDENTIAL_PAIR_UNAVAILABLE",
+      "http_status": 409,
+      "retryable": true,
+      "meaning": "No enabled complete credential pair can be allocated."
+    },
+    {
+      "code": "CREDENTIAL_PAIR_INVALID",
+      "http_status": 422,
+      "retryable": false,
+      "meaning": "A credential pair or its pinned revision is incomplete or inconsistent."
+    },
+    {
+      "code": "PATH_OUTSIDE_TASK_ROOT",
+      "http_status": 400,
+      "retryable": false,
+      "meaning": "A path is absolute, traverses upward, or resolves outside the task root."
+    },
+    {
+      "code": "ASSET_VALIDATION_FAILED",
+      "http_status": 422,
+      "retryable": false,
+      "meaning": "An imported or published asset failed type, size, source, or path validation."
+    },
+    {
+      "code": "ASSET_CORRUPTED",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "A published asset no longer matches its final-file manifest digest."
+    },
+    {
+      "code": "PROCESS_START_FAILED",
+      "http_status": 500,
+      "retryable": true,
+      "meaning": "The instance process could not be started or did not become healthy."
+    },
+    {
+      "code": "INTERNAL_ERROR",
+      "http_status": 500,
+      "retryable": false,
+      "meaning": "An unexpected control-plane failure occurred."
+    }
+  ]
+}
