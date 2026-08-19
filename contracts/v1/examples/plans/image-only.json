@@ -9,7 +9,7 @@
     "start_policy": "manual",
     "status": "AWAITING_START_CONFIRMATION",
     "created_at": "2026-08-19T16:00:00Z",
-    "updated_at": "2026-08-19T16:00:00Z",
+    "updated_at": "2026-08-19T16:00:06Z",
     "input_manifest": "inputs/manifests/input.json",
     "plan_revision": 1
   },

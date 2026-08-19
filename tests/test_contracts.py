@@ -4,9 +4,8 @@ import copy
 import json
 import re
 import unittest
-from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
-from math import log2
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -29,11 +28,6 @@ EXECUTING_INSTANCE_STATUSES = {"STARTING", "RUNNING"}
 WAITING_INSTANCE_STATUSES = {"WAITING_APPROVAL"}
 FAILED_INSTANCE_STATUSES = {"FAILED_TO_START", "FAILED", "CRASHED"}
 COMPLETED_INSTANCE_STATUSES = {"SUCCEEDED", "ARCHIVED"}
-PRE_ACTIVATION_TASK_STATUSES = {
-    "DRAFT",
-    "PLANNED",
-    "AWAITING_START_CONFIRMATION",
-}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -46,8 +40,23 @@ KNOWN_CREDENTIAL_RULES = tuple(
     (rule["id"], re.compile(rule["pattern"], re.IGNORECASE))
     for rule in CREDENTIAL_POLICY["known_format_rules"]
 )
-HIGH_ENTROPY_POLICY = CREDENTIAL_POLICY["high_entropy_rule"]
-HIGH_ENTROPY_CANDIDATE = re.compile(HIGH_ENTROPY_POLICY["candidate_pattern"])
+SENSITIVE_SOURCE_IDS = {
+    source["id"] for source in CREDENTIAL_POLICY["sensitive_sources"]
+}
+SENSITIVE_VALUE_POLICY = CREDENTIAL_POLICY["sensitive_value_marker"]
+
+
+@dataclass(frozen=True)
+class SensitiveValue:
+    """Internal marker that deliberately has no JSON representation."""
+
+    value: str
+    source: str
+    locator: str
+
+    def __post_init__(self) -> None:
+        if self.source not in SENSITIVE_SOURCE_IDS:
+            raise ValueError(f"unknown sensitive source: {self.source}")
 
 
 SCHEMA_DOCUMENTS = {
@@ -118,41 +127,29 @@ def schema_version_is_supported(
     )
 
 
-def shannon_entropy(value: str) -> float:
-    counts = Counter(value)
-    length = len(value)
-    return -sum(
-        (count / length) * log2(count / length) for count in counts.values()
-    )
-
-
 def credential_rule_for_text(value: str) -> str | None:
     """Return the named rule that identifies a plaintext credential."""
 
     for rule_id, pattern in KNOWN_CREDENTIAL_RULES:
         if pattern.search(value):
             return rule_id
-
-    for match in HIGH_ENTROPY_CANDIDATE.finditer(value):
-        candidate = match.group(1)
-        character_classes = sum(
-            bool(re.search(pattern, candidate))
-            for pattern in HIGH_ENTROPY_POLICY["character_class_patterns"]
-        )
-        if (
-            len(candidate) >= HIGH_ENTROPY_POLICY["minimum_length"]
-            and character_classes
-            >= HIGH_ENTROPY_POLICY["minimum_character_classes"]
-            and shannon_entropy(candidate)
-            >= HIGH_ENTROPY_POLICY["minimum_entropy_bits_per_character"]
-        ):
-            return "high_entropy_token"
     return None
 
 
-def validate_task_card_credentials(value: Any) -> None:
-    """Reject credential-shaped text anywhere in a serialized public TaskCard."""
+def marked_sensitive_value(value: str, source: str, locator: str) -> SensitiveValue:
+    """Model an internal sensitive value before a public serialization boundary."""
 
+    return SensitiveValue(value=value, source=source, locator=locator)
+
+
+def validate_task_card_credentials(value: Any) -> None:
+    """Reject marked or recognizably formatted secrets at the public boundary."""
+
+    if isinstance(value, SensitiveValue):
+        raise SemanticContractError(
+            "public task card serialization rejected sensitive value "
+            f"from {value.source}:{value.locator}"
+        )
     if isinstance(value, str):
         rule_id = credential_rule_for_text(value)
         if rule_id is not None:
@@ -168,12 +165,19 @@ def validate_task_card_credentials(value: Any) -> None:
             validate_task_card_credentials(item)
 
 
+def serialize_public_task_card(card: dict[str, Any]) -> str:
+    """Apply the secret boundary before producing canonical public JSON."""
+
+    validate_task_card_credentials(card)
+    return json.dumps(card, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 def validate_requirement_lifecycle(
     item: dict[str, Any],
     plan_revision: int,
     task_created_at: datetime,
     task_updated_at: datetime,
-    unavailable_was_triggered: bool,
+    unavailable_activation_required: bool,
 ) -> bool:
     """Validate frozen original/activation facts and return downgrade evidence."""
 
@@ -197,7 +201,7 @@ def validate_requirement_lifecycle(
     )
     activation_fact_required = (
         item["status"] in activated_statuses
-        or item["status"] == "UNAVAILABLE" and unavailable_was_triggered
+        or item["status"] == "UNAVAILABLE" and unavailable_activation_required
     )
     if activation_fact_required and first_activated_at is None:
         raise SemanticContractError("activated child lacks first activation fact")
@@ -431,6 +435,17 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
     if task_updated_at < task_created_at:
         raise SemanticContractError("task update predates task creation")
 
+    for instance in instances:
+        instance_created_at = datetime.fromisoformat(
+            instance["created_at"].replace("Z", "+00:00")
+        )
+        if instance_created_at < task_created_at:
+            raise SemanticContractError("instance creation predates task creation")
+        if instance_created_at > task_updated_at:
+            raise SemanticContractError(
+                "instance creation occurs after task snapshot"
+            )
+
     if plan["schema_version"] != task["schema_version"]:
         raise SemanticContractError("plan and task schema versions differ")
     for item in [*plan["stages"], *plan["instances"], *plan["task_cards"]]:
@@ -492,7 +507,6 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
     if declared_instance_ids != set(instance_by_id):
         raise SemanticContractError("plan contains an undeclared instance")
 
-    task_is_activated = task["status"] not in PRE_ACTIVATION_TASK_STATUSES
     dependencies_succeeded_by_stage = {
         stage["stage_id"]: all(
             stage_by_id[dependency]["status"] == "SUCCEEDED"
@@ -502,8 +516,9 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
     }
     downgrade_evidence = []
     for stage in stages:
-        unavailable_was_triggered = (
-            task_is_activated
+        unavailable_activation_required = (
+            task["status"] == "BLOCKED_UNAVAILABLE"
+            and stage["required"]
             and stage["status"] == "UNAVAILABLE"
             and dependencies_succeeded_by_stage[stage["stage_id"]]
         )
@@ -513,13 +528,15 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
                 task["plan_revision"],
                 task_created_at,
                 task_updated_at,
-                unavailable_was_triggered,
+                unavailable_activation_required,
             )
         )
     for instance in instances:
         stage = stage_by_id[instance["stage_id"]]
-        unavailable_was_triggered = (
-            task_is_activated
+        unavailable_activation_required = (
+            task["status"] == "BLOCKED_UNAVAILABLE"
+            and stage["required"]
+            and instance["required"]
             and instance["status"] == "UNAVAILABLE"
             and dependencies_succeeded_by_stage[stage["stage_id"]]
             and stage["status"] not in {"SKIPPED", "CANCELLED"}
@@ -530,7 +547,7 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
                 task["plan_revision"],
                 task_created_at,
                 task_updated_at,
-                unavailable_was_triggered,
+                unavailable_activation_required,
             )
         )
     has_authorized_downgrade = any(downgrade_evidence)
@@ -560,7 +577,7 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
             raise SemanticContractError("task card stage reference is inconsistent")
         if card["agent_type"] != instance["agent_type"]:
             raise SemanticContractError("task card type differs from instance type")
-        validate_task_card_credentials(card)
+        serialize_public_task_card(card)
         for asset_ref in card["input_assets"]:
             if not asset_ref["manifest_relpath"].startswith(
                 "resources/manifests/"
@@ -751,6 +768,16 @@ class AggregateStateTests(unittest.TestCase):
                 ):
                     validate_plan_semantics(missing_fact)
 
+    def test_pre_confirmation_cancellation_preserves_unavailable_placeholder(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "ppt-only.json")
+        plan["task"]["start_policy"] = "manual"
+        plan["task"]["status"] = "CANCELLED"
+        for item in (plan["stages"][0], plan["instances"][0]):
+            item["requirement_lifecycle"]["first_activated_at"] = None
+
+        validate("task-plan.schema.json", plan)
+        validate_plan_semantics(plan)
+
     def test_waiting_dependency_does_not_count_as_triggered_unavailable(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
         self.assertEqual(plan["instances"][1]["status"], "UNAVAILABLE")
@@ -778,6 +805,9 @@ class AggregateStateTests(unittest.TestCase):
             validate_plan_semantics(activation_before_task)
 
         activation_before_instance = copy.deepcopy(plan)
+        activation_before_instance["task"]["updated_at"] = (
+            "2026-08-19T16:10:03Z"
+        )
         activation_before_instance["instances"][0]["created_at"] = (
             "2026-08-19T16:10:02Z"
         )
@@ -794,6 +824,25 @@ class AggregateStateTests(unittest.TestCase):
             SemanticContractError, "activation occurs after task snapshot"
         ):
             validate_plan_semantics(activation_after_snapshot)
+
+    def test_instance_creation_is_anchored_to_task_snapshot_window(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "ppt-only.json")
+
+        before_task = copy.deepcopy(plan)
+        before_task["instances"][0]["created_at"] = "2025-08-19T16:10:00Z"
+        with self.assertRaisesRegex(
+            SemanticContractError, "instance creation predates task creation"
+        ):
+            validate_plan_semantics(before_task)
+
+        after_snapshot = copy.deepcopy(plan)
+        after_snapshot["instances"][0]["created_at"] = (
+            "2026-08-19T16:10:02Z"
+        )
+        with self.assertRaisesRegex(
+            SemanticContractError, "instance creation occurs after task snapshot"
+        ):
+            validate_plan_semantics(after_snapshot)
 
     def test_running_work_has_priority_over_waiting_approval(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-only.json")
@@ -964,17 +1013,15 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(SemanticContractError, "plaintext credential"):
             validate_plan_semantics(secret_plan)
 
-    def test_task_card_rejects_provider_and_high_entropy_credentials(self) -> None:
+    def test_task_card_rejects_known_provider_credentials(self) -> None:
         provider_tokens = {
             "github_fine_grained": "github_pat_"
             "11AA0aBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSs",
             "slack_bot": "xoxb-"
             "111111111111-222222222222-aBcDeFgHiJkLmNoPqRsTuVwX",
             "aws_access_key_id": "AKIA" "IOSFODNN7EXAMPLE",
-            "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/"
-            "bPxRfiCYEXAMPLEKEY",
-            "unlabelled_high_entropy": "z9Qx7Vm2Kp8Nc4Rt6Yw3Hs5Jd1Lf0"
-            "BaU",
+            "aws_secret_access_key": "aws_secret_access_key="
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         }
         for provider, token in provider_tokens.items():
             with self.subTest(provider=provider):
@@ -987,12 +1034,7 @@ class BoundaryTests(unittest.TestCase):
                 ):
                     validate_plan_semantics(plan)
 
-        schema_guarded_tokens = [
-            *list(provider_tokens.values())[:3],
-            "aws_secret_access_key="
-            f"{provider_tokens['aws_secret_access_key']}",
-        ]
-        for token in schema_guarded_tokens:
+        for token in provider_tokens.values():
             with self.subTest(schema_fast_rejection=token.split("-")[0]):
                 card = load_json(PLAN_EXAMPLES / "image-only.json")[
                     "task_cards"
@@ -1001,21 +1043,46 @@ class BoundaryTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     validate("task-card.schema.json", card)
 
-        nested_plan = load_json(PLAN_EXAMPLES / "image-only.json")
-        nested_plan["task_cards"][0]["expected_deliveries"][0]["role"] = (
-            provider_tokens["unlabelled_high_entropy"]
+    def test_sensitive_source_marker_rejects_opaque_base36_key(self) -> None:
+        base36_value = "q7m2v9k4x8c5n1b6d3f0h7j2l9p4r8t"
+        card = copy.deepcopy(
+            load_json(PLAN_EXAMPLES / "image-only.json")["task_cards"][0]
         )
-        validate("task-plan.schema.json", nested_plan)
-        with self.assertRaisesRegex(SemanticContractError, "plaintext credential"):
-            validate_plan_semantics(nested_plan)
+        card["objective"] = marked_sensitive_value(
+            base36_value,
+            source="environment",
+            locator="IMAGE_API_KEY",
+        )
 
-    def test_task_card_credential_policy_avoids_benign_long_text(self) -> None:
+        with self.assertRaisesRegex(
+            SemanticContractError,
+            "serialization rejected sensitive value from environment:IMAGE_API_KEY",
+        ):
+            serialize_public_task_card(card)
+
+        with self.assertRaises(TypeError):
+            json.dumps(card)
+
+        with self.assertRaisesRegex(ValueError, "unknown sensitive source"):
+            marked_sensitive_value(base36_value, "unclassified", "unknown")
+
+    def test_unmarked_business_identifiers_and_long_filename_are_allowed(self) -> None:
+        business_order = "CustomerOrder2026AugustBatch9471"
+        base36_asset_id = "q7m2v9k4x8c5n1b6d3f0h7j2l9p4r8t"
         plan = load_json(PLAN_EXAMPLES / "image-only.json")
+        plan["task_cards"][0]["objective"] = (
+            f"Create a launch visual for {business_order}."
+        )
+        plan["task_cards"][0]["input_assets"][0]["asset_id"] = base36_asset_id
         plan["task_cards"][0]["instructions"].append(
-            "Read resources/manifests/a_uploaded_01.json and preserve the MIME type."
+            "Preserve campaign-2026-08-customer-order-9471-final-master-"
+            "illustration.png as the original source filename."
         )
         validate("task-plan.schema.json", plan)
         validate_plan_semantics(plan)
+        serialized = serialize_public_task_card(plan["task_cards"][0])
+        self.assertIn(business_order, serialized)
+        self.assertIn(base36_asset_id, serialized)
 
     def test_published_asset_requires_provenance(self) -> None:
         asset = load_json(OBJECT_EXAMPLES / "published-asset.json")
@@ -1117,7 +1184,8 @@ class CatalogTests(unittest.TestCase):
                 "schema_version",
                 "policy_id",
                 "known_format_rules",
-                "high_entropy_rule",
+                "sensitive_sources",
+                "sensitive_value_marker",
             },
         )
         self.assertEqual(CREDENTIAL_POLICY["schema_version"], "1.0")
@@ -1143,27 +1211,31 @@ class CatalogTests(unittest.TestCase):
             with self.subTest(rule=rule["id"]):
                 self.assertEqual(set(rule), {"id", "pattern"})
                 re.compile(rule["pattern"], re.IGNORECASE)
+        source_ids = [
+            source["id"] for source in CREDENTIAL_POLICY["sensitive_sources"]
+        ]
+        self.assertEqual(len(source_ids), len(set(source_ids)))
+        self.assertEqual(set(source_ids), SENSITIVE_SOURCE_IDS)
         self.assertEqual(
-            set(HIGH_ENTROPY_POLICY),
+            set(SENSITIVE_VALUE_POLICY),
             {
-                "algorithm",
-                "candidate_pattern",
-                "character_class_patterns",
-                "minimum_length",
-                "minimum_entropy_bits_per_character",
-                "minimum_character_classes",
+                "marker_id",
+                "required_metadata",
+                "raw_json_serializable",
+                "public_serialization_action",
+                "error_code",
             },
         )
+        self.assertEqual(SENSITIVE_VALUE_POLICY["marker_id"], "sensitive_value")
         self.assertEqual(
-            HIGH_ENTROPY_POLICY["algorithm"], "shannon_bits_per_character"
+            SENSITIVE_VALUE_POLICY["required_metadata"],
+            ["source", "locator"],
         )
-        re.compile(HIGH_ENTROPY_POLICY["candidate_pattern"])
-        for pattern in HIGH_ENTROPY_POLICY["character_class_patterns"]:
-            re.compile(pattern)
-        self.assertGreaterEqual(HIGH_ENTROPY_POLICY["minimum_length"], 20)
-        self.assertGreater(
-            HIGH_ENTROPY_POLICY["minimum_entropy_bits_per_character"], 4.0
+        self.assertFalse(SENSITIVE_VALUE_POLICY["raw_json_serializable"])
+        self.assertEqual(
+            SENSITIVE_VALUE_POLICY["public_serialization_action"], "reject"
         )
+        self.assertEqual(SENSITIVE_VALUE_POLICY["error_code"], "VALIDATION_ERROR")
 
     def test_status_catalog_matches_schema_enums(self) -> None:
         catalog = load_json(CATALOGS / "status-codes.json")
