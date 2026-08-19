@@ -3,6 +3,21 @@
   "json_schema_dialect": "https://json-schema.org/draft/2020-12/schema",
   "current_schema_version": "1.0",
   "supported_schema_versions": ["1.0"],
+  "version_pattern": "^[1-9][0-9]*\\.(0|[1-9][0-9]*)$",
+  "acceptance_policy": "exact_supported_versions",
+  "rollout_order": ["consumer", "producer"],
+  "unknown_minor_version_error": "SCHEMA_VERSION_UNSUPPORTED",
   "unknown_major_version_error": "SCHEMA_VERSION_UNSUPPORTED",
+  "minor_allowed_changes": [
+    "add_optional_field",
+    "relax_backward_compatible_constraint"
+  ],
+  "major_required_changes": [
+    "remove_or_rename_field",
+    "make_optional_field_required",
+    "change_field_meaning_or_unit",
+    "tighten_existing_constraint",
+    "change_state_machine_semantics"
+  ],
   "root_version_field": "schema_version"
 }

@@ -96,7 +96,7 @@
     "parameters": {
       "type": "object",
       "propertyNames": {
-        "pattern": "^(?!(?:api[_-]?key|authorization|secret|password|cookie)$)[a-z][a-z0-9_.-]{0,63}$"
+        "$ref": "common.schema.json#/$defs/publicParameterName"
       },
       "additionalProperties": {
         "$ref": "common.schema.json#/$defs/publicParameterValue"

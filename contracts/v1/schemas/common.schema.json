@@ -13,7 +13,8 @@
     },
     "timestamp": {
       "type": "string",
-      "format": "date-time"
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
     },
     "relativePath": {
       "type": "string",
@@ -32,6 +33,10 @@
     "actorType": {
       "type": "string",
       "enum": ["human", "master", "system", "adapter"]
+    },
+    "publicParameterName": {
+      "type": "string",
+      "pattern": "^(?!.*(?:^|[._-])(?:api[_-]?key|access[_-]?token|auth(?:entication|orization)?|bearer|cookie|credential|password|private[_-]?key|secret|session[_-]?token)(?:$|[._-]))[a-z][a-z0-9_.-]{0,63}$"
     },
     "assetReference": {
       "type": "object",
@@ -67,7 +72,7 @@
           "type": "object",
           "maxProperties": 256,
           "propertyNames": {
-            "pattern": "^(?!(?:api[_-]?key|authorization|secret|password|cookie)$)[a-z][a-z0-9_.-]{0,63}$"
+            "$ref": "#/$defs/publicParameterName"
           },
           "additionalProperties": {
             "$ref": "#/$defs/publicParameterValue"

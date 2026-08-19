@@ -1,0 +1,43 @@
+{
+  "cases": [
+    {
+      "name": "current version is accepted",
+      "document_version": "1.0",
+      "consumer_supported_versions": ["1.0"],
+      "accepted": true
+    },
+    {
+      "name": "old consumer rejects unknown minor",
+      "document_version": "1.1",
+      "consumer_supported_versions": ["1.0"],
+      "accepted": false,
+      "error": "SCHEMA_VERSION_UNSUPPORTED"
+    },
+    {
+      "name": "upgraded consumer still accepts old minor",
+      "document_version": "1.0",
+      "consumer_supported_versions": ["1.0", "1.1"],
+      "accepted": true
+    },
+    {
+      "name": "consumer accepts new minor after its schema is deployed",
+      "document_version": "1.1",
+      "consumer_supported_versions": ["1.0", "1.1"],
+      "accepted": true
+    },
+    {
+      "name": "unknown major is rejected",
+      "document_version": "2.0",
+      "consumer_supported_versions": ["1.0", "1.1"],
+      "accepted": false,
+      "error": "SCHEMA_VERSION_UNSUPPORTED"
+    },
+    {
+      "name": "malformed version is rejected",
+      "document_version": "1",
+      "consumer_supported_versions": ["1.0"],
+      "accepted": false,
+      "error": "SCHEMA_VERSION_UNSUPPORTED"
+    }
+  ]
+}

@@ -20,6 +20,17 @@ SCHEMAS = CONTRACTS / "schemas"
 CATALOGS = CONTRACTS / "catalogs"
 PLAN_EXAMPLES = CONTRACTS / "examples" / "plans"
 OBJECT_EXAMPLES = CONTRACTS / "examples" / "objects"
+GOLDEN = ROOT / "tests" / "golden"
+
+ACTIVE_INSTANCE_STATUSES = {"READY", "STARTING", "RUNNING"}
+EXECUTING_INSTANCE_STATUSES = {"STARTING", "RUNNING"}
+WAITING_INSTANCE_STATUSES = {"WAITING_APPROVAL"}
+FAILED_INSTANCE_STATUSES = {"FAILED_TO_START", "FAILED", "CRASHED"}
+COMPLETED_INSTANCE_STATUSES = {"SUCCEEDED", "ARCHIVED"}
+SENSITIVE_PARAMETER_VALUE = re.compile(
+    r"^(?:basic\s+\S+|bearer\s+\S+|sk-[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9]{8,})$",
+    re.IGNORECASE,
+)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -45,17 +56,17 @@ REGISTRY = build_registry()
 FORMAT_CHECKER = FormatChecker()
 
 
-def is_rfc3339_datetime(value: object) -> bool:
+def is_rfc3339_utc_datetime(value: object) -> bool:
     if not isinstance(value, str):
         return True
     if re.fullmatch(
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
-        r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+        r"(?:\.\d+)?Z",
         value,
     ) is None:
         return False
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed.tzinfo is not None
+    return parsed.utcoffset() is not None and parsed.utcoffset().total_seconds() == 0
 
 
 def is_uri(value: object) -> bool:
@@ -65,7 +76,7 @@ def is_uri(value: object) -> bool:
 
 
 FORMAT_CHECKER.checks("date-time", raises=(TypeError, ValueError))(
-    is_rfc3339_datetime
+    is_rfc3339_utc_datetime
 )
 FORMAT_CHECKER.checks("uri", raises=(TypeError, ValueError))(is_uri)
 
@@ -84,6 +95,158 @@ def validate(schema_name: str, value: Any) -> None:
 
 class SemanticContractError(ValueError):
     pass
+
+
+def schema_version_is_supported(
+    document_version: str, supported_versions: list[str], version_pattern: str
+) -> bool:
+    return (
+        re.fullmatch(version_pattern, document_version) is not None
+        and document_version in supported_versions
+    )
+
+
+def validate_public_parameter_values(value: Any) -> None:
+    if isinstance(value, str) and SENSITIVE_PARAMETER_VALUE.fullmatch(value):
+        raise SemanticContractError("public task card contains a plaintext credential")
+    if isinstance(value, list):
+        for item in value:
+            validate_public_parameter_values(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            validate_public_parameter_values(item)
+
+
+def expected_stage_status(
+    stage: dict[str, Any],
+    stage_by_id: dict[str, dict[str, Any]],
+    instance_by_id: dict[str, dict[str, Any]],
+) -> str:
+    instances = [instance_by_id[item] for item in stage["instance_ids"]]
+    instance_statuses = {item["status"] for item in instances}
+
+    if stage["status"] == "CANCELLED":
+        if not instance_statuses.issubset({"CANCELLED", "SUPERSEDED", "ARCHIVED"}):
+            raise SemanticContractError("cancelled stage still has non-cancelled instances")
+        return "CANCELLED"
+    if stage["status"] == "SKIPPED":
+        if instance_statuses & (ACTIVE_INSTANCE_STATUSES | WAITING_INSTANCE_STATUSES):
+            raise SemanticContractError("skipped stage still has active instances")
+        return "SKIPPED"
+
+    dependencies_succeeded = all(
+        stage_by_id[dependency]["status"] == "SUCCEEDED"
+        for dependency in stage["depends_on"]
+    )
+    if not dependencies_succeeded:
+        return "PENDING"
+    if instance_statuses & EXECUTING_INSTANCE_STATUSES:
+        return "RUNNING"
+    if "READY" in instance_statuses:
+        return "READY"
+
+    required_instances = [item for item in instances if item["required"]]
+    required_statuses = {item["status"] for item in required_instances}
+    if required_statuses & WAITING_INSTANCE_STATUSES:
+        return "WAITING_APPROVAL"
+    if required_statuses & FAILED_INSTANCE_STATUSES:
+        return "FAILED"
+    if "UNAVAILABLE" in required_statuses:
+        return "UNAVAILABLE"
+
+    completion_set = required_instances or instances
+    if completion_set and all(
+        item["status"] in COMPLETED_INSTANCE_STATUSES for item in completion_set
+    ):
+        return "SUCCEEDED"
+    return "PENDING"
+
+
+def validate_task_aggregate(
+    task: dict[str, Any],
+    stages: list[dict[str, Any]],
+    instances: list[dict[str, Any]],
+) -> None:
+    task_status = task["status"]
+    instance_statuses = {item["status"] for item in instances}
+    stage_by_id = {item["stage_id"]: item for item in stages}
+
+    if task_status == "AWAITING_START_CONFIRMATION":
+        allowed_instances = {"CREATED", "READY", "UNAVAILABLE"}
+        allowed_stages = {"PENDING", "READY", "UNAVAILABLE"}
+        if (
+            task["start_policy"] != "manual"
+            or not instance_statuses.issubset(allowed_instances)
+            or not {item["status"] for item in stages}.issubset(allowed_stages)
+        ):
+            raise SemanticContractError(
+                "awaiting-start task contains activated child state"
+            )
+        return
+
+    if task_status in {"DRAFT", "PLANNED"}:
+        activated = (
+            EXECUTING_INSTANCE_STATUSES
+            | WAITING_INSTANCE_STATUSES
+            | FAILED_INSTANCE_STATUSES
+            | COMPLETED_INSTANCE_STATUSES
+        )
+        if instance_statuses & activated:
+            raise SemanticContractError("pre-activation task contains activated instances")
+        return
+
+    if task_status == "CANCELLED":
+        if instance_statuses & (ACTIVE_INSTANCE_STATUSES | WAITING_INSTANCE_STATUSES):
+            raise SemanticContractError("cancelled task still has active instances")
+        return
+
+    required_stages = [item for item in stages if item["required"]]
+    required_instances = [
+        item
+        for item in instances
+        if item["required"] and stage_by_id[item["stage_id"]]["required"]
+    ]
+    required_instance_statuses = {item["status"] for item in required_instances}
+
+    if instance_statuses & ACTIVE_INSTANCE_STATUSES or any(
+        item["status"] in {"READY", "RUNNING"} for item in required_stages
+    ):
+        expected = "RUNNING"
+    elif required_instance_statuses & WAITING_INSTANCE_STATUSES:
+        expected = "WAITING_APPROVAL"
+    elif required_instance_statuses & FAILED_INSTANCE_STATUSES or any(
+        item["status"] == "FAILED" for item in required_stages
+    ):
+        expected = "FAILED"
+    elif "UNAVAILABLE" in {item["status"] for item in required_stages}:
+        expected = "BLOCKED_UNAVAILABLE"
+    elif any(item["status"] == "PENDING" for item in required_stages):
+        expected = "RUNNING"
+    elif all(item["status"] == "SUCCEEDED" for item in required_stages) and all(
+        item["status"] in COMPLETED_INSTANCE_STATUSES for item in required_instances
+    ):
+        if task_status == "PARTIAL":
+            has_incomplete_optional = any(
+                not item["required"] and item["status"] != "SUCCEEDED"
+                for item in stages
+            ) or any(
+                not item["required"]
+                and item["status"] not in COMPLETED_INSTANCE_STATUSES
+                for item in instances
+            )
+            if not has_incomplete_optional:
+                raise SemanticContractError(
+                    "partial task has no downgraded or incomplete optional child"
+                )
+            return
+        expected = "SUCCEEDED"
+    else:
+        raise SemanticContractError("task children do not form an aggregatable state")
+
+    if task_status != expected:
+        raise SemanticContractError(
+            f"task status {task_status} does not match aggregate {expected}"
+        )
 
 
 def validate_usage_semantics(usage: dict[str, Any]) -> None:
@@ -150,9 +313,14 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
     if positions != list(range(1, len(stages) + 1)):
         raise SemanticContractError("stage positions must be unique and contiguous")
 
+    topology = tuple(stage["type"] for stage in stages)
+    if topology not in {("image",), ("ppt",), ("image", "ppt")}:
+        raise SemanticContractError(f"unsupported task topology: {topology}")
+
     position_by_stage = {
         stage["stage_id"]: stage["position"] for stage in stages
     }
+    stage_by_id = {stage["stage_id"]: stage for stage in stages}
     for stage in stages:
         if stage["task_id"] != task_id:
             raise SemanticContractError("stage belongs to another task")
@@ -161,6 +329,13 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
                 raise SemanticContractError("stage dependency does not exist")
             if position_by_stage[dependency] >= stage["position"]:
                 raise SemanticContractError("stage dependency must point backward")
+
+    if stages[0]["depends_on"]:
+        raise SemanticContractError("first stage cannot have dependencies")
+    if topology == ("image", "ppt") and stages[1]["depends_on"] != [
+        stages[0]["stage_id"]
+    ]:
+        raise SemanticContractError("image-to-ppt must use the canonical dependency")
 
     instance_by_id = {item["instance_id"]: item for item in instances}
     if len(instance_by_id) != len(instances):
@@ -185,6 +360,15 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
     if declared_instance_ids != set(instance_by_id):
         raise SemanticContractError("plan contains an undeclared instance")
 
+    for stage in stages:
+        aggregate = expected_stage_status(stage, stage_by_id, instance_by_id)
+        if stage["status"] != aggregate:
+            raise SemanticContractError(
+                f"stage {stage['stage_id']} status {stage['status']} "
+                f"does not match aggregate {aggregate}"
+            )
+    validate_task_aggregate(task, stages, instances)
+
     card_by_instance = {item["instance_id"]: item for item in cards}
     if len(card_by_instance) != len(cards):
         raise SemanticContractError("an instance has multiple task cards")
@@ -199,6 +383,7 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
             raise SemanticContractError("task card stage reference is inconsistent")
         if card["agent_type"] != instance["agent_type"]:
             raise SemanticContractError("task card type differs from instance type")
+        validate_public_parameter_values(card["parameters"])
         for asset_ref in card["input_assets"]:
             if not asset_ref["manifest_relpath"].startswith(
                 "resources/manifests/"
@@ -312,11 +497,66 @@ class TopologyTests(unittest.TestCase):
         with self.assertRaisesRegex(SemanticContractError, "does not exist"):
             validate_plan_semantics(plan)
 
+    def test_ppt_to_image_and_duplicate_stage_topologies_are_rejected(self) -> None:
+        for topology in [("ppt", "image"), ("image", "image")]:
+            with self.subTest(topology=topology):
+                plan = copy.deepcopy(self.image_to_ppt)
+                for index, agent_type in enumerate(topology):
+                    plan["stages"][index]["type"] = agent_type
+                    plan["instances"][index]["agent_type"] = agent_type
+                    plan["task_cards"][index]["agent_type"] = agent_type
+                with self.assertRaisesRegex(
+                    SemanticContractError, "unsupported task topology"
+                ):
+                    validate_plan_semantics(plan)
+
     def test_cross_task_instance_reference_is_rejected(self) -> None:
         plan = copy.deepcopy(self.image_only)
         plan["instances"][0]["task_id"] = "t_other"
         with self.assertRaisesRegex(SemanticContractError, "another task"):
             validate_plan_semantics(plan)
+
+
+class AggregateStateTests(unittest.TestCase):
+    def test_succeeded_task_with_ready_children_is_rejected(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-only.json")
+        plan["task"]["status"] = "SUCCEEDED"
+        with self.assertRaisesRegex(SemanticContractError, "task status SUCCEEDED"):
+            validate_plan_semantics(plan)
+
+    def test_stage_status_must_match_instance_aggregate(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
+        plan["stages"][0]["status"] = "SUCCEEDED"
+        with self.assertRaisesRegex(SemanticContractError, "stage s_visual status"):
+            validate_plan_semantics(plan)
+
+    def test_required_ppt_blocks_only_after_image_stage_finishes(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
+        plan["instances"][0]["status"] = "SUCCEEDED"
+        plan["stages"][0]["status"] = "SUCCEEDED"
+        plan["stages"][1]["status"] = "UNAVAILABLE"
+        plan["task"]["status"] = "BLOCKED_UNAVAILABLE"
+        validate_plan_semantics(plan)
+
+        plan["task"]["status"] = "SUCCEEDED"
+        with self.assertRaisesRegex(
+            SemanticContractError, "does not match aggregate BLOCKED_UNAVAILABLE"
+        ):
+            validate_plan_semantics(plan)
+
+    def test_running_work_has_priority_over_waiting_approval(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-only.json")
+        plan["task"]["status"] = "RUNNING"
+        plan["stages"][0]["status"] = "RUNNING"
+        plan["instances"][0]["status"] = "WAITING_APPROVAL"
+        plan["instances"][1]["status"] = "RUNNING"
+        plan["instances"][2]["status"] = "SUCCEEDED"
+        validate_plan_semantics(plan)
+
+        plan["instances"][1]["status"] = "SUCCEEDED"
+        plan["stages"][0]["status"] = "WAITING_APPROVAL"
+        plan["task"]["status"] = "WAITING_APPROVAL"
+        validate_plan_semantics(plan)
 
 
 class BoundaryTests(unittest.TestCase):
@@ -348,6 +588,29 @@ class BoundaryTests(unittest.TestCase):
         card["parameters"]["api_key"] = "must-not-be-public"
         with self.assertRaises(ValidationError):
             validate("task-card.schema.json", card)
+
+        card = copy.deepcopy(plan["task_cards"][0])
+        card["parameters"]["openai_api_key"] = "sk-plaintext-secret"
+        with self.assertRaises(ValidationError):
+            validate("task-card.schema.json", card)
+
+        card = copy.deepcopy(plan["task_cards"][0])
+        card["parameters"]["provider"] = {
+            "session_token": "must-not-be-public"
+        }
+        with self.assertRaises(ValidationError):
+            validate("task-card.schema.json", card)
+
+        secret_plan = copy.deepcopy(plan)
+        secret_plan["task_cards"][0]["parameters"]["model_hint"] = (
+            "sk-plaintext-secret"
+        )
+        with self.assertRaisesRegex(SemanticContractError, "plaintext credential"):
+            validate_plan_semantics(secret_plan)
+
+        card = copy.deepcopy(plan["task_cards"][0])
+        card["parameters"]["author_name"] = "design-team"
+        validate("task-card.schema.json", card)
 
         card = copy.deepcopy(plan["task_cards"][0])
         card["parameters"]["output_dir"] = "/etc"
@@ -407,6 +670,16 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate("main-task.schema.json", task)
 
+        for timestamp in [
+            "2026-08-20T00:00:00+08:00",
+            "2026-08-19T16:00:00+00:00",
+        ]:
+            with self.subTest(timestamp=timestamp):
+                task = copy.deepcopy(plan["task"])
+                task["created_at"] = timestamp
+                with self.assertRaises(ValidationError):
+                    validate("main-task.schema.json", task)
+
         instance = copy.deepcopy(plan["instances"][0])
         instance["ui_url"] = "file:///etc/passwd"
         with self.assertRaises(ValidationError):
@@ -462,6 +735,18 @@ class CatalogTests(unittest.TestCase):
                 for terminal in section["terminal"]:
                     self.assertEqual(section["transitions"][terminal], [])
 
+    def test_status_transitions_match_frozen_rfc_golden_table(self) -> None:
+        catalog = load_json(CATALOGS / "status-codes.json")
+        golden = load_json(GOLDEN / "status-transitions-v1.0.json")
+        actual = {
+            domain: {
+                "terminal": catalog[domain]["terminal"],
+                "transitions": catalog[domain]["transitions"],
+            }
+            for domain in self.STATUS_SCHEMA_BY_DOMAIN
+        }
+        self.assertEqual(actual, golden)
+
     def test_error_codes_are_unique_stable_machine_codes(self) -> None:
         catalog = load_json(CATALOGS / "error-codes.json")
         errors = catalog["errors"]
@@ -489,6 +774,66 @@ class CatalogTests(unittest.TestCase):
                 item["http_status"] in {400, 404, 409, 422, 500}
                 for item in errors
             )
+        )
+
+
+class VersionCompatibilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.catalog = load_json(CATALOGS / "schema-versions.json")
+
+    def test_compatibility_matrix(self) -> None:
+        matrix = load_json(GOLDEN / "version-compatibility-cases.json")
+        for case in matrix["cases"]:
+            with self.subTest(case=case["name"]):
+                accepted = schema_version_is_supported(
+                    case["document_version"],
+                    case["consumer_supported_versions"],
+                    self.catalog["version_pattern"],
+                )
+                self.assertEqual(accepted, case["accepted"])
+                if not accepted:
+                    self.assertEqual(
+                        case["error"], self.catalog["unknown_minor_version_error"]
+                    )
+
+    def test_unknown_minor_is_rejected_by_current_schema(self) -> None:
+        task = load_json(PLAN_EXAMPLES / "image-only.json")["task"]
+        task["schema_version"] = "1.1"
+        self.assertFalse(
+            schema_version_is_supported(
+                task["schema_version"],
+                self.catalog["supported_schema_versions"],
+                self.catalog["version_pattern"],
+            )
+        )
+        with self.assertRaises(ValidationError):
+            validate("main-task.schema.json", task)
+
+    def test_consumer_first_minor_rollout_keeps_old_examples_valid(self) -> None:
+        supported_during_rollout = ["1.0", "1.1"]
+        for path in sorted((CONTRACTS / "examples").rglob("*.json")):
+            with self.subTest(example=path.relative_to(CONTRACTS)):
+                document = load_json(path)
+                self.assertTrue(
+                    schema_version_is_supported(
+                        document["schema_version"],
+                        supported_during_rollout,
+                        self.catalog["version_pattern"],
+                    )
+                )
+
+    def test_state_machine_semantics_require_major_version(self) -> None:
+        self.assertIn(
+            "change_state_machine_semantics",
+            self.catalog["major_required_changes"],
+        )
+        self.assertNotIn(
+            "change_state_machine_semantics",
+            self.catalog["minor_allowed_changes"],
+        )
+        self.assertEqual(self.catalog["rollout_order"], ["consumer", "producer"])
+        self.assertEqual(
+            self.catalog["acceptance_policy"], "exact_supported_versions"
         )
 
 

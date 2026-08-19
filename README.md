@@ -15,16 +15,15 @@
 
 ## 自测
 
-需要 Python 3.10+。
+需要 Python 3.10+ 及 pip。统一入口会把锁定的测试依赖安装到仓库内隔离目录，不依赖系统 `venv` 包：
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-dev.txt
-python -m unittest discover -s tests -v
+make test
 ```
 
-测试不仅验证示例能通过 JSON Schema，还验证阶段依赖、实例归属、任务卡引用、三种计划拓扑、状态目录同步、相对路径安全和 Token 汇总不变量。
+默认解释器为 `python3`，可用 `make test PYTHON=/path/to/python3` 覆盖；隔离依赖目录也可用 `TEST_DEPS=/path/to/test-deps` 覆盖。
+
+测试不仅验证示例能通过 JSON Schema，还验证阶段依赖、实例归属、任务卡引用、三种计划拓扑白名单、阶段/任务聚合状态、状态转换金表、凭据边界、UTC、版本兼容性、相对路径安全和 Token 汇总不变量。
 
 ## 版本规则
 
