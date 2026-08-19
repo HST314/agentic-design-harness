@@ -22,6 +22,11 @@
       "position": 1,
       "depends_on": [],
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": "2026-08-19T16:10:01Z",
+        "authorized_downgrade": null
+      },
       "status": "UNAVAILABLE",
       "instance_ids": ["i_ppt_only"]
     }
@@ -34,6 +39,11 @@
       "stage_id": "s_ppt",
       "agent_type": "ppt",
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": "2026-08-19T16:10:01Z",
+        "authorized_downgrade": null
+      },
       "status": "UNAVAILABLE",
       "approval_mode": "human",
       "config_revision": 1,

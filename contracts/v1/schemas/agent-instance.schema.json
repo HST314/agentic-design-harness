@@ -11,6 +11,7 @@
     "stage_id",
     "agent_type",
     "required",
+    "requirement_lifecycle",
     "status",
     "approval_mode",
     "config_revision",
@@ -40,6 +41,9 @@
     },
     "required": {
       "type": "boolean"
+    },
+    "requirement_lifecycle": {
+      "$ref": "common.schema.json#/$defs/requirementLifecycle"
     },
     "status": {
       "type": "string",

@@ -34,6 +34,10 @@
       "type": "string",
       "enum": ["human", "master", "system", "adapter"]
     },
+    "credentialSafeText": {
+      "type": "string",
+      "pattern": "^(?![\\s\\S]*(?:[Bb][Aa][Ss][Ii][Cc]\\s+\\S+|[Bb][Ee][Aa][Rr][Ee][Rr]\\s+\\S+|[Ss][Kk]-[A-Za-z0-9_-]{8,}|[Gg][Hh][PpOoUuSsRr]_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|(?:^|[^A-Fa-f0-9])[A-Fa-f0-9]{32,64}(?:$|[^A-Fa-f0-9])|(?:[Aa][Pp][Ii]|[Ss][Uu][Bb][Ss][Cc][Rr][Ii][Pp][Tt][Ii][Oo][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee])[_. -]?[Kk][Ee][Yy]\\s*[:=]\\s*\\S{8,}))[\\s\\S]*$"
+    },
     "publicParameterName": {
       "type": "string",
       "pattern": "^(?!.*(?:^|[._-])(?:api[_-]?key|access[_-]?token|auth(?:entication|orization)?|bearer|cookie|credential|password|private[_-]?key|secret|session[_-]?token)(?:$|[._-]))[a-z][a-z0-9_.-]{0,63}$"
@@ -76,6 +80,91 @@
           },
           "additionalProperties": {
             "$ref": "#/$defs/publicParameterValue"
+          }
+        }
+      ]
+    },
+    "authorizedDowngrade": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorization_id",
+        "authorized_at",
+        "authorized_by_type",
+        "authorized_by_id",
+        "plan_revision",
+        "reason"
+      ],
+      "properties": {
+        "authorization_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "authorized_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "authorized_by_type": {
+          "type": "string",
+          "enum": ["human", "master"]
+        },
+        "authorized_by_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "reason": {
+          "$ref": "#/$defs/credentialSafeText",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "requirementLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "original_required",
+        "first_activated_at",
+        "authorized_downgrade"
+      ],
+      "properties": {
+        "original_required": {
+          "type": "boolean"
+        },
+        "first_activated_at": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/timestamp"}
+          ]
+        },
+        "authorized_downgrade": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/authorizedDowngrade"}
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "original_required": {"const": false},
+            "authorized_downgrade": {"type": "null"}
+          }
+        },
+        {
+          "properties": {
+            "original_required": {"const": true},
+            "authorized_downgrade": {"type": "null"}
+          }
+        },
+        {
+          "properties": {
+            "original_required": {"const": true},
+            "first_activated_at": {"$ref": "#/$defs/timestamp"},
+            "authorized_downgrade": {
+              "$ref": "#/$defs/authorizedDowngrade"
+            }
           }
         }
       ]

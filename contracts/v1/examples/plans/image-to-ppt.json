@@ -22,6 +22,11 @@
       "position": 1,
       "depends_on": [],
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": "2026-08-19T16:20:05Z",
+        "authorized_downgrade": null
+      },
       "status": "RUNNING",
       "instance_ids": ["i_visual"]
     },
@@ -33,6 +38,11 @@
       "position": 2,
       "depends_on": ["s_visual"],
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": null,
+        "authorized_downgrade": null
+      },
       "status": "PENDING",
       "instance_ids": ["i_deck"]
     }
@@ -45,6 +55,11 @@
       "stage_id": "s_visual",
       "agent_type": "image",
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": "2026-08-19T16:20:05Z",
+        "authorized_downgrade": null
+      },
       "status": "RUNNING",
       "approval_mode": "master",
       "config_revision": 1,
@@ -69,6 +84,11 @@
       "stage_id": "s_deck",
       "agent_type": "ppt",
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": null,
+        "authorized_downgrade": null
+      },
       "status": "UNAVAILABLE",
       "approval_mode": "human",
       "config_revision": 1,

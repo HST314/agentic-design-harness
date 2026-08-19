@@ -27,8 +27,14 @@ EXECUTING_INSTANCE_STATUSES = {"STARTING", "RUNNING"}
 WAITING_INSTANCE_STATUSES = {"WAITING_APPROVAL"}
 FAILED_INSTANCE_STATUSES = {"FAILED_TO_START", "FAILED", "CRASHED"}
 COMPLETED_INSTANCE_STATUSES = {"SUCCEEDED", "ARCHIVED"}
-SENSITIVE_PARAMETER_VALUE = re.compile(
-    r"^(?:basic\s+\S+|bearer\s+\S+|sk-[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9]{8,})$",
+PLAINTEXT_CREDENTIAL = re.compile(
+    r"(?:\b(?:basic|bearer)\s+\S+"
+    r"|\bsk-[a-z0-9_-]{8,}\b"
+    r"|\bgh[pousr]_[a-z0-9]{8,}\b"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\bAIza[0-9A-Za-z_-]{20,}\b"
+    r"|(?<![a-f0-9])[a-f0-9]{32,64}(?![a-f0-9])"
+    r"|(?:api|subscription|access|private)[_. -]?key\s*[:=]\s*\S{8,})",
     re.IGNORECASE,
 )
 
@@ -106,15 +112,75 @@ def schema_version_is_supported(
     )
 
 
-def validate_public_parameter_values(value: Any) -> None:
-    if isinstance(value, str) and SENSITIVE_PARAMETER_VALUE.fullmatch(value):
+def validate_task_card_credentials(value: Any) -> None:
+    """Reject credential-shaped text anywhere in a serialized public TaskCard."""
+
+    if isinstance(value, str) and PLAINTEXT_CREDENTIAL.search(value):
         raise SemanticContractError("public task card contains a plaintext credential")
     if isinstance(value, list):
         for item in value:
-            validate_public_parameter_values(item)
+            validate_task_card_credentials(item)
     elif isinstance(value, dict):
         for item in value.values():
-            validate_public_parameter_values(item)
+            validate_task_card_credentials(item)
+
+
+def validate_requirement_lifecycle(
+    item: dict[str, Any], plan_revision: int
+) -> bool:
+    """Validate frozen original/activation facts and return downgrade evidence."""
+
+    lifecycle = item["requirement_lifecycle"]
+    original_required = lifecycle["original_required"]
+    first_activated_at = lifecycle["first_activated_at"]
+    downgrade = lifecycle["authorized_downgrade"]
+
+    activated_statuses = (
+        {"RUNNING", "WAITING_APPROVAL", "SUCCEEDED", "FAILED"}
+        if "type" in item
+        else {
+            "STARTING",
+            "RUNNING",
+            "WAITING_APPROVAL",
+            "FAILED_TO_START",
+            "SUCCEEDED",
+            "FAILED",
+            "CRASHED",
+        }
+    )
+    if item["status"] in activated_statuses and first_activated_at is None:
+        raise SemanticContractError("activated child lacks first activation fact")
+
+    if original_required is False:
+        if item["required"] is True:
+            raise SemanticContractError("an originally optional child became required")
+        if downgrade is not None:
+            raise SemanticContractError(
+                "an originally optional child cannot carry downgrade authorization"
+            )
+        return False
+
+    if item["required"] is True:
+        if downgrade is not None:
+            raise SemanticContractError(
+                "a currently required child cannot carry downgrade authorization"
+            )
+        return False
+
+    if first_activated_at is None or downgrade is None:
+        raise SemanticContractError(
+            "an originally required child needs activation and authorized downgrade facts"
+        )
+    if downgrade["plan_revision"] > plan_revision:
+        raise SemanticContractError("downgrade revision exceeds the task plan revision")
+
+    activated_at = datetime.fromisoformat(first_activated_at.replace("Z", "+00:00"))
+    authorized_at = datetime.fromisoformat(
+        downgrade["authorized_at"].replace("Z", "+00:00")
+    )
+    if authorized_at < activated_at:
+        raise SemanticContractError("downgrade authorization predates activation")
+    return True
 
 
 def expected_stage_status(
@@ -166,6 +232,7 @@ def validate_task_aggregate(
     task: dict[str, Any],
     stages: list[dict[str, Any]],
     instances: list[dict[str, Any]],
+    has_authorized_downgrade: bool,
 ) -> None:
     task_status = task["status"]
     instance_statuses = {item["status"] for item in instances}
@@ -225,21 +292,7 @@ def validate_task_aggregate(
     elif all(item["status"] == "SUCCEEDED" for item in required_stages) and all(
         item["status"] in COMPLETED_INSTANCE_STATUSES for item in required_instances
     ):
-        if task_status == "PARTIAL":
-            has_incomplete_optional = any(
-                not item["required"] and item["status"] != "SUCCEEDED"
-                for item in stages
-            ) or any(
-                not item["required"]
-                and item["status"] not in COMPLETED_INSTANCE_STATUSES
-                for item in instances
-            )
-            if not has_incomplete_optional:
-                raise SemanticContractError(
-                    "partial task has no downgraded or incomplete optional child"
-                )
-            return
-        expected = "SUCCEEDED"
+        expected = "PARTIAL" if has_authorized_downgrade else "SUCCEEDED"
     else:
         raise SemanticContractError("task children do not form an aggregatable state")
 
@@ -360,6 +413,12 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
     if declared_instance_ids != set(instance_by_id):
         raise SemanticContractError("plan contains an undeclared instance")
 
+    downgrade_evidence = [
+        validate_requirement_lifecycle(item, task["plan_revision"])
+        for item in [*stages, *instances]
+    ]
+    has_authorized_downgrade = any(downgrade_evidence)
+
     for stage in stages:
         aggregate = expected_stage_status(stage, stage_by_id, instance_by_id)
         if stage["status"] != aggregate:
@@ -367,7 +426,9 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
                 f"stage {stage['stage_id']} status {stage['status']} "
                 f"does not match aggregate {aggregate}"
             )
-    validate_task_aggregate(task, stages, instances)
+    validate_task_aggregate(
+        task, stages, instances, has_authorized_downgrade
+    )
 
     card_by_instance = {item["instance_id"]: item for item in cards}
     if len(card_by_instance) != len(cards):
@@ -383,7 +444,7 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
             raise SemanticContractError("task card stage reference is inconsistent")
         if card["agent_type"] != instance["agent_type"]:
             raise SemanticContractError("task card type differs from instance type")
-        validate_public_parameter_values(card["parameters"])
+        validate_task_card_credentials(card)
         for asset_ref in card["input_assets"]:
             if not asset_ref["manifest_relpath"].startswith(
                 "resources/manifests/"
@@ -518,6 +579,17 @@ class TopologyTests(unittest.TestCase):
 
 
 class AggregateStateTests(unittest.TestCase):
+    def test_activated_child_requires_first_activation_fact(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
+        plan["instances"][0]["requirement_lifecycle"][
+            "first_activated_at"
+        ] = None
+        validate("task-plan.schema.json", plan)
+        with self.assertRaisesRegex(
+            SemanticContractError, "activated child lacks first activation fact"
+        ):
+            validate_plan_semantics(plan)
+
     def test_succeeded_task_with_ready_children_is_rejected(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-only.json")
         plan["task"]["status"] = "SUCCEEDED"
@@ -551,12 +623,83 @@ class AggregateStateTests(unittest.TestCase):
         plan["instances"][0]["status"] = "WAITING_APPROVAL"
         plan["instances"][1]["status"] = "RUNNING"
         plan["instances"][2]["status"] = "SUCCEEDED"
+        for item in [*plan["stages"], *plan["instances"]]:
+            item["requirement_lifecycle"]["first_activated_at"] = (
+                "2026-08-19T16:01:00Z"
+            )
         validate_plan_semantics(plan)
 
         plan["instances"][1]["status"] = "SUCCEEDED"
         plan["stages"][0]["status"] = "WAITING_APPROVAL"
         plan["task"]["status"] = "WAITING_APPROVAL"
         validate_plan_semantics(plan)
+
+    def test_initial_optional_ppt_does_not_make_task_partial(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
+        plan["instances"][0]["status"] = "SUCCEEDED"
+        plan["stages"][0]["status"] = "SUCCEEDED"
+
+        ppt_stage = plan["stages"][1]
+        ppt_stage["required"] = False
+        ppt_stage["requirement_lifecycle"] = {
+            "original_required": False,
+            "first_activated_at": None,
+            "authorized_downgrade": None,
+        }
+        ppt_stage["status"] = "SKIPPED"
+
+        ppt_instance = plan["instances"][1]
+        ppt_instance["required"] = False
+        ppt_instance["requirement_lifecycle"] = copy.deepcopy(
+            ppt_stage["requirement_lifecycle"]
+        )
+
+        plan["task"]["status"] = "PARTIAL"
+        validate("task-plan.schema.json", plan)
+        with self.assertRaisesRegex(
+            SemanticContractError,
+            "task status PARTIAL does not match aggregate SUCCEEDED",
+        ):
+            validate_plan_semantics(plan)
+
+        plan["task"]["status"] = "SUCCEEDED"
+        validate_plan_semantics(plan)
+
+    def test_partial_requires_activated_authorized_downgrade(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
+        plan["task"]["status"] = "PARTIAL"
+        plan["task"]["plan_revision"] = 2
+        plan["instances"][0]["status"] = "SUCCEEDED"
+        plan["stages"][0]["status"] = "SUCCEEDED"
+
+        downgrade = {
+            "authorization_id": "auth_ppt_downgrade",
+            "authorized_at": "2026-08-19T16:25:00Z",
+            "authorized_by_type": "master",
+            "authorized_by_id": "master_default",
+            "plan_revision": 2,
+            "reason": "PPT adapter unavailable; retain completed image delivery.",
+        }
+        for item in (plan["stages"][1], plan["instances"][1]):
+            item["required"] = False
+            item["requirement_lifecycle"] = {
+                "original_required": True,
+                "first_activated_at": "2026-08-19T16:24:00Z",
+                "authorized_downgrade": copy.deepcopy(downgrade),
+            }
+        plan["stages"][1]["status"] = "SKIPPED"
+
+        validate("task-plan.schema.json", plan)
+        validate_plan_semantics(plan)
+
+        plan["stages"][1]["requirement_lifecycle"][
+            "authorized_downgrade"
+        ] = None
+        with self.assertRaisesRegex(
+            SemanticContractError,
+            "needs activation and authorized downgrade facts",
+        ):
+            validate_plan_semantics(plan)
 
 
 class BoundaryTests(unittest.TestCase):
@@ -582,40 +725,53 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate("agent-instance.schema.json", instance)
 
-    def test_task_card_parameters_reject_secrets_and_host_paths(self) -> None:
+    def test_task_card_uses_agent_parameter_whitelists(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-only.json")
         card = copy.deepcopy(plan["task_cards"][0])
-        card["parameters"]["api_key"] = "must-not-be-public"
-        with self.assertRaises(ValidationError):
-            validate("task-card.schema.json", card)
-
-        card = copy.deepcopy(plan["task_cards"][0])
-        card["parameters"]["openai_api_key"] = "sk-plaintext-secret"
-        with self.assertRaises(ValidationError):
-            validate("task-card.schema.json", card)
-
-        card = copy.deepcopy(plan["task_cards"][0])
-        card["parameters"]["provider"] = {
-            "session_token": "must-not-be-public"
-        }
-        with self.assertRaises(ValidationError):
-            validate("task-card.schema.json", card)
-
-        secret_plan = copy.deepcopy(plan)
-        secret_plan["task_cards"][0]["parameters"]["model_hint"] = (
-            "sk-plaintext-secret"
-        )
-        with self.assertRaisesRegex(SemanticContractError, "plaintext credential"):
-            validate_plan_semantics(secret_plan)
-
-        card = copy.deepcopy(plan["task_cards"][0])
-        card["parameters"]["author_name"] = "design-team"
-        validate("task-card.schema.json", card)
+        for forbidden_name in (
+            "api_key",
+            "openai_api_key",
+            "subscription_key",
+            "author_name",
+            "slide_count",
+        ):
+            with self.subTest(forbidden_name=forbidden_name):
+                rejected = copy.deepcopy(card)
+                rejected["parameters"][forbidden_name] = "must-not-be-public"
+                with self.assertRaises(ValidationError):
+                    validate("task-card.schema.json", rejected)
 
         card = copy.deepcopy(plan["task_cards"][0])
         card["parameters"]["output_dir"] = "/etc"
         with self.assertRaises(ValidationError):
             validate("task-card.schema.json", card)
+
+        validate("task-card.schema.json", plan["task_cards"][0])
+        validate(
+            "task-card.schema.json",
+            load_json(PLAN_EXAMPLES / "ppt-only.json")["task_cards"][0],
+        )
+
+    def test_task_card_rejects_credentials_outside_parameters(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-only.json")
+
+        card = copy.deepcopy(plan["task_cards"][0])
+        card["instructions"].append("Use sk-plaintext-secret for this request")
+        with self.assertRaises(ValidationError):
+            validate("task-card.schema.json", card)
+
+        card = copy.deepcopy(plan["task_cards"][0])
+        card["objective"] = "Use Azure key 0123456789abcdef0123456789abcdef"
+        with self.assertRaises(ValidationError):
+            validate("task-card.schema.json", card)
+
+        secret_plan = copy.deepcopy(plan)
+        secret_plan["task_cards"][0]["input_assets"][0][
+            "asset_id"
+        ] = "sk-plaintext-secret"
+        validate("task-plan.schema.json", secret_plan)
+        with self.assertRaisesRegex(SemanticContractError, "plaintext credential"):
+            validate_plan_semantics(secret_plan)
 
     def test_published_asset_requires_provenance(self) -> None:
         asset = load_json(OBJECT_EXAMPLES / "published-asset.json")

@@ -22,6 +22,11 @@
       "position": 1,
       "depends_on": [],
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": null,
+        "authorized_downgrade": null
+      },
       "status": "READY",
       "instance_ids": ["i_wall_1", "i_wall_2", "i_wall_3"]
     }
@@ -34,6 +39,11 @@
       "stage_id": "s_image",
       "agent_type": "image",
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": null,
+        "authorized_downgrade": null
+      },
       "status": "READY",
       "approval_mode": "human",
       "config_revision": 1,
@@ -52,6 +62,11 @@
       "stage_id": "s_image",
       "agent_type": "image",
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": null,
+        "authorized_downgrade": null
+      },
       "status": "READY",
       "approval_mode": "human",
       "config_revision": 1,
@@ -70,6 +85,11 @@
       "stage_id": "s_image",
       "agent_type": "image",
       "required": true,
+      "requirement_lifecycle": {
+        "original_required": true,
+        "first_activated_at": null,
+        "authorized_downgrade": null
+      },
       "status": "READY",
       "approval_mode": "master",
       "config_revision": 1,

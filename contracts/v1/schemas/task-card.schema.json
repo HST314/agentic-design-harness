@@ -43,14 +43,14 @@
       "$ref": "common.schema.json#/$defs/agentType"
     },
     "objective": {
-      "type": "string",
+      "$ref": "common.schema.json#/$defs/credentialSafeText",
       "minLength": 1,
       "maxLength": 20000
     },
     "instructions": {
       "type": "array",
       "items": {
-        "type": "string",
+        "$ref": "common.schema.json#/$defs/credentialSafeText",
         "minLength": 1,
         "maxLength": 10000
       }
@@ -74,7 +74,7 @@
             "enum": ["image", "presentation", "document", "archive", "other"]
           },
           "role": {
-            "type": "string",
+            "$ref": "common.schema.json#/$defs/credentialSafeText",
             "minLength": 1,
             "maxLength": 128
           },
@@ -94,19 +94,60 @@
       }
     },
     "parameters": {
-      "type": "object",
-      "propertyNames": {
-        "$ref": "common.schema.json#/$defs/publicParameterName"
-      },
-      "additionalProperties": {
-        "$ref": "common.schema.json#/$defs/publicParameterValue"
-      }
+      "type": "object"
     },
     "retry_group_id": {
       "$ref": "common.schema.json#/$defs/identifier"
     },
     "created_at": {
       "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "agent_type": {"const": "image"},
+        "parameters": {"$ref": "#/$defs/imageParameters"}
+      }
+    },
+    {
+      "properties": {
+        "agent_type": {"const": "ppt"},
+        "parameters": {"$ref": "#/$defs/pptParameters"}
+      }
+    }
+  ],
+  "$defs": {
+    "imageParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "aspect_ratio": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,3}:[1-9][0-9]{0,3}$"
+        },
+        "variants": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "pptParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "slide_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "planned_asset_role": {
+          "$ref": "common.schema.json#/$defs/credentialSafeText",
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,127}$"
+        }
+      }
     }
   }
 }
