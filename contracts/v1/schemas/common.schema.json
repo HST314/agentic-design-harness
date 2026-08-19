@@ -80,12 +80,6 @@
           }
         },
         {
-          "$comment": "hex_secret",
-          "not": {
-            "pattern": "(?:^|[^A-Fa-f0-9])[A-Fa-f0-9]{32,64}(?:$|[^A-Fa-f0-9])"
-          }
-        },
-        {
           "$comment": "private_key_header",
           "not": {
             "pattern": "-----[Bb][Ee][Gg][Ii][Nn](?: [A-Za-z0-9]+)? [Pp][Rr][Ii][Vv][Aa][Tt][Ee] [Kk][Ee][Yy]-----"

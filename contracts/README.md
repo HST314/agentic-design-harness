@@ -26,7 +26,7 @@
 - `UNAVAILABLE` 是否已触发以持久化的 `first_activated_at` 事实为准，不从当前 Task 终态反推；`BLOCKED_UNAVAILABLE` 的阻塞项必须携带激活事实，仍等待前置依赖或人工确认启动前取消的占位可保持 `first_activated_at = null`，且不得据此提前聚合为阻塞；
 - 任务卡只能引用 `asset_id + manifest_relpath`，不能传宿主机绝对路径；
 - TaskCard 的公开参数采用 Agent 类型正向白名单：Image 仅允许 `aspect_ratio` / `variants`，PPT 仅允许 `slide_count` / `planned_asset_role`；未知参数和跨 Agent 参数均拒绝；
-- TaskCard 的 `objective` / `instructions` 在 Schema 层拒绝常见明文 Key 形态；组合契约按 `credential-detection-policy.json` 递归扫描整个 TaskCard（含字段名和嵌套值）。来自凭据对、环境变量、密钥存储或受信请求密钥字段的值必须携带不可直接 JSON 序列化的 `sensitive_value` 内部标记，公开序列化器遇到标记即拒绝；Provider 格式与显式凭据赋值规则作为纵深防线。策略不再仅凭字符熵猜测秘密，因此 base36 Key 由敏感来源标记阻断，业务单号、素材 ID 和长文件名不会因字符分布被误拒；
+- TaskCard 的 `objective` / `instructions` 在 Schema 层拒绝常见明文 Key 形态；组合契约按 `credential-detection-policy.json` 递归扫描整个 TaskCard（含字段名和嵌套值）。来自凭据对、环境变量、密钥存储或受信请求密钥字段的值必须携带不可直接 JSON 序列化的 `sensitive_value` 内部标记，公开序列化器遇到标记即拒绝；Provider 格式与显式凭据赋值规则作为纵深防线。策略不再仅凭字符分布或裸十六进制格式猜测秘密，因此 base36/hex Key 由敏感来源标记或显式凭据赋值上下文阻断，业务单号、32/64 位十六进制素材 ID、摘要文件名和普通长文件名不会被无上下文误拒；
 - 已发布资产由最终文件实测 MIME、大小和 SHA-256，且记录发布来源；
 - API Key 明文不会出现在任何公开契约中；
 - 所有时间戳使用 RFC3339 的 UTC `Z` 表示，非 UTC 偏移量不被接受；

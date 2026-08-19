@@ -28,6 +28,8 @@ EXECUTING_INSTANCE_STATUSES = {"STARTING", "RUNNING"}
 WAITING_INSTANCE_STATUSES = {"WAITING_APPROVAL"}
 FAILED_INSTANCE_STATUSES = {"FAILED_TO_START", "FAILED", "CRASHED"}
 COMPLETED_INSTANCE_STATUSES = {"SUCCEEDED", "ARCHIVED"}
+HEX_32_REGRESSION_VALUE = "abcdef0123456789abcdef0123456789"
+HEX_64_REGRESSION_VALUE = HEX_32_REGRESSION_VALUE * 2
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -1000,10 +1002,19 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate("task-card.schema.json", card)
 
-        card = copy.deepcopy(plan["task_cards"][0])
-        card["objective"] = "Use Azure key 0123456789abcdef0123456789abcdef"
-        with self.assertRaises(ValidationError):
-            validate("task-card.schema.json", card)
+        for hex_value in (
+            HEX_32_REGRESSION_VALUE,
+            HEX_64_REGRESSION_VALUE,
+        ):
+            with self.subTest(explicit_credential_assignment=len(hex_value)):
+                card = copy.deepcopy(plan["task_cards"][0])
+                card["objective"] = f"api_key={hex_value}"
+                with self.assertRaises(ValidationError):
+                    validate("task-card.schema.json", card)
+                with self.assertRaisesRegex(
+                    SemanticContractError, "plaintext credential"
+                ):
+                    serialize_public_task_card(card)
 
         secret_plan = copy.deepcopy(plan)
         secret_plan["task_cards"][0]["input_assets"][0][
@@ -1065,6 +1076,51 @@ class BoundaryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unknown sensitive source"):
             marked_sensitive_value(base36_value, "unclassified", "unknown")
+
+    def test_sensitive_source_marker_rejects_hex_values_allowed_as_asset_ids(
+        self,
+    ) -> None:
+        hex_values = (
+            HEX_32_REGRESSION_VALUE,
+            HEX_64_REGRESSION_VALUE,
+        )
+        for hex_value in hex_values:
+            with self.subTest(hex_characters=len(hex_value)):
+                card = copy.deepcopy(
+                    load_json(PLAN_EXAMPLES / "image-only.json")["task_cards"][0]
+                )
+                card["input_assets"][0]["asset_id"] = marked_sensitive_value(
+                    hex_value,
+                    source="secret_store",
+                    locator=f"hex-{len(hex_value)}-credential",
+                )
+                with self.assertRaisesRegex(
+                    SemanticContractError,
+                    "serialization rejected sensitive value from secret_store",
+                ):
+                    serialize_public_task_card(card)
+
+    def test_unmarked_hex_asset_ids_and_digest_filename_are_allowed(self) -> None:
+        digest_filename = f"render-{HEX_32_REGRESSION_VALUE}.png"
+        plan = load_json(PLAN_EXAMPLES / "image-only.json")
+        plan["task_cards"][0]["input_assets"][0][
+            "asset_id"
+        ] = HEX_32_REGRESSION_VALUE
+        plan["task_cards"][1]["input_assets"][0][
+            "asset_id"
+        ] = HEX_64_REGRESSION_VALUE
+        plan["task_cards"][0]["instructions"].append(
+            f"Preserve {digest_filename} as the source filename."
+        )
+
+        validate("task-plan.schema.json", plan)
+        validate_plan_semantics(plan)
+        serialized_cards = [
+            serialize_public_task_card(card) for card in plan["task_cards"][:2]
+        ]
+        self.assertIn(HEX_32_REGRESSION_VALUE, serialized_cards[0])
+        self.assertIn(HEX_64_REGRESSION_VALUE, serialized_cards[1])
+        self.assertIn(digest_filename, serialized_cards[0])
 
     def test_unmarked_business_identifiers_and_long_filename_are_allowed(self) -> None:
         business_order = "CustomerOrder2026AugustBatch9471"
