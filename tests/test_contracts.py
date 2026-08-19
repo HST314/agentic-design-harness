@@ -4,7 +4,9 @@ import copy
 import json
 import re
 import unittest
+from collections import Counter
 from datetime import datetime
+from math import log2
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -27,21 +29,25 @@ EXECUTING_INSTANCE_STATUSES = {"STARTING", "RUNNING"}
 WAITING_INSTANCE_STATUSES = {"WAITING_APPROVAL"}
 FAILED_INSTANCE_STATUSES = {"FAILED_TO_START", "FAILED", "CRASHED"}
 COMPLETED_INSTANCE_STATUSES = {"SUCCEEDED", "ARCHIVED"}
-PLAINTEXT_CREDENTIAL = re.compile(
-    r"(?:\b(?:basic|bearer)\s+\S+"
-    r"|\bsk-[a-z0-9_-]{8,}\b"
-    r"|\bgh[pousr]_[a-z0-9]{8,}\b"
-    r"|\bAKIA[0-9A-Z]{16}\b"
-    r"|\bAIza[0-9A-Za-z_-]{20,}\b"
-    r"|(?<![a-f0-9])[a-f0-9]{32,64}(?![a-f0-9])"
-    r"|(?:api|subscription|access|private)[_. -]?key\s*[:=]\s*\S{8,})",
-    re.IGNORECASE,
-)
+PRE_ACTIVATION_TASK_STATUSES = {
+    "DRAFT",
+    "PLANNED",
+    "AWAITING_START_CONFIRMATION",
+}
 
 
 def load_json(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as stream:
         return json.load(stream)
+
+
+CREDENTIAL_POLICY = load_json(CATALOGS / "credential-detection-policy.json")
+KNOWN_CREDENTIAL_RULES = tuple(
+    (rule["id"], re.compile(rule["pattern"], re.IGNORECASE))
+    for rule in CREDENTIAL_POLICY["known_format_rules"]
+)
+HIGH_ENTROPY_POLICY = CREDENTIAL_POLICY["high_entropy_rule"]
+HIGH_ENTROPY_CANDIDATE = re.compile(HIGH_ENTROPY_POLICY["candidate_pattern"])
 
 
 SCHEMA_DOCUMENTS = {
@@ -112,21 +118,62 @@ def schema_version_is_supported(
     )
 
 
+def shannon_entropy(value: str) -> float:
+    counts = Counter(value)
+    length = len(value)
+    return -sum(
+        (count / length) * log2(count / length) for count in counts.values()
+    )
+
+
+def credential_rule_for_text(value: str) -> str | None:
+    """Return the named rule that identifies a plaintext credential."""
+
+    for rule_id, pattern in KNOWN_CREDENTIAL_RULES:
+        if pattern.search(value):
+            return rule_id
+
+    for match in HIGH_ENTROPY_CANDIDATE.finditer(value):
+        candidate = match.group(1)
+        character_classes = sum(
+            bool(re.search(pattern, candidate))
+            for pattern in HIGH_ENTROPY_POLICY["character_class_patterns"]
+        )
+        if (
+            len(candidate) >= HIGH_ENTROPY_POLICY["minimum_length"]
+            and character_classes
+            >= HIGH_ENTROPY_POLICY["minimum_character_classes"]
+            and shannon_entropy(candidate)
+            >= HIGH_ENTROPY_POLICY["minimum_entropy_bits_per_character"]
+        ):
+            return "high_entropy_token"
+    return None
+
+
 def validate_task_card_credentials(value: Any) -> None:
     """Reject credential-shaped text anywhere in a serialized public TaskCard."""
 
-    if isinstance(value, str) and PLAINTEXT_CREDENTIAL.search(value):
-        raise SemanticContractError("public task card contains a plaintext credential")
+    if isinstance(value, str):
+        rule_id = credential_rule_for_text(value)
+        if rule_id is not None:
+            raise SemanticContractError(
+                f"public task card contains a plaintext credential ({rule_id})"
+            )
     if isinstance(value, list):
         for item in value:
             validate_task_card_credentials(item)
     elif isinstance(value, dict):
-        for item in value.values():
+        for key, item in value.items():
+            validate_task_card_credentials(key)
             validate_task_card_credentials(item)
 
 
 def validate_requirement_lifecycle(
-    item: dict[str, Any], plan_revision: int
+    item: dict[str, Any],
+    plan_revision: int,
+    task_created_at: datetime,
+    task_updated_at: datetime,
+    unavailable_was_triggered: bool,
 ) -> bool:
     """Validate frozen original/activation facts and return downgrade evidence."""
 
@@ -148,8 +195,28 @@ def validate_requirement_lifecycle(
             "CRASHED",
         }
     )
-    if item["status"] in activated_statuses and first_activated_at is None:
+    activation_fact_required = (
+        item["status"] in activated_statuses
+        or item["status"] == "UNAVAILABLE" and unavailable_was_triggered
+    )
+    if activation_fact_required and first_activated_at is None:
         raise SemanticContractError("activated child lacks first activation fact")
+
+    activated_at = None
+    if first_activated_at is not None:
+        activated_at = datetime.fromisoformat(
+            first_activated_at.replace("Z", "+00:00")
+        )
+        if activated_at < task_created_at:
+            raise SemanticContractError("activation predates task creation")
+        if activated_at > task_updated_at:
+            raise SemanticContractError("activation occurs after task snapshot")
+        if "instance_id" in item:
+            instance_created_at = datetime.fromisoformat(
+                item["created_at"].replace("Z", "+00:00")
+            )
+            if activated_at < instance_created_at:
+                raise SemanticContractError("activation predates instance creation")
 
     if original_required is False:
         if item["required"] is True:
@@ -174,12 +241,16 @@ def validate_requirement_lifecycle(
     if downgrade["plan_revision"] > plan_revision:
         raise SemanticContractError("downgrade revision exceeds the task plan revision")
 
-    activated_at = datetime.fromisoformat(first_activated_at.replace("Z", "+00:00"))
     authorized_at = datetime.fromisoformat(
         downgrade["authorized_at"].replace("Z", "+00:00")
     )
+    assert activated_at is not None
     if authorized_at < activated_at:
         raise SemanticContractError("downgrade authorization predates activation")
+    if authorized_at > task_updated_at:
+        raise SemanticContractError(
+            "downgrade authorization occurs after task snapshot"
+        )
     return True
 
 
@@ -351,6 +422,14 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
     stages = sorted(plan["stages"], key=lambda item: item["position"])
     instances = plan["instances"]
     cards = plan["task_cards"]
+    task_created_at = datetime.fromisoformat(
+        task["created_at"].replace("Z", "+00:00")
+    )
+    task_updated_at = datetime.fromisoformat(
+        task["updated_at"].replace("Z", "+00:00")
+    )
+    if task_updated_at < task_created_at:
+        raise SemanticContractError("task update predates task creation")
 
     if plan["schema_version"] != task["schema_version"]:
         raise SemanticContractError("plan and task schema versions differ")
@@ -413,10 +492,47 @@ def validate_plan_semantics(plan: dict[str, Any]) -> None:
     if declared_instance_ids != set(instance_by_id):
         raise SemanticContractError("plan contains an undeclared instance")
 
-    downgrade_evidence = [
-        validate_requirement_lifecycle(item, task["plan_revision"])
-        for item in [*stages, *instances]
-    ]
+    task_is_activated = task["status"] not in PRE_ACTIVATION_TASK_STATUSES
+    dependencies_succeeded_by_stage = {
+        stage["stage_id"]: all(
+            stage_by_id[dependency]["status"] == "SUCCEEDED"
+            for dependency in stage["depends_on"]
+        )
+        for stage in stages
+    }
+    downgrade_evidence = []
+    for stage in stages:
+        unavailable_was_triggered = (
+            task_is_activated
+            and stage["status"] == "UNAVAILABLE"
+            and dependencies_succeeded_by_stage[stage["stage_id"]]
+        )
+        downgrade_evidence.append(
+            validate_requirement_lifecycle(
+                stage,
+                task["plan_revision"],
+                task_created_at,
+                task_updated_at,
+                unavailable_was_triggered,
+            )
+        )
+    for instance in instances:
+        stage = stage_by_id[instance["stage_id"]]
+        unavailable_was_triggered = (
+            task_is_activated
+            and instance["status"] == "UNAVAILABLE"
+            and dependencies_succeeded_by_stage[stage["stage_id"]]
+            and stage["status"] not in {"SKIPPED", "CANCELLED"}
+        )
+        downgrade_evidence.append(
+            validate_requirement_lifecycle(
+                instance,
+                task["plan_revision"],
+                task_created_at,
+                task_updated_at,
+                unavailable_was_triggered,
+            )
+        )
     has_authorized_downgrade = any(downgrade_evidence)
 
     for stage in stages:
@@ -598,7 +714,7 @@ class AggregateStateTests(unittest.TestCase):
 
     def test_stage_status_must_match_instance_aggregate(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
-        plan["stages"][0]["status"] = "SUCCEEDED"
+        plan["stages"][0]["status"] = "READY"
         with self.assertRaisesRegex(SemanticContractError, "stage s_visual status"):
             validate_plan_semantics(plan)
 
@@ -607,6 +723,10 @@ class AggregateStateTests(unittest.TestCase):
         plan["instances"][0]["status"] = "SUCCEEDED"
         plan["stages"][0]["status"] = "SUCCEEDED"
         plan["stages"][1]["status"] = "UNAVAILABLE"
+        for item in (plan["stages"][1], plan["instances"][1]):
+            item["requirement_lifecycle"]["first_activated_at"] = (
+                plan["task"]["updated_at"]
+            )
         plan["task"]["status"] = "BLOCKED_UNAVAILABLE"
         validate_plan_semantics(plan)
 
@@ -616,9 +736,69 @@ class AggregateStateTests(unittest.TestCase):
         ):
             validate_plan_semantics(plan)
 
+    def test_triggered_unavailable_requires_activation_facts(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "ppt-only.json")
+        for collection_name in ("stages", "instances"):
+            with self.subTest(collection=collection_name):
+                missing_fact = copy.deepcopy(plan)
+                missing_fact[collection_name][0]["requirement_lifecycle"][
+                    "first_activated_at"
+                ] = None
+                validate("task-plan.schema.json", missing_fact)
+                with self.assertRaisesRegex(
+                    SemanticContractError,
+                    "activated child lacks first activation fact",
+                ):
+                    validate_plan_semantics(missing_fact)
+
+    def test_waiting_dependency_does_not_count_as_triggered_unavailable(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
+        self.assertEqual(plan["instances"][1]["status"], "UNAVAILABLE")
+        self.assertIsNone(
+            plan["instances"][1]["requirement_lifecycle"][
+                "first_activated_at"
+            ]
+        )
+        validate_plan_semantics(plan)
+
+    def test_activation_is_anchored_to_task_and_instance_timeline(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "ppt-only.json")
+
+        activation_before_task = copy.deepcopy(plan)
+        for item in (
+            activation_before_task["stages"][0],
+            activation_before_task["instances"][0],
+        ):
+            item["requirement_lifecycle"]["first_activated_at"] = (
+                "2025-08-19T16:10:01Z"
+            )
+        with self.assertRaisesRegex(
+            SemanticContractError, "activation predates task creation"
+        ):
+            validate_plan_semantics(activation_before_task)
+
+        activation_before_instance = copy.deepcopy(plan)
+        activation_before_instance["instances"][0]["created_at"] = (
+            "2026-08-19T16:10:02Z"
+        )
+        with self.assertRaisesRegex(
+            SemanticContractError, "activation predates instance creation"
+        ):
+            validate_plan_semantics(activation_before_instance)
+
+        activation_after_snapshot = copy.deepcopy(plan)
+        activation_after_snapshot["task"]["updated_at"] = (
+            "2026-08-19T16:10:00Z"
+        )
+        with self.assertRaisesRegex(
+            SemanticContractError, "activation occurs after task snapshot"
+        ):
+            validate_plan_semantics(activation_after_snapshot)
+
     def test_running_work_has_priority_over_waiting_approval(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-only.json")
         plan["task"]["status"] = "RUNNING"
+        plan["task"]["updated_at"] = "2026-08-19T16:01:00Z"
         plan["stages"][0]["status"] = "RUNNING"
         plan["instances"][0]["status"] = "WAITING_APPROVAL"
         plan["instances"][1]["status"] = "RUNNING"
@@ -669,6 +849,7 @@ class AggregateStateTests(unittest.TestCase):
         plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
         plan["task"]["status"] = "PARTIAL"
         plan["task"]["plan_revision"] = 2
+        plan["task"]["updated_at"] = "2026-08-19T16:25:00Z"
         plan["instances"][0]["status"] = "SUCCEEDED"
         plan["stages"][0]["status"] = "SUCCEEDED"
 
@@ -691,6 +872,16 @@ class AggregateStateTests(unittest.TestCase):
 
         validate("task-plan.schema.json", plan)
         validate_plan_semantics(plan)
+
+        authorization_after_snapshot = copy.deepcopy(plan)
+        authorization_after_snapshot["task"]["updated_at"] = (
+            "2026-08-19T16:24:30Z"
+        )
+        with self.assertRaisesRegex(
+            SemanticContractError,
+            "downgrade authorization occurs after task snapshot",
+        ):
+            validate_plan_semantics(authorization_after_snapshot)
 
         plan["stages"][1]["requirement_lifecycle"][
             "authorized_downgrade"
@@ -772,6 +963,59 @@ class BoundaryTests(unittest.TestCase):
         validate("task-plan.schema.json", secret_plan)
         with self.assertRaisesRegex(SemanticContractError, "plaintext credential"):
             validate_plan_semantics(secret_plan)
+
+    def test_task_card_rejects_provider_and_high_entropy_credentials(self) -> None:
+        provider_tokens = {
+            "github_fine_grained": "github_pat_"
+            "11AA0aBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSs",
+            "slack_bot": "xoxb-"
+            "111111111111-222222222222-aBcDeFgHiJkLmNoPqRsTuVwX",
+            "aws_access_key_id": "AKIA" "IOSFODNN7EXAMPLE",
+            "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/"
+            "bPxRfiCYEXAMPLEKEY",
+            "unlabelled_high_entropy": "z9Qx7Vm2Kp8Nc4Rt6Yw3Hs5Jd1Lf0"
+            "BaU",
+        }
+        for provider, token in provider_tokens.items():
+            with self.subTest(provider=provider):
+                plan = load_json(PLAN_EXAMPLES / "image-only.json")
+                plan["task_cards"][0]["objective"] = (
+                    f"Use synthetic credential {token}"
+                )
+                with self.assertRaisesRegex(
+                    SemanticContractError, "plaintext credential"
+                ):
+                    validate_plan_semantics(plan)
+
+        schema_guarded_tokens = [
+            *list(provider_tokens.values())[:3],
+            "aws_secret_access_key="
+            f"{provider_tokens['aws_secret_access_key']}",
+        ]
+        for token in schema_guarded_tokens:
+            with self.subTest(schema_fast_rejection=token.split("-")[0]):
+                card = load_json(PLAN_EXAMPLES / "image-only.json")[
+                    "task_cards"
+                ][0]
+                card["objective"] = f"Use synthetic credential {token}"
+                with self.assertRaises(ValidationError):
+                    validate("task-card.schema.json", card)
+
+        nested_plan = load_json(PLAN_EXAMPLES / "image-only.json")
+        nested_plan["task_cards"][0]["expected_deliveries"][0]["role"] = (
+            provider_tokens["unlabelled_high_entropy"]
+        )
+        validate("task-plan.schema.json", nested_plan)
+        with self.assertRaisesRegex(SemanticContractError, "plaintext credential"):
+            validate_plan_semantics(nested_plan)
+
+    def test_task_card_credential_policy_avoids_benign_long_text(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-only.json")
+        plan["task_cards"][0]["instructions"].append(
+            "Read resources/manifests/a_uploaded_01.json and preserve the MIME type."
+        )
+        validate("task-plan.schema.json", plan)
+        validate_plan_semantics(plan)
 
     def test_published_asset_requires_provenance(self) -> None:
         asset = load_json(OBJECT_EXAMPLES / "published-asset.json")
@@ -865,6 +1109,61 @@ class CatalogTests(unittest.TestCase):
         "approval_request": "approval-request.schema.json",
         "delivery": "delivery.schema.json",
     }
+
+    def test_credential_detection_policy_is_named_and_compilable(self) -> None:
+        self.assertEqual(
+            set(CREDENTIAL_POLICY),
+            {
+                "schema_version",
+                "policy_id",
+                "known_format_rules",
+                "high_entropy_rule",
+            },
+        )
+        self.assertEqual(CREDENTIAL_POLICY["schema_version"], "1.0")
+        rule_ids = [
+            rule["id"] for rule in CREDENTIAL_POLICY["known_format_rules"]
+        ]
+        self.assertEqual(len(rule_ids), len(set(rule_ids)))
+        self.assertTrue(
+            {
+                "github_fine_grained_pat",
+                "slack_token",
+                "aws_access_key_id",
+            }.issubset(rule_ids)
+        )
+        schema_rule_ids = {
+            guard["$comment"]
+            for guard in SCHEMA_DOCUMENTS["common.schema.json"]["$defs"][
+                "credentialSafeText"
+            ]["allOf"]
+        }
+        self.assertEqual(schema_rule_ids, set(rule_ids))
+        for rule in CREDENTIAL_POLICY["known_format_rules"]:
+            with self.subTest(rule=rule["id"]):
+                self.assertEqual(set(rule), {"id", "pattern"})
+                re.compile(rule["pattern"], re.IGNORECASE)
+        self.assertEqual(
+            set(HIGH_ENTROPY_POLICY),
+            {
+                "algorithm",
+                "candidate_pattern",
+                "character_class_patterns",
+                "minimum_length",
+                "minimum_entropy_bits_per_character",
+                "minimum_character_classes",
+            },
+        )
+        self.assertEqual(
+            HIGH_ENTROPY_POLICY["algorithm"], "shannon_bits_per_character"
+        )
+        re.compile(HIGH_ENTROPY_POLICY["candidate_pattern"])
+        for pattern in HIGH_ENTROPY_POLICY["character_class_patterns"]:
+            re.compile(pattern)
+        self.assertGreaterEqual(HIGH_ENTROPY_POLICY["minimum_length"], 20)
+        self.assertGreater(
+            HIGH_ENTROPY_POLICY["minimum_entropy_bits_per_character"], 4.0
+        )
 
     def test_status_catalog_matches_schema_enums(self) -> None:
         catalog = load_json(CATALOGS / "status-codes.json")

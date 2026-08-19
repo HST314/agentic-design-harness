@@ -9,7 +9,7 @@
 - `docs/`：RFC v0.2、架构边界、版本和兼容性规则；
 - `contracts/v1/schemas/`：核心对象与任务计划 JSON Schema；
 - `contracts/v1/examples/`：Image-only、PPT-only、Image → PPT 三种合法组合；
-- `contracts/v1/catalogs/`：状态、转换和稳定错误码目录；
+- `contracts/v1/catalogs/`：状态、转换、稳定错误码和公开 TaskCard 凭据检测策略目录；
 - `backend/`、`frontend/`：为 Phase 1 保留的明确边界；
 - `tests/`：Schema、目录和跨对象语义契约测试。
 

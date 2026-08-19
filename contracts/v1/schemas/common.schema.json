@@ -36,7 +36,68 @@
     },
     "credentialSafeText": {
       "type": "string",
-      "pattern": "^(?![\\s\\S]*(?:[Bb][Aa][Ss][Ii][Cc]\\s+\\S+|[Bb][Ee][Aa][Rr][Ee][Rr]\\s+\\S+|[Ss][Kk]-[A-Za-z0-9_-]{8,}|[Gg][Hh][PpOoUuSsRr]_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|(?:^|[^A-Fa-f0-9])[A-Fa-f0-9]{32,64}(?:$|[^A-Fa-f0-9])|(?:[Aa][Pp][Ii]|[Ss][Uu][Bb][Ss][Cc][Rr][Ii][Pp][Tt][Ii][Oo][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee])[_. -]?[Kk][Ee][Yy]\\s*[:=]\\s*\\S{8,}))[\\s\\S]*$"
+      "allOf": [
+        {
+          "$comment": "authorization_header",
+          "not": {
+            "pattern": "(?:[Bb][Aa][Ss][Ii][Cc]|[Bb][Ee][Aa][Rr][Ee][Rr])\\s+\\S+"
+          }
+        },
+        {
+          "$comment": "openai_secret_key",
+          "not": {
+            "pattern": "[Ss][Kk]-[A-Za-z0-9_-]{8,}"
+          }
+        },
+        {
+          "$comment": "github_legacy_pat",
+          "not": {
+            "pattern": "[Gg][Hh][PpOoUuSsRr]_[A-Za-z0-9]{8,}"
+          }
+        },
+        {
+          "$comment": "github_fine_grained_pat",
+          "not": {
+            "pattern": "[Gg][Ii][Tt][Hh][Uu][Bb]_[Pp][Aa][Tt]_[A-Za-z0-9_]{20,}"
+          }
+        },
+        {
+          "$comment": "slack_token",
+          "not": {
+            "pattern": "[Xx][Oo][Xx][BbAaPpRrSs]-[A-Za-z0-9-]{10,}"
+          }
+        },
+        {
+          "$comment": "aws_access_key_id",
+          "not": {
+            "pattern": "(?:[Aa][Kk][Ii][Aa]|[Aa][Ss][Ii][Aa])[0-9A-Za-z]{16}"
+          }
+        },
+        {
+          "$comment": "google_api_key",
+          "not": {
+            "pattern": "[Aa][Ii][Zz][Aa][0-9A-Za-z_-]{20,}"
+          }
+        },
+        {
+          "$comment": "hex_secret",
+          "not": {
+            "pattern": "(?:^|[^A-Fa-f0-9])[A-Fa-f0-9]{32,64}(?:$|[^A-Fa-f0-9])"
+          }
+        },
+        {
+          "$comment": "private_key_header",
+          "not": {
+            "pattern": "-----[Bb][Ee][Gg][Ii][Nn](?: [A-Za-z0-9]+)? [Pp][Rr][Ii][Vv][Aa][Tt][Ee] [Kk][Ee][Yy]-----"
+          }
+        },
+        {
+          "$comment": "credential_assignment",
+          "not": {
+            "pattern": "(?:[Aa][Pp][Ii]|[Ss][Uu][Bb][Ss][Cc][Rr][Ii][Pp][Tt][Ii][Oo][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee]|(?:[Aa][Ww][Ss][_. -]?)?[Ss][Ee][Cc][Rr][Ee][Tt])[_. -]?(?:[Aa][Cc][Cc][Ee][Ss][Ss][_. -]?)?(?:[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn])\\s*[:=]\\s*\\S{8,}"
+          }
+        }
+      ]
     },
     "publicParameterName": {
       "type": "string",
