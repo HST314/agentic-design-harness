@@ -74,6 +74,7 @@ class AgentRuntimeIdentity:
     artifact_id: str
     revision: str
     source_root: str
+    source_root_identity: dict[str, int]
     entrypoint_relpath: str
     source_manifest: tuple[dict[str, Any], ...]
     source_manifest_sha256: str
@@ -86,6 +87,7 @@ class AgentRuntimeIdentity:
             "artifact_id": self.artifact_id,
             "revision": self.revision,
             "source_root": self.source_root,
+            "source_root_identity": self.source_root_identity,
             "entrypoint_relpath": self.entrypoint_relpath,
             "source_manifest": list(self.source_manifest),
             "source_manifest_sha256": self.source_manifest_sha256,
@@ -97,6 +99,42 @@ class AgentRuntimeIdentity:
     @property
     def digest(self) -> str:
         return digest_json(self.as_dict())
+
+
+@dataclass(slots=True)
+class PinnedRuntimeArtifact:
+    """An inspected artifact root held open through process creation."""
+
+    identity: AgentRuntimeIdentity
+    source_descriptor: int
+    source_root: Path
+    entrypoint_relpath: str
+
+    def execution_command(self, command: list[str]) -> list[str]:
+        configured_entrypoint = str(
+            self.source_root / PurePosixPath(self.entrypoint_relpath)
+        )
+        descriptor_entrypoint = (
+            f"/proc/self/fd/{self.source_descriptor}/{self.entrypoint_relpath}"
+        )
+        rewritten = [
+            descriptor_entrypoint if item == configured_entrypoint else item
+            for item in command
+        ]
+        if rewritten == command:
+            _artifact_invalid("The process command does not use the artifact entrypoint.")
+        return rewritten
+
+    def close(self) -> None:
+        if self.source_descriptor >= 0:
+            os.close(self.source_descriptor)
+            self.source_descriptor = -1
+
+    def __enter__(self) -> PinnedRuntimeArtifact:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +159,7 @@ class ProcessSpec:
             self.runtime_artifact.source_root
             / PurePosixPath(self.runtime_artifact.entrypoint_relpath)
         )
-        command_files = {
-            Path(item).resolve(strict=True)
-            for item in self.command[1:]
-            if Path(item).is_absolute() and Path(item).is_file()
-        }
-        if entrypoint.resolve(strict=True) not in command_files:
+        if sum(item == str(entrypoint) for item in self.command[1:]) != 1:
             _artifact_invalid("The process command does not use the artifact entrypoint.")
         for name, value in self.public_environment.items():
             if (
@@ -177,58 +210,76 @@ def process_code_identity(spec: ProcessSpec) -> str:
 def runtime_artifact_identity(spec: ProcessSpec) -> AgentRuntimeIdentity:
     """Inspect a complete immutable artifact through no-follow descriptors."""
 
+    with pin_runtime_artifact(spec) as pinned:
+        return pinned.identity
+
+
+def pin_runtime_artifact(spec: ProcessSpec) -> PinnedRuntimeArtifact:
+    """Pin the inspected source root so pathname swaps cannot change execution."""
+
     spec.validate()
     artifact = spec.runtime_artifact
-    manifest = tuple(_artifact_manifest(artifact.source_root))
-    manifest_by_path = {item["path"]: item for item in manifest}
-    required_paths = {artifact.entrypoint_relpath, *artifact.dependency_lock_relpaths}
-    if not required_paths.issubset(manifest_by_path):
-        _artifact_invalid("The artifact entrypoint or dependency lock is missing.")
-    locks = [manifest_by_path[item] for item in sorted(artifact.dependency_lock_relpaths)]
-    executable = Path(spec.command[0]).resolve(strict=True)
-    environment_root = artifact.environment_root or executable.parent.parent
-    environment_config = environment_root / "pyvenv.cfg"
-    environment = {
-        "root": str(environment_root.resolve(strict=True)),
-        "pyvenv_config_sha256": (
-            file_sha256(environment_config) if environment_config.is_file() else None
-        ),
-    }
-    interpreter_stat = executable.stat()
-    return AgentRuntimeIdentity(
-        artifact_id=artifact.artifact_id,
-        revision=artifact.revision,
-        source_root=str(artifact.source_root.resolve(strict=True)),
-        entrypoint_relpath=artifact.entrypoint_relpath,
-        source_manifest=manifest,
-        source_manifest_sha256=digest_json(list(manifest)),
-        dependency_locks_sha256=digest_json(locks),
-        interpreter={
-            "path": str(executable),
-            "size_bytes": interpreter_stat.st_size,
-            "sha256": file_sha256(executable),
-        },
-        environment=environment,
-    )
-
-
-def _artifact_manifest(root: Path) -> list[dict[str, Any]]:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(root, flags)
+        descriptor = os.open(artifact.source_root, flags)
     except OSError:
         _artifact_invalid("The runtime artifact root cannot be opened safely.")
     try:
         root_stat = os.fstat(descriptor)
         if root_stat.st_mode & 0o222:
             _artifact_invalid("The runtime artifact root must be read-only.")
-        manifest: list[dict[str, Any]] = []
-        _walk_artifact(descriptor, PurePosixPath(), manifest)
-        if not manifest:
-            _artifact_invalid("The runtime artifact cannot be empty.")
-        return manifest
-    finally:
+        manifest = tuple(_artifact_manifest(descriptor))
+        manifest_by_path = {item["path"]: item for item in manifest}
+        required_paths = {artifact.entrypoint_relpath, *artifact.dependency_lock_relpaths}
+        if not required_paths.issubset(manifest_by_path):
+            _artifact_invalid("The artifact entrypoint or dependency lock is missing.")
+        locks = [manifest_by_path[item] for item in sorted(artifact.dependency_lock_relpaths)]
+        executable = Path(spec.command[0]).resolve(strict=True)
+        environment_root = artifact.environment_root or executable.parent.parent
+        environment_config = environment_root / "pyvenv.cfg"
+        environment = {
+            "root": str(environment_root.resolve(strict=True)),
+            "pyvenv_config_sha256": (
+                file_sha256(environment_config) if environment_config.is_file() else None
+            ),
+        }
+        interpreter_stat = executable.stat()
+        identity = AgentRuntimeIdentity(
+            artifact_id=artifact.artifact_id,
+            revision=artifact.revision,
+            source_root=str(artifact.source_root),
+            source_root_identity={
+                "device": root_stat.st_dev,
+                "inode": root_stat.st_ino,
+            },
+            entrypoint_relpath=artifact.entrypoint_relpath,
+            source_manifest=manifest,
+            source_manifest_sha256=digest_json(list(manifest)),
+            dependency_locks_sha256=digest_json(locks),
+            interpreter={
+                "path": str(executable),
+                "size_bytes": interpreter_stat.st_size,
+                "sha256": file_sha256(executable),
+            },
+            environment=environment,
+        )
+        return PinnedRuntimeArtifact(
+            identity=identity,
+            source_descriptor=descriptor,
+            source_root=artifact.source_root,
+            entrypoint_relpath=artifact.entrypoint_relpath,
+        )
+    except BaseException:
         os.close(descriptor)
+        raise
+
+
+def _artifact_manifest(descriptor: int) -> list[dict[str, Any]]:
+    manifest: list[dict[str, Any]] = []
+    _walk_artifact(descriptor, PurePosixPath(), manifest)
+    if not manifest:
+        _artifact_invalid("The runtime artifact cannot be empty.")
+    return manifest
 
 
 def _walk_artifact(
@@ -283,6 +334,8 @@ def _walk_artifact(
             manifest.append(
                 {
                     "path": relative.as_posix(),
+                    "device": before.st_dev,
+                    "inode": before.st_ino,
                     "size_bytes": before.st_size,
                     "mode": stat.S_IMODE(before.st_mode),
                     "sha256": digest.hexdigest(),
@@ -315,12 +368,19 @@ def validate_launch_identity(
     instance_id: str,
     attempt_id: str,
     spec: ProcessSpec,
+    *,
+    runtime_identity: AgentRuntimeIdentity | None = None,
 ) -> None:
+    code_identity = (
+        runtime_identity.digest
+        if runtime_identity is not None
+        else process_code_identity(spec)
+    )
     if (
         record["task_id"] != task_id
         or record["instance_id"] != instance_id
         or record["attempt_id"] != attempt_id
-        or record["code_identity"] != process_code_identity(spec)
+        or record["code_identity"] != code_identity
         or record["spec_sha256"] != process_spec_digest(spec)
     ):
         raise HarnessError(
