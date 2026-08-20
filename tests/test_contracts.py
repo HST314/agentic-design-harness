@@ -994,6 +994,29 @@ class BoundaryTests(unittest.TestCase):
             load_json(PLAN_EXAMPLES / "ppt-only.json")["task_cards"][0],
         )
 
+    def test_task_card_1_1_adds_only_declared_image_adapter_inputs(self) -> None:
+        fixture = load_json(GOLDEN / "image-task-card-mapping-v1.1.json")
+        card = fixture["harness_task_card"]
+        validate("task-card-v1.1.schema.json", card)
+
+        with self.assertRaises(ValidationError):
+            validate("task-card.schema.json", card)
+
+        old_card = copy.deepcopy(load_json(PLAN_EXAMPLES / "image-only.json")["task_cards"][0])
+        validate("task-card.schema.json", old_card)
+        old_card["schema_version"] = "1.1"
+        validate("task-card-v1.1.schema.json", old_card)
+
+        incomplete_category = copy.deepcopy(card)
+        del incomplete_category["parameters"]["category_id"]
+        with self.assertRaises(ValidationError):
+            validate("task-card-v1.1.schema.json", incomplete_category)
+
+        forbidden = copy.deepcopy(card)
+        forbidden["parameters"]["output_dir"] = "/tmp/outside"
+        with self.assertRaises(ValidationError):
+            validate("task-card-v1.1.schema.json", forbidden)
+
     def test_task_card_rejects_credentials_outside_parameters(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-only.json")
 
