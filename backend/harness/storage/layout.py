@@ -66,3 +66,21 @@ class StateLayout:
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(directory, 0o700)
         return control_task, workspace_task
+
+    def initialize_instance(self, task_id: str, instance_id: str) -> Path:
+        """Create the complete private workspace owned by one Agent instance."""
+
+        validate_identifier(task_id, "task_id")
+        validate_identifier(instance_id, "instance_id")
+        self.initialize_task(task_id)
+        instance_root = self.workspace_root / "tasks" / task_id / "instances" / instance_id
+        for directory in (
+            instance_root,
+            instance_root / "work",
+            instance_root / "outputs",
+            instance_root / "logs",
+            instance_root / "runtime",
+        ):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(directory, 0o700)
+        return instance_root
