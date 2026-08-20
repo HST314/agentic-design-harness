@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -312,6 +313,85 @@ class FileStateStore:
                 path = repository.path(task_id, object_id)
                 path.unlink(missing_ok=True)
                 fsync_directory(path.parent)
+
+    def update_instance_fields(
+        self,
+        task_id: str,
+        instance_id: str,
+        changes: dict[str, Any],
+        *,
+        actor: Actor,
+        command: str,
+        idempotency_key: str,
+        crash_hook=None,
+    ) -> dict[str, Any]:
+        """Commit mutable instance facts through the authoritative plan when present.
+
+        The plan is the recovery anchor for planned instances. A committed plan event
+        is therefore written before its instance projection. Instance records created
+        before plan construction are updated directly.
+        """
+
+        allowed = {
+            "config_revision",
+            "credential_pair_ref",
+            "credential_pair_revision",
+            "process",
+            "restart_required",
+            "ui_url",
+        }
+        if not changes or not set(changes).issubset(allowed):
+            raise ValueError("unsupported mutable instance fields")
+        lock = FileLock(
+            self.layout.control_root / "locks" / f"command-{task_id}.lock",
+            self.lock_timeout_seconds,
+        )
+        with lock:
+            plan = self.plan.get(task_id, task_id)
+            if plan is not None:
+                updated_plan = deepcopy(plan)
+                instance = next(
+                    (
+                        item
+                        for item in updated_plan["instances"]
+                        if item["instance_id"] == instance_id
+                    ),
+                    None,
+                )
+                if instance is not None:
+                    if all(instance.get(key) == value for key, value in changes.items()):
+                        return deepcopy(instance)
+                    instance.update(deepcopy(changes))
+                    self.contracts.validate("task-plan", updated_plan)
+                    self.plan.put(
+                        task_id,
+                        task_id,
+                        updated_plan,
+                        expected_revision=self.plan.revision(task_id, task_id),
+                        actor=actor,
+                        command=command,
+                        idempotency_key=idempotency_key,
+                        crash_hook=crash_hook,
+                    )
+                    self._reconcile_plan_projections(task_id)
+                    return deepcopy(instance)
+            current = self.instance.get(task_id, instance_id)
+            if current is None:
+                raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+            if all(current.get(key) == value for key, value in changes.items()):
+                return deepcopy(current)
+            updated = {**deepcopy(current), **deepcopy(changes)}
+            self.instance.put(
+                task_id,
+                instance_id,
+                updated,
+                expected_revision=self.instance.revision(task_id, instance_id),
+                actor=actor,
+                command=command,
+                idempotency_key=idempotency_key,
+                crash_hook=crash_hook,
+            )
+            return updated
 
     def rebuild_task_index(self, _: str = "") -> None:
         tasks: list[dict[str, Any]] = []
