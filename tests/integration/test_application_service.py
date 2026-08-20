@@ -223,6 +223,32 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(recover_records(self.credentials.events_path), [])
         self.assertFalse(self.application._intent_path("invalid_application_plan").exists())
 
+    def test_stale_revision_is_rejected_before_intent_or_instance_creation(self) -> None:
+        created = create_task(self.commands, "t_stale_application")
+        self.commands.register_input_manifest(
+            "t_stale_application",
+            "assets/input-v2.json",
+            envelope("advance-stale-application", created["revision"]),
+        )
+        draft = image_plan("t_stale_application")
+
+        with self.assertRaises(HarnessError) as stale:
+            self.application.save_plan_and_create_instances(
+                "t_stale_application",
+                stages=draft["stages"],
+                instances=draft["instances"],
+                task_cards=draft["task_cards"],
+                providers={"i_image_1": "fake"},
+                operation_id="stale_application_plan",
+                envelope=envelope("stale-application-plan", created["revision"]),
+            )
+
+        self.assertEqual(stale.exception.code, "REVISION_CONFLICT")
+        self.assertEqual(recover_records(self.credentials.events_path), [])
+        self.assertIsNone(self.store.instance.get("t_stale_application", "i_image_1"))
+        self.assertFalse(self.application._intent_path("stale_application_plan").exists())
+        self.assertEqual(self.application.recover(), [])
+
     def test_unavailable_ppt_plan_saves_without_consuming_credentials(self) -> None:
         created = create_task(self.commands, "t_ppt_application")
         draft = ppt_plan("t_ppt_application")

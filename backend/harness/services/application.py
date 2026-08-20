@@ -69,8 +69,10 @@ class HarnessApplicationService:
         }
         request_sha256 = digest_json(request)
         intent_path = self._intent_path(operation_id)
-        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
-            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
+            self.commands.task_guard(task_id),
         ):
             if intent_path.exists():
                 intent = read_json(intent_path)
@@ -112,15 +114,17 @@ class HarnessApplicationService:
         for path in sorted(self.intent_root.glob("*.json")):
             operation_id = path.stem
             task_id = read_json(path)["request"]["task_id"]
-            with FileLock(
-                self._task_lock(task_id), self.store.lock_timeout_seconds
-            ), FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds):
+            with (
+                FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+                FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
+            ):
                 intent = read_json(path)
                 if intent["state"] == "COMMITTED":
                     continue
                 try:
                     if intent["kind"] == "SAVE_PLAN_AND_CREATE_INSTANCES":
-                        result = self._resume_save_plan(path, None)
+                        with self.commands.task_guard(task_id):
+                            result = self._resume_save_plan(path, None)
                     elif intent["kind"] == "START_READY_INSTANCES":
                         result = self._resume_start(path, None)
                     else:
@@ -461,6 +465,7 @@ class HarnessApplicationService:
             stages=request["stages"],
             instances=provisional,
             task_cards=request["task_cards"],
+            expected_revision=request["envelope"]["expected_revision"],
         )
         for card in request["task_cards"]:
             adapter = self.adapters.get_optional(card["agent_type"])

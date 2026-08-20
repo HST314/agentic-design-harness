@@ -30,14 +30,14 @@ from .configuration import ConfigurationService
 from .credentials import CredentialPoolService, ResolvedCredential
 from .process_runtime import (
     ACTIVE_LAUNCH_STATES,
+    PinnedRuntimeArtifact,
     PortAllocator,
     ProcessSpec,
-    process_code_identity,
+    pin_runtime_artifact,
     process_group_exists,
     process_spec_digest,
     process_start_identity,
     reject_credential_arguments,
-    runtime_artifact_identity,
     tail_lines,
     validate_launch_identity,
 )
@@ -114,20 +114,23 @@ class ProcessSupervisor:
         with self._instance_thread_lock(task_id, instance_id):
             instance = self._instance(task_id, instance_id)
             preserve = instance["status"] in {"RUNNING", "WAITING_APPROVAL"}
-            spec.validate()
-            self._enforce_code_identity(task_id, instance_id, process_code_identity(spec))
-            current = self._active_launch_for_instance(task_id, instance_id)
-            if current is not None:
-                self._interrupt_model_calls(task_id, instance_id, "controlled_restart")
-                self._stop_launch(current, "RESTARTED")
-            return self._start(
-                task_id,
-                instance_id,
-                spec,
-                launch_id=launch_id,
-                attempt_id=attempt_id,
-                preserve_business_state=preserve,
-            )
+            with pin_runtime_artifact(spec) as pinned_artifact:
+                self._enforce_code_identity(
+                    task_id, instance_id, pinned_artifact.identity.digest
+                )
+                current = self._active_launch_for_instance(task_id, instance_id)
+                if current is not None:
+                    self._interrupt_model_calls(task_id, instance_id, "controlled_restart")
+                    self._stop_launch(current, "RESTARTED")
+                return self._start(
+                    task_id,
+                    instance_id,
+                    spec,
+                    launch_id=launch_id,
+                    attempt_id=attempt_id,
+                    preserve_business_state=preserve,
+                    pinned_artifact=pinned_artifact,
+                )
 
     def _start(
         self,
@@ -139,12 +142,24 @@ class ProcessSupervisor:
         attempt_id: str,
         preserve_business_state: bool,
         crash_hook=None,
+        pinned_artifact: PinnedRuntimeArtifact | None = None,
     ) -> dict[str, Any]:
         validate_identifier(task_id, "task_id")
         validate_identifier(instance_id, "instance_id")
         validate_identifier(launch_id, "launch_id")
         validate_identifier(attempt_id, "attempt_id")
-        spec.validate()
+        if pinned_artifact is None:
+            with pin_runtime_artifact(spec) as inspected_artifact:
+                return self._start(
+                    task_id,
+                    instance_id,
+                    spec,
+                    launch_id=launch_id,
+                    attempt_id=attempt_id,
+                    preserve_business_state=preserve_business_state,
+                    crash_hook=crash_hook,
+                    pinned_artifact=inspected_artifact,
+                )
         lock_path = (
             self.store.layout.control_root
             / "locks"
@@ -156,7 +171,14 @@ class ProcessSupervisor:
             record_path = self._launch_path(launch_id)
             if record_path.exists():
                 existing = read_json(record_path)
-                validate_launch_identity(existing, task_id, instance_id, attempt_id, spec)
+                validate_launch_identity(
+                    existing,
+                    task_id,
+                    instance_id,
+                    attempt_id,
+                    spec,
+                    runtime_identity=pinned_artifact.identity,
+                )
                 existing = self._hydrate_launch_identity(existing)
                 return deepcopy(existing)
             active = self._active_launch_for_instance(task_id, instance_id)
@@ -181,7 +203,7 @@ class ProcessSupervisor:
                     "The instance Provider does not match its complete credential pair.",
                     {"instance_id": instance_id},
                 )
-            runtime_identity = runtime_artifact_identity(spec)
+            runtime_identity = pinned_artifact.identity
             code_identity = runtime_identity.digest
             self._enforce_code_identity(task_id, instance_id, code_identity)
             supervisor = config["config"]["supervisor"]
@@ -227,6 +249,7 @@ class ProcessSupervisor:
                     item.replace("{port}", str(port)).replace("{host}", self.host)
                     for item in spec.command
                 ]
+                command = pinned_artifact.execution_command(command)
                 reject_credential_arguments(command, resolved.api_key, resolved.base_url)
                 environment = self._child_environment(
                     task_id, instance_id, port, spec, resolved, config
@@ -246,6 +269,7 @@ class ProcessSupervisor:
                         "stderr_path": str(stderr_path),
                         "handshake_path": str(handshake_path),
                         "redactions": [resolved.api_key, resolved.base_url],
+                        "inherited_fds": [pinned_artifact.source_descriptor],
                     },
                     mode=0o600,
                 )
@@ -263,6 +287,7 @@ class ProcessSupervisor:
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
                     close_fds=True,
+                    pass_fds=(pinned_artifact.source_descriptor,),
                 )
                 identity = process_start_identity(process.pid)
                 if identity is None:

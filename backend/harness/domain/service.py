@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -31,6 +33,7 @@ class TaskCommandService:
         self.store = store
         self.contracts = contracts
         self.machine = StateMachine(contracts.root / "catalogs" / "status-codes.json")
+        self._command_guard_state = threading.local()
 
     def create_task(
         self,
@@ -155,6 +158,7 @@ class TaskCommandService:
         stages: list[dict[str, Any]],
         instances: list[dict[str, Any]],
         task_cards: list[dict[str, Any]],
+        expected_revision: int,
     ) -> None:
         """Validate a plan without allocating credentials or committing projections."""
 
@@ -165,6 +169,9 @@ class TaskCommandService:
                 "A plan cannot be replaced while this task state is active or terminal.",
                 {"current": task["status"]},
             )
+        actual = self.store.task.revision(task_id, task_id)
+        if expected_revision != actual:
+            self._raise_revision(expected_revision, actual, "task", task_id)
         plan_revision = task["plan_revision"]
         if self.store.plan.get(task_id, task_id) is not None:
             plan_revision += 1
@@ -633,10 +640,7 @@ class TaskCommandService:
         operation: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
         validate_identifier(scope, "task_id")
-        with FileLock(
-            self.store.layout.control_root / "locks" / f"command-{scope}.lock",
-            self.store.lock_timeout_seconds,
-        ):
+        with self.task_guard(scope):
             existing = self.store.idempotency.lookup(
                 scope, envelope.idempotency_key, command, request
             )
@@ -673,6 +677,25 @@ class TaskCommandService:
                 request_sha256,
                 committed,
             )
+
+    @contextmanager
+    def task_guard(self, task_id: str) -> Iterator[None]:
+        """Hold the domain command lock across one application-level workflow."""
+
+        validate_identifier(task_id, "task_id")
+        guarded = getattr(self._command_guard_state, "task_ids", frozenset())
+        if task_id in guarded:
+            yield
+            return
+        with FileLock(
+            self.store.layout.control_root / "locks" / f"command-{task_id}.lock",
+            self.store.lock_timeout_seconds,
+        ):
+            self._command_guard_state.task_ids = guarded | {task_id}
+            try:
+                yield
+            finally:
+                self._command_guard_state.task_ids = guarded
 
     def _task(self, task_id: str) -> dict[str, Any]:
         task = self.store.task.get(task_id, task_id)
