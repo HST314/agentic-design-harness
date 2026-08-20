@@ -13,8 +13,10 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
+from unittest.mock import patch
 from urllib.request import urlopen
 
+import harness.services.process_runtime as process_runtime
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.configuration import ConfigurationService, GlobalConfigBody
 from harness.services.credentials import CredentialPoolService
@@ -496,6 +498,53 @@ class ProcessSupervisorTests(unittest.TestCase):
         self.assertEqual(changed.exception.code, "PROCESS_START_FAILED")
         self.assertEqual(self._identity(launch["port"])["instance_id"], "i_image_1")
         self.supervisor.cancel_instance("t_process", "i_image_1")
+
+    def test_root_swap_during_restart_executes_the_pinned_artifact(self) -> None:
+        launch = self._start(1)
+        original_root = self.artifact_root.with_name("original-runtime-artifact")
+        replacement_root = self.artifact_root.with_name("replacement-runtime-artifact")
+        replacement_root.mkdir()
+        (replacement_root / "fake_agent_process.py").write_text(
+            "raise SystemExit(97)\n", encoding="utf-8"
+        )
+        (replacement_root / "requirements.lock").write_text(
+            "stdlib-only\n", encoding="utf-8"
+        )
+        make_artifact_read_only(replacement_root)
+        original_manifest = process_runtime._artifact_manifest
+        swapped = False
+
+        def manifest_then_swap(root_or_descriptor):
+            nonlocal swapped
+            manifest = original_manifest(root_or_descriptor)
+            if not swapped:
+                self.artifact_root.rename(original_root)
+                replacement_root.rename(self.artifact_root)
+                swapped = True
+            return manifest
+
+        try:
+            with patch.object(
+                process_runtime, "_artifact_manifest", side_effect=manifest_then_swap
+            ):
+                restarted = self.supervisor.restart_instance(
+                    "t_process",
+                    "i_image_1",
+                    self.spec,
+                    launch_id="launch_root_swap",
+                    attempt_id="attempt_root_swap",
+                )
+            self.assertTrue(swapped)
+            self.assertNotEqual(restarted["pid"], launch["pid"])
+            self.assertEqual(
+                self._identity(restarted["port"])["instance_id"], "i_image_1"
+            )
+            self.supervisor.cancel_instance("t_process", "i_image_1")
+        finally:
+            make_artifact_writable(self.artifact_root)
+            if original_root.exists():
+                shutil.rmtree(self.artifact_root)
+                original_root.rename(self.artifact_root)
 
     def test_manual_start_confirmation_cannot_be_bypassed(self) -> None:
         created = create_task(self.commands, "t_manual_process", "manual")

@@ -126,6 +126,7 @@ def main() -> int:
             spec = json.load(handle)
     finally:
         spec_path.unlink(missing_ok=True)
+    inherited_fds = tuple(spec.get("inherited_fds", ()))
     process = subprocess.Popen(
         spec["command"],
         cwd=spec["cwd"],
@@ -134,7 +135,10 @@ def main() -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         close_fds=True,
+        pass_fds=inherited_fds,
     )
+    for descriptor in inherited_fds:
+        os.close(descriptor)
     _write_handshake(Path(spec["handshake_path"]), process.pid)
 
     def forward_signal(signum: int, _: object) -> None:
