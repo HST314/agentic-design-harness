@@ -1,4 +1,8 @@
 export type RouteName = "tasks" | "inbox" | "settings";
+export type Route =
+  | { name: RouteName }
+  | { name: "task"; taskId: string }
+  | { name: "instance"; instanceId: string };
 
 const ROUTES: Record<RouteName, string> = {
   tasks: "/tasks",
@@ -6,21 +10,48 @@ const ROUTES: Record<RouteName, string> = {
   settings: "/settings",
 };
 
-export function currentRoute(pathname = window.location.pathname): RouteName {
+const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
+
+export function currentRoute(pathname = window.location.pathname): Route {
+  const task = pathname.match(/^\/tasks\/([^/]+)$/);
+  const taskId = parseIdentifier(task?.[1]);
+  if (taskId) {
+    return { name: "task", taskId };
+  }
+  const instance = pathname.match(/^\/instances\/([^/]+)$/);
+  const instanceId = parseIdentifier(instance?.[1]);
+  if (instanceId) {
+    return { name: "instance", instanceId };
+  }
   const match = (Object.entries(ROUTES) as Array<[RouteName, string]>).find(
     ([, path]) => pathname === path,
   );
-  return match?.[0] ?? "tasks";
+  return { name: match?.[0] ?? "tasks" };
 }
 
-export function navigate(route: RouteName): void {
-  const target = ROUTES[route];
+function parseIdentifier(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const decoded = decodeURIComponent(value);
+    return IDENTIFIER.test(decoded) ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+export function navigate(route: Route): void {
+  const target = routePath(route);
   if (window.location.pathname !== target) {
     window.history.pushState({}, "", target);
   }
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
-export function routePath(route: RouteName): string {
-  return ROUTES[route];
+export function routePath(route: Route | RouteName): string {
+  const resolved = typeof route === "string" ? { name: route } : route;
+  if (resolved.name === "task") return `/tasks/${encodeURIComponent(resolved.taskId)}`;
+  if (resolved.name === "instance") {
+    return `/instances/${encodeURIComponent(resolved.instanceId)}`;
+  }
+  return ROUTES[resolved.name];
 }

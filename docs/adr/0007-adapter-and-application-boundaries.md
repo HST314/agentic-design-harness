@@ -12,8 +12,9 @@ status, deliveries, usage, UI deep links and recovery. `AdapterRegistry` owns th
 
 Phase 1 registers `PptAgentContractAdapter` as an intentionally unavailable contract
 placeholder. It validates PPT cards and reports `UNAVAILABLE`, while every operational call
-fails with the stable `ADAPTER_UNAVAILABLE` code. A runnable Image adapter is the next vertical
-slice and is not simulated by the control-plane core.
+fails with the stable `ADAPTER_UNAVAILABLE` code. G2 also registers the runnable Image adapter;
+the application layer still dispatches only through the typed registry and does not simulate
+or branch on Image behavior inside the control-plane core.
 
 `HarnessApplicationService` is the only public boundary for workflows spanning domain,
 credential, asset, process and Adapter services. Plan save plus instance creation records a
