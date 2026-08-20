@@ -9,8 +9,11 @@ from harness.adapters.image_runtime import (
     IMAGE_ENTRYPOINT,
     IMAGE_WEB_REQUIREMENTS,
     ImageRuntimeBuilder,
+    content_tree_sha256,
+    dependency_tree_sha256,
 )
 from harness.core.errors import HarnessError
+from harness.storage.atomic import read_json
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -27,17 +30,24 @@ class ImageRuntimeBuilderTests(unittest.TestCase):
             runtime.mkdir()
             (source / "main_front.py").write_text("app = object()\n", encoding="utf-8")
             (dependencies / "dependency.py").write_text("VALUE = 1\n", encoding="utf-8")
+            source_sha256 = content_tree_sha256(source)
+            dependency_sha256 = dependency_tree_sha256(dependencies)
             builder = ImageRuntimeBuilder(
                 source,
                 dependencies,
                 revision="revision_1",
                 package_version="1.0.0",
+                source_content_sha256=source_sha256,
+                dependency_content_sha256=dependency_sha256,
             )
 
             artifact = builder.prepare(runtime)
             try:
                 self.assertEqual(builder.prepare(runtime), artifact)
                 self.assertTrue((artifact / IMAGE_ENTRYPOINT).is_file())
+                marker = read_json(artifact / ".harness-runtime-artifact.json")
+                self.assertEqual(marker["source_content_sha256"], source_sha256)
+                self.assertEqual(marker["dependency_content_sha256"], dependency_sha256)
                 self.assertEqual(
                     (artifact / IMAGE_WEB_REQUIREMENTS).read_text(encoding="utf-8"),
                     (ROOT / "requirements" / "image-agent-web.in").read_text(
@@ -67,11 +77,49 @@ class ImageRuntimeBuilderTests(unittest.TestCase):
                 dependencies,
                 revision="revision_1",
                 package_version="1.0.0",
+                source_content_sha256="0" * 64,
+                dependency_content_sha256="0" * 64,
             )
 
             with self.assertRaisesRegex(HarnessError, "symbolic link"):
                 builder.prepare(runtime)
             self.assertEqual(list(runtime.iterdir()), [])
+
+    def test_mutated_source_or_dependency_fails_content_attestation(self) -> None:
+        for mutated_tree in ("source", "dependency"):
+            with (
+                self.subTest(mutated_tree=mutated_tree),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = root / "source"
+                dependencies = root / "dependencies"
+                runtime = root / "runtime"
+                source.mkdir()
+                dependencies.mkdir()
+                runtime.mkdir()
+                source_file = source / "main_front.py"
+                dependency_file = dependencies / "dependency.py"
+                source_file.write_text("app = object()\n", encoding="utf-8")
+                dependency_file.write_text("VALUE = 1\n", encoding="utf-8")
+                builder = ImageRuntimeBuilder(
+                    source,
+                    dependencies,
+                    revision="revision_1",
+                    package_version="1.0.0",
+                    source_content_sha256=content_tree_sha256(source),
+                    dependency_content_sha256=dependency_tree_sha256(dependencies),
+                )
+
+                target = source_file if mutated_tree == "source" else dependency_file
+                target.write_text("MUTATED = True\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    HarnessError, f"{mutated_tree} content"
+                ) as rejected:
+                    builder.prepare(runtime)
+                self.assertEqual(rejected.exception.code, "PROCESS_START_FAILED")
+                self.assertEqual(list(runtime.iterdir()), [])
 
 
 if __name__ == "__main__":

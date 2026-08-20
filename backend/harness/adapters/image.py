@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -38,8 +39,19 @@ from .image_runtime import (
 SUPPORTED_IMAGE_AGENT_REVISION = "61c5b4f1b66d5d85f62b39b5b338ac2304e94d26"
 SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION = "1.7.8"
 SUPPORTED_IMAGE_API_MAJOR = "1"
+_SUPPORTED_IMAGE_RUNTIME_ATTESTATIONS = {
+    SUPPORTED_IMAGE_AGENT_REVISION: {
+        "source_content_sha256": (
+            "f50108651d00454916d2f58aae583cf60d6ac65ded3881ec6bbb5323bf8dc047"
+        ),
+        "dependency_content_sha256": (
+            "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb"
+        ),
+    }
+}
 
 _PACKAGE_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
+_JOB_ID = re.compile(r"^job_[A-Za-z0-9]+$")
 _JOB_STATES = frozenset(
     {"queued", "running", "cancelling", "succeeded", "failed", "cancelled", "interrupted"}
 )
@@ -123,6 +135,14 @@ _REQUIRED_ROUTES = frozenset(
         "/api/projects/{project_id}/timeline",
     }
 )
+_REQUIRED_ROUTE_METHODS = {
+    "/api/health": "get",
+    "/api/jobs/{job_id}": "get",
+    "/api/projects": "post",
+    "/api/projects/{project_id}": "get",
+    "/api/projects/{project_id}/jobs": "post",
+    "/api/projects/{project_id}/timeline": "get",
+}
 
 class ImageAgentAdapter:
     """Translate frozen Harness contracts to the Image Agent's local HTTP API."""
@@ -154,11 +174,14 @@ class ImageAgentAdapter:
         self.revision = revision
         self.host = host
         self.request_timeout_seconds = request_timeout_seconds
+        attestation = _SUPPORTED_IMAGE_RUNTIME_ATTESTATIONS.get(revision, {})
         self.runtime_builder = ImageRuntimeBuilder(
             source_root,
             dependency_root,
             revision=revision,
             package_version=SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION,
+            source_content_sha256=attestation.get("source_content_sha256", ""),
+            dependency_content_sha256=attestation.get("dependency_content_sha256", ""),
         )
 
     def validate_task_card(self, card: dict[str, Any]) -> ValidationResult:
@@ -468,11 +491,6 @@ class ImageAgentAdapter:
             "timeline_cursor": timeline_cursor,
             "compatibility": compatibility,
         }
-        if job_status in _ACTIVE_JOB_STATES:
-            return AdapterObservation(status="RUNNING", details=details)
-        if job_status in _FAILED_JOB_STATES:
-            details["error"] = deepcopy(job.get("error"))
-            return AdapterObservation(status="FAILED", details=details)
         manifest = view.get("manifest")
         snapshot = view.get("snapshot")
         capabilities = view.get("capabilities")
@@ -480,22 +498,54 @@ class ImageAgentAdapter:
             capabilities, list
         ):
             return self._compatibility_failure(details, "Image project response is malformed.")
-        if manifest.get("failed_step"):
-            details["error"] = deepcopy(manifest["failed_step"])
-            return AdapterObservation(status="FAILED", details=details)
+        failed_step = manifest.get("failed_step")
+        if failed_step is not None and not isinstance(failed_step, dict):
+            return self._compatibility_failure(
+                details, "Image project manifest is malformed."
+            )
         if any(
             not isinstance(item, str) or item not in _KNOWN_CAPABILITIES
             for item in capabilities
+        ) or len(capabilities) != len(set(capabilities)):
+            return self._compatibility_failure(
+                details, "Image Agent returned an unknown capability or duplicate capability."
+            )
+        if snapshot and (
+            ("waiting" in snapshot and type(snapshot["waiting"]) is not bool)
+            or ("completed" in snapshot and type(snapshot["completed"]) is not bool)
         ):
             return self._compatibility_failure(
-                details, "Image Agent returned an unknown capability."
+                details, "Image Agent returned a malformed snapshot."
             )
         phase = snapshot.get("phase")
+        if snapshot and (
+            not isinstance(phase, str)
+            or phase not in _WAITING_PHASES | _RUNNING_PHASES
+        ):
+            return self._compatibility_failure(
+                details, "Image Agent returned an unknown phase."
+            )
+        if not snapshot and capabilities:
+            return self._compatibility_failure(
+                details, "An empty Image snapshot published capabilities."
+            )
+        if snapshot:
+            details.update({"phase": phase, "completed": snapshot.get("completed", False)})
+        if job_status == "succeeded" and not snapshot:
+            return self._compatibility_failure(
+                details,
+                "A succeeded Image job did not publish a non-empty snapshot.",
+            )
+        if job_status in _ACTIVE_JOB_STATES:
+            return AdapterObservation(status="RUNNING", details=details)
+        if job_status in _FAILED_JOB_STATES:
+            details["error"] = deepcopy(job.get("error"))
+            return AdapterObservation(status="FAILED", details=details)
+        if failed_step:
+            details["error"] = deepcopy(failed_step)
+            return AdapterObservation(status="FAILED", details=details)
         if not snapshot:
             return AdapterObservation(status="RUNNING", details=details)
-        if not isinstance(phase, str) or phase not in _WAITING_PHASES | _RUNNING_PHASES:
-            return self._compatibility_failure(details, "Image Agent returned an unknown phase.")
-        details.update({"phase": phase, "completed": bool(snapshot.get("completed"))})
         if phase in _WAITING_PHASES:
             if snapshot.get("waiting") is not True or not capabilities:
                 return self._compatibility_failure(
@@ -528,22 +578,43 @@ class ImageAgentAdapter:
 
     def _check_compatibility(self, base_url: str) -> dict[str, Any]:
         document = self._request(base_url, "GET", "/openapi.json")
+        if not isinstance(document, dict):
+            self._protocol_error("Image Agent OpenAPI metadata is malformed.")
         info = document.get("info")
         paths = document.get("paths")
-        components = document.get("components", {}).get("schemas", {})
-        if not isinstance(info, dict) or not isinstance(paths, dict) or not isinstance(
-            components, dict
+        components_root = document.get("components")
+        if (
+            not isinstance(info, dict)
+            or not isinstance(paths, dict)
+            or not isinstance(components_root, dict)
         ):
             self._protocol_error("Image Agent OpenAPI metadata is malformed.")
+        components = components_root.get("schemas")
+        if not isinstance(components, dict):
+            self._protocol_error("Image Agent OpenAPI metadata is malformed.")
         api_version = info.get("version")
-        create_schema = components.get("CreateProjectRequest", {})
-        advance_schema = components.get("AdvanceRequest", {})
+        create_schema = components.get("CreateProjectRequest")
+        advance_schema = components.get("AdvanceRequest")
+        required_routes_valid = all(
+            isinstance(paths.get(route), dict)
+            and isinstance(paths[route].get(method), dict)
+            for route, method in _REQUIRED_ROUTE_METHODS.items()
+        )
+        if not isinstance(create_schema, dict) or not isinstance(advance_schema, dict):
+            self._protocol_error("Image Agent OpenAPI metadata is malformed.")
+        create_properties = create_schema.get("properties")
+        advance_properties = advance_schema.get("properties")
+        if not isinstance(create_properties, dict) or not isinstance(
+            advance_properties, dict
+        ):
+            self._protocol_error("Image Agent OpenAPI metadata is malformed.")
         if (
             not isinstance(api_version, str)
             or api_version.split(".", 1)[0] != SUPPORTED_IMAGE_API_MAJOR
             or not _REQUIRED_ROUTES.issubset(paths)
-            or "defer_run" not in create_schema.get("properties", {})
-            or "idempotency_key" not in advance_schema.get("properties", {})
+            or not required_routes_valid
+            or "defer_run" not in create_properties
+            or "idempotency_key" not in advance_properties
         ):
             self._protocol_error("Image Agent API version or capabilities are unsupported.")
         return {
@@ -604,23 +675,86 @@ class ImageAgentAdapter:
         if (
             not isinstance(job, dict)
             or not isinstance(job.get("job_id"), str)
-            or job.get("status") not in _JOB_STATES
+            or _JOB_ID.fullmatch(job["job_id"]) is None
+            or not isinstance(job.get("status"), str)
+            or job["status"] not in _JOB_STATES
         ):
             ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
+        for field in (
+            "project_id",
+            "operation",
+            "idempotency_key",
+            "created_at",
+            "started_at",
+            "finished_at",
+        ):
+            if field in job and not isinstance(job[field], str):
+                ImageAgentAdapter._protocol_error(
+                    "Image Agent returned an invalid job record."
+                )
+        error = job.get("error")
+        if error is not None and (
+            not isinstance(error, dict)
+            or not isinstance(error.get("code"), str)
+            or not isinstance(error.get("message"), str)
+            or ("category" in error and not isinstance(error["category"], str))
+        ):
+            ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
+        if job["status"] in {"failed", "interrupted"} and error is None:
+            ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
+        if job["status"] == "succeeded" and not isinstance(job.get("result"), dict):
+            ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
+        if "cancellation_requested" in job and type(job["cancellation_requested"]) is not bool:
+            ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
+        events = job.get("events")
+        if events is not None:
+            if not isinstance(events, list):
+                ImageAgentAdapter._protocol_error(
+                    "Image Agent returned an invalid job record."
+                )
+            previous_sequence = 0
+            for event in events:
+                if (
+                    not isinstance(event, dict)
+                    or type(event.get("seq")) is not int
+                    or event["seq"] <= previous_sequence
+                    or not isinstance(event.get("type"), str)
+                    or not isinstance(event.get("timestamp"), str)
+                ):
+                    ImageAgentAdapter._protocol_error(
+                        "Image Agent returned an invalid job record."
+                    )
+                previous_sequence = event["seq"]
 
     @staticmethod
     def _validate_timeline(timeline: dict[str, Any] | None, previous: int) -> int:
-        if not isinstance(timeline, dict) or not isinstance(timeline.get("items"), list):
+        if (
+            not isinstance(timeline, dict)
+            or not isinstance(timeline.get("items"), list)
+            or type(timeline.get("next_cursor")) is not int
+            or type(timeline.get("has_more")) is not bool
+            or len(timeline.get("items", [])) > 100
+        ):
             ImageAgentAdapter._protocol_error("Image Agent returned an invalid timeline page.")
-        sequences = [item.get("sequence") for item in timeline["items"] if isinstance(item, dict)]
+        sequences: list[int] = []
+        for item in timeline["items"]:
+            if (
+                not isinstance(item, dict)
+                or type(item.get("sequence")) is not int
+                or not isinstance(item.get("type"), str)
+                or not isinstance(item.get("timestamp"), str)
+            ):
+                ImageAgentAdapter._protocol_error(
+                    "Image Agent returned an invalid timeline page."
+                )
+            sequences.append(item["sequence"])
         cursor = timeline.get("next_cursor")
         if (
-            len(sequences) != len(timeline["items"])
-            or any(type(item) is not int or item <= previous for item in sequences)
-            or sequences != sorted(sequences)
-            or type(cursor) is not int
+            any(sequence <= previous for sequence in sequences)
+            or any(current <= prior for prior, current in pairwise(sequences))
             or cursor < previous
             or cursor != (sequences[-1] if sequences else previous)
+            or (timeline["has_more"] and not sequences)
         ):
             ImageAgentAdapter._protocol_error("Image Agent timeline cursor is invalid.")
         return cursor
