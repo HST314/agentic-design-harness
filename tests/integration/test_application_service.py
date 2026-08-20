@@ -47,6 +47,7 @@ class FakeImageAdapter:
         self.observation = AdapterObservation("RUNNING")
         self.deliveries = []
         self.advance_delay = 0.0
+        self.advance_accepted = True
 
     def validate_task_card(self, card):
         errors = () if card.get("agent_type") == "image" else ("wrong agent type",)
@@ -68,7 +69,11 @@ class FakeImageAdapter:
         if self.advance_delay:
             time.sleep(self.advance_delay)
         self.advance_calls.append((instance_id, action, payload, operation_id))
-        return AdapterCommandResult(True, operation_id)
+        return AdapterCommandResult(
+            self.advance_accepted,
+            operation_id,
+            {"reason": "scripted rejection"} if not self.advance_accepted else {},
+        )
 
     def apply_config(self, instance_id, config, revision, operation_id):
         return AdapterCommandResult(True, operation_id)
@@ -559,7 +564,12 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             role="final_artwork",
             description="Wrong kind regression",
             operation_id="publish_wrong_kind",
-            envelope=envelope("complete-wrong-kind", running["task_revision"], "adapter"),
+            envelope=envelope(
+                "complete-wrong-kind",
+                running["task_revision"],
+                "adapter",
+                "image_adapter",
+            ),
         )
         self.assertFalse(incomplete["complete"])
 
@@ -572,10 +582,102 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             role="final_artwork",
             description="Verified final artwork",
             operation_id="publish_final_image",
-            envelope=envelope("complete-final-image", running["task_revision"], "adapter"),
+            envelope=envelope(
+                "complete-final-image",
+                running["task_revision"],
+                "adapter",
+                "image_adapter",
+            ),
         )
         self.assertTrue(completed["complete"])
         self.assertEqual(completed["transition"]["task"]["status"], "SUCCEEDED")
+        self.assertEqual(
+            [item["kind"] for item in self.approvals.list_inbox(owner="human")],
+            ["INSTANCE_SUCCEEDED", "TASK_SUCCEEDED"],
+        )
+
+        replay = self.application.publish_delivery_and_complete(
+            "t_delivery_application",
+            "i_image_1",
+            source_relative_path="instances/i_image_1/outputs/final.png",
+            role="final_artwork",
+            description="Verified final artwork",
+            operation_id="publish_final_image",
+            envelope=envelope(
+                "complete-final-image",
+                running["task_revision"],
+                "adapter",
+                "image_adapter",
+            ),
+        )
+        self.assertEqual(replay, completed)
+        self.assertEqual(len(self.assets.list_assets("t_delivery_application")), 2)
+        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
+
+        with self.assertRaises(HarnessError) as new_delivery:
+            self.application.publish_delivery_and_complete(
+                "t_delivery_application",
+                "i_image_1",
+                source_relative_path="instances/i_image_1/outputs/final.png",
+                role="final_artwork",
+                description="Unexpected second publication",
+                operation_id="publish_after_success",
+                envelope=envelope(
+                    "complete-final-image",
+                    running["task_revision"],
+                    "adapter",
+                    "image_adapter",
+                ),
+            )
+        self.assertEqual(new_delivery.exception.code, "INVALID_STATE_TRANSITION")
+        self.assertEqual(len(self.assets.list_assets("t_delivery_application")), 2)
+
+    def test_delivery_command_rejects_wrong_actor_before_publication(self) -> None:
+        created = create_task(self.commands, "t_delivery_actor", "auto")
+        draft = image_plan("t_delivery_actor")
+        saved = self.application.save_plan_and_create_instances(
+            "t_delivery_actor",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_delivery_actor",
+            envelope=envelope("prepare-delivery-actor", created["revision"]),
+        )
+        starting = self.commands.transition_instance(
+            "t_delivery_actor",
+            "i_image_1",
+            "STARTING",
+            envelope("delivery-actor-starting", saved["task_revision"], "adapter"),
+        )
+        running = self.commands.transition_instance(
+            "t_delivery_actor",
+            "i_image_1",
+            "RUNNING",
+            envelope("delivery-actor-running", starting["task_revision"], "adapter"),
+        )
+        instance_root = self.assets.initialize_instance_workspace(
+            "t_delivery_actor", "i_image_1"
+        )
+        (instance_root / "outputs" / "final.png").write_bytes(
+            b"\x89PNG\r\n\x1a\nactor-gate"
+        )
+
+        with self.assertRaises(HarnessError) as denied:
+            self.application.publish_delivery_and_complete(
+                "t_delivery_actor",
+                "i_image_1",
+                source_relative_path="instances/i_image_1/outputs/final.png",
+                role="final_artwork",
+                description="Actor gate regression",
+                operation_id="publish_wrong_actor",
+                envelope=envelope(
+                    "complete-wrong-actor", running["task_revision"], "human"
+                ),
+            )
+
+        self.assertEqual(denied.exception.code, "VALIDATION_ERROR")
+        self.assertEqual(self.assets.list_assets("t_delivery_actor"), [])
 
     def test_waiting_observation_resolves_once_after_crash_and_handles_inbox(self) -> None:
         created = create_task(self.commands, "t_approval_application", "auto")
@@ -661,6 +763,85 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(replay["approval"]["status"], "APPROVED")
         self.assertEqual(replay["instance"]["status"], "RUNNING")
         self.assertEqual(self.approvals.list_inbox(owner="human")[0]["status"], "HANDLED")
+
+    def test_rejected_adapter_advance_keeps_approval_and_instance_pending(self) -> None:
+        observed = self._waiting_approval("t_rejected_advance")
+        approval = observed["approval"]
+        self.fake_adapter.advance_accepted = False
+        resolve_envelope = envelope(
+            "resolve-rejected-advance",
+            approval["approval_revision"],
+        )
+
+        for _ in range(2):
+            with self.assertRaises(HarnessError) as rejected:
+                self.application.resolve_approval(
+                    approval["approval"]["approval_id"],
+                    decision="APPROVED",
+                    action="approve_taskbook",
+                    payload={},
+                    operation_id="resolve_rejected_advance",
+                    envelope=resolve_envelope,
+                )
+            self.assertEqual(rejected.exception.code, "INVALID_STATE_TRANSITION")
+            self.assertIn("no decision was committed", rejected.exception.message)
+
+        self.assertEqual(len(self.fake_adapter.advance_calls), 1)
+        details = self.approvals.get_approval(approval["approval"]["approval_id"])
+        self.assertEqual(details["approval"]["status"], "PENDING")
+        self.assertEqual(
+            self.store.instance.get("t_rejected_advance", "i_image_1")["status"],
+            "WAITING_APPROVAL",
+        )
+        inbox = self.approvals.list_inbox(owner="human")
+        self.assertEqual([(item["kind"], item["status"]) for item in inbox], [
+            ("APPROVAL_REQUIRED", "UNREAD")
+        ])
+        self.assertEqual(
+            read_json(self.application._intent_path("resolve_rejected_advance"))["state"],
+            "ABORTED",
+        )
+
+    def test_pending_approval_blocks_delivery_before_asset_publication(self) -> None:
+        observed = self._waiting_approval("t_pending_delivery")
+        instance_root = self.assets.initialize_instance_workspace(
+            "t_pending_delivery", "i_image_1"
+        )
+        (instance_root / "outputs" / "final.png").write_bytes(
+            b"\x89PNG\r\n\x1a\npending-gate"
+        )
+
+        with self.assertRaises(HarnessError) as blocked:
+            self.application.publish_delivery_and_complete(
+                "t_pending_delivery",
+                "i_image_1",
+                source_relative_path="instances/i_image_1/outputs/final.png",
+                role="final_artwork",
+                description="Pending approval bypass regression",
+                operation_id="publish_pending_delivery",
+                envelope=envelope(
+                    "complete-pending-delivery",
+                    observed["transition"]["task_revision"],
+                    "adapter",
+                    "image_adapter",
+                ),
+            )
+
+        self.assertEqual(blocked.exception.code, "INVALID_STATE_TRANSITION")
+        self.assertIn("pending approval", blocked.exception.message.lower())
+        self.assertEqual(self.assets.list_assets("t_pending_delivery"), [])
+        self.assertEqual(
+            self.store.instance.get("t_pending_delivery", "i_image_1")["status"],
+            "WAITING_APPROVAL",
+        )
+        approval = self.approvals.get_approval(
+            observed["approval"]["approval"]["approval_id"]
+        )
+        self.assertEqual(approval["approval"]["status"], "PENDING")
+        self.assertEqual(
+            [item["kind"] for item in self.approvals.list_inbox(owner="human")],
+            ["APPROVAL_REQUIRED"],
+        )
 
     def test_completed_observation_publishes_required_asset_before_success(self) -> None:
         created = create_task(self.commands, "t_collect_application", "auto")
@@ -783,6 +964,38 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(sum(isinstance(item, dict) for item in outcomes), 1)
         self.assertEqual(sum(isinstance(item, HarnessError) for item in outcomes), 1)
         self.assertEqual(len(self.fake_adapter.advance_calls), 1)
+
+    def _waiting_approval(self, task_id: str) -> dict:
+        created = create_task(self.commands, task_id, "auto")
+        draft = image_plan(task_id)
+        saved = self.application.save_plan_and_create_instances(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id=f"prepare_{task_id}",
+            envelope=envelope(f"prepare-{task_id}", created["revision"]),
+        )
+        starting = self.commands.transition_instance(
+            task_id,
+            "i_image_1",
+            "STARTING",
+            envelope(f"{task_id}-starting", saved["task_revision"], "adapter"),
+        )
+        self.commands.transition_instance(
+            task_id,
+            "i_image_1",
+            "RUNNING",
+            envelope(f"{task_id}-running", starting["task_revision"], "adapter"),
+        )
+        self.fake_adapter.observation = AdapterObservation(
+            "WAITING_APPROVAL",
+            step_id="waiting_human_approval",
+            capabilities=("approve_taskbook",),
+            details={"job_id": f"job_{task_id}"},
+        )
+        return self.application.observe_instance(task_id, "i_image_1")
 
 
 if __name__ == "__main__":

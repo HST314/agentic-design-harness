@@ -384,6 +384,8 @@ class HarnessApplicationService:
                     )
                 if intent["state"] == "COMMITTED":
                     return deepcopy(intent["result"])
+                if intent["state"] == "ABORTED":
+                    self._raise_terminal_intent(intent)
             else:
                 approval_details = self.approvals.get_approval(approval_id)
                 approval = approval_details["approval"]
@@ -447,7 +449,52 @@ class HarnessApplicationService:
         operation_id: str,
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
-        manifest = self.assets.publish_delivery(
+        with FileLock(
+            self._task_lock(task_id), self.store.lock_timeout_seconds
+        ), self.commands.task_guard(task_id):
+            instance = self._instance(task_id, instance_id)
+            if instance["status"] == "SUCCEEDED":
+                return self._replay_completed_delivery(
+                    task_id,
+                    instance_id,
+                    source_relative_path=source_relative_path,
+                    role=role,
+                    description=description,
+                    operation_id=operation_id,
+                    envelope=envelope,
+                )
+            self._require_delivery_command(task_id, instance_id, envelope)
+            manifest = self.assets.publish_delivery(
+                task_id,
+                instance_id,
+                source_relative_path=source_relative_path,
+                role=role,
+                description=description,
+                idempotency_key=operation_id,
+            )
+            transition = self._complete_instance_if_ready(
+                task_id, instance_id, envelope=envelope, require_deliveries=False
+            )
+            return {
+                "manifest": manifest,
+                "complete": transition is not None,
+                "transition": transition,
+            }
+
+    def _replay_completed_delivery(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        source_relative_path: str,
+        role: str,
+        description: str,
+        operation_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        instance = self._instance(task_id, instance_id)
+        self._require_owning_adapter(instance, envelope)
+        manifest = self.assets.replay_delivery(
             task_id,
             instance_id,
             source_relative_path=source_relative_path,
@@ -455,13 +502,17 @@ class HarnessApplicationService:
             description=description,
             idempotency_key=operation_id,
         )
-        complete = self._required_deliveries_satisfied(task_id, instance_id)
-        transition = None
-        if complete:
-            transition = self.commands.transition_instance(
-                task_id, instance_id, "SUCCEEDED", envelope
+        if manifest is None:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A succeeded instance only accepts an exact delivery replay.",
+                {"instance_id": instance_id},
             )
-        return {"manifest": manifest, "complete": complete, "transition": transition}
+        transition = self.commands.transition_instance(
+            task_id, instance_id, "SUCCEEDED", envelope
+        )
+        self._ensure_success_notifications(task_id, instance_id, transition)
+        return {"manifest": manifest, "complete": True, "transition": transition}
 
     def _resume_approval(
         self, intent_path: Path, crash_hook: CrashHook | None
@@ -487,10 +538,35 @@ class HarnessApplicationService:
                 "operation_id": advance.operation_id,
                 "details": deepcopy(advance.details),
             }
-            intent["state"] = "ADVANCE_ACCEPTED"
+            intent["state"] = (
+                "ADVANCE_ACCEPTED" if advance.accepted else "ADVANCE_REJECTED"
+            )
             atomic_write_json(intent_path, intent)
             if crash_hook:
                 crash_hook("after_adapter_advance")
+        if request["decision"] == "APPROVED" and not intent["advance"]["accepted"]:
+            error = HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "The Agent adapter rejected the approval advance; no decision was committed.",
+                {
+                    "approval_id": request["approval_id"],
+                    "instance_id": instance_id,
+                    "operation_id": intent["advance"]["operation_id"],
+                },
+            )
+            intent.update(
+                {
+                    "state": "ABORTED",
+                    "aborted_at": utc_now(),
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": deepcopy(error.details),
+                    },
+                }
+            )
+            atomic_write_json(intent_path, intent)
+            raise error
         target_status = "RUNNING" if request["decision"] == "APPROVED" else "FAILED"
         instance = self._instance(task_id, instance_id)
         if instance["status"] != target_status:
@@ -567,49 +643,139 @@ class HarnessApplicationService:
             raise HarnessError(
                 "VALIDATION_ERROR", "A completed Image Agent did not expose a delivery."
             )
-        manifests = []
-        for delivery in deliveries:
-            operation_id = (
-                f"collect-{instance_id}-{delivery['sha256'][:16]}-"
-                f"{hashlib.sha256(delivery['role'].encode()).hexdigest()[:8]}"
-            )
-            manifests.append(
-                self.assets.publish_delivery(
-                    task_id,
-                    instance_id,
-                    source_relative_path=delivery["source_relative_path"],
-                    role=delivery["role"],
-                    description=delivery["description"],
-                    idempotency_key=operation_id,
-                )
-            )
-        if not self._required_deliveries_satisfied(task_id, instance_id):
-            raise HarnessError(
-                "VALIDATION_ERROR",
-                "Published Image assets do not satisfy the required delivery contract.",
-            )
-        manifest_digest = digest_json(sorted(item["asset_id"] for item in manifests))
-        transition = self.commands.transition_instance(
-            task_id,
-            instance_id,
-            "SUCCEEDED",
-            CommandEnvelope(
-                idempotency_key=f"complete-{instance_id}-{manifest_digest[:20]}",
-                actor_type="adapter",
-                actor_id=f"{self._instance(task_id, instance_id)['agent_type']}_adapter",
-                expected_revision=self.store.task.revision(task_id, task_id),
+        envelope = CommandEnvelope(
+            idempotency_key=(
+                f"complete-{instance_id}-"
+                f"{digest_json(sorted(item['sha256'] for item in deliveries))[:20]}"
             ),
+            actor_type="adapter",
+            actor_id=f"{self._instance(task_id, instance_id)['agent_type']}_adapter",
+            expected_revision=self.store.task.revision(task_id, task_id),
         )
+        with FileLock(
+            self._task_lock(task_id), self.store.lock_timeout_seconds
+        ), self.commands.task_guard(task_id):
+            self._require_delivery_command(task_id, instance_id, envelope)
+            manifests = []
+            for delivery in deliveries:
+                operation_id = (
+                    f"collect-{instance_id}-{delivery['sha256'][:16]}-"
+                    f"{hashlib.sha256(delivery['role'].encode()).hexdigest()[:8]}"
+                )
+                manifests.append(
+                    self.assets.publish_delivery(
+                        task_id,
+                        instance_id,
+                        source_relative_path=delivery["source_relative_path"],
+                        role=delivery["role"],
+                        description=delivery["description"],
+                        idempotency_key=operation_id,
+                    )
+                )
+            transition = self._complete_instance_if_ready(
+                task_id, instance_id, envelope=envelope, require_deliveries=True
+            )
+            assert transition is not None
         instance = next(
             item
             for item in transition["plan"]["instances"]
             if item["instance_id"] == instance_id
         )
+        return {
+            "instance": instance,
+            "manifests": manifests,
+            "transition": transition,
+            "observation": {
+                "step_id": observation.step_id,
+                "details": deepcopy(observation.details),
+            },
+        }
+
+    def _require_delivery_command(
+        self,
+        task_id: str,
+        instance_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        instance = self._instance(task_id, instance_id)
+        self._require_owning_adapter(instance, envelope)
+        if instance["status"] != "RUNNING":
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "Only a running instance with no pending approval may publish a delivery.",
+                {"current": instance["status"], "instance_id": instance_id},
+            )
+        pending = self.approvals.list_approvals(
+            task_id=task_id,
+            instance_id=instance_id,
+            status="PENDING",
+        )
+        if pending:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A pending approval must be resolved before delivery completion.",
+                {
+                    "instance_id": instance_id,
+                    "approval_ids": [item["approval_id"] for item in pending],
+                },
+            )
+        self.commands.validate_task_revision(task_id, envelope.expected_revision)
+        return instance
+
+    @staticmethod
+    def _require_owning_adapter(
+        instance: dict[str, Any], envelope: CommandEnvelope
+    ) -> None:
+        expected_actor_id = f"{instance['agent_type']}_adapter"
+        if envelope.actor_type != "adapter" or envelope.actor_id != expected_actor_id:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only the owning Agent adapter may publish an instance delivery.",
+                {
+                    "actor_type": envelope.actor_type,
+                    "actor_id": envelope.actor_id,
+                    "expected_actor_id": expected_actor_id,
+                },
+            )
+
+    def _complete_instance_if_ready(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        envelope: CommandEnvelope,
+        require_deliveries: bool,
+    ) -> dict[str, Any] | None:
+        """The sole instance-success gate for manual and collected deliveries."""
+
+        self._require_delivery_command(task_id, instance_id, envelope)
+        if not self._required_deliveries_satisfied(task_id, instance_id):
+            if require_deliveries:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "Published Image assets do not satisfy the required delivery contract.",
+                )
+            return None
+        transition = self.commands.transition_instance(
+            task_id,
+            instance_id,
+            "SUCCEEDED",
+            envelope,
+        )
+        self._ensure_success_notifications(task_id, instance_id, transition)
+        return transition
+
+    def _ensure_success_notifications(
+        self,
+        task_id: str,
+        instance_id: str,
+        transition: dict[str, Any],
+    ) -> None:
         self.approvals.ensure_notification(
             task_id,
             kind="INSTANCE_SUCCEEDED",
             owner="human",
-            title="Image Agent 交付已发布",
+            title="Agent 交付已发布",
             message=f"实例 {instance_id} 的必需交付已校验并发布。",
             deep_link=f"tasks/{task_id}?tab=resources",
             dedupe_key=f"instance-succeeded:{instance_id}",
@@ -623,17 +789,11 @@ class HarnessApplicationService:
                 title="主任务已完成",
                 message=f"任务 {task_id} 的必需阶段均已完成。",
                 deep_link=f"tasks/{task_id}",
-                dedupe_key=f"task-complete:{task_id}:{transition['task']['plan_revision']}",
+                dedupe_key=(
+                    f"task-complete:{task_id}:"
+                    f"{transition['task']['plan_revision']}"
+                ),
             )
-        return {
-            "instance": instance,
-            "manifests": manifests,
-            "transition": transition,
-            "observation": {
-                "step_id": observation.step_id,
-                "details": deepcopy(observation.details),
-            },
-        }
 
     def _required_deliveries_satisfied(self, task_id: str, instance_id: str) -> bool:
         plan = self._plan(task_id)

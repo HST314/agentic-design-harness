@@ -392,6 +392,38 @@ class AssetService:
                 atomic_write_json(record_path, record)
             return self._resume_publication(record_path, crash_hook)
 
+    def replay_delivery(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        source_relative_path: str,
+        role: str,
+        description: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Return an exact committed publication replay without creating one."""
+
+        self._require_instance(task_id, instance_id)
+        self._validate_idempotency_key(idempotency_key)
+        normalized = normalized_relative_path(source_relative_path).as_posix()
+        request = {
+            "instance_id": instance_id,
+            "source_relative_path": normalized,
+            "role": role,
+            "description": description,
+        }
+        transaction_digest = hashlib.sha256(
+            f"{instance_id}:{idempotency_key}".encode()
+        ).hexdigest()
+        record_path = self._transaction_dir(task_id) / f"pub_{transaction_digest[:24]}.json"
+        with FileLock(self._asset_lock(task_id), self.store.lock_timeout_seconds):
+            if not record_path.exists():
+                return None
+            record = read_json(record_path)
+            self._check_request(record, "publication", request)
+            return self._resume_publication(record_path, None)
+
     def recover(self) -> list[dict[str, Any]]:
         """Finish committed-intent publications and quarantine corrupted assets."""
 

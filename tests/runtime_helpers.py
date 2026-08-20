@@ -26,11 +26,16 @@ def build_service(root: Path) -> tuple[FileStateStore, TaskCommandService]:
     return store, TaskCommandService(store, store.contracts)
 
 
-def envelope(key: str, expected: int, actor_type: str = "human") -> CommandEnvelope:
+def envelope(
+    key: str,
+    expected: int,
+    actor_type: str = "human",
+    actor_id: str = "tester",
+) -> CommandEnvelope:
     return CommandEnvelope(
         idempotency_key=key,
         actor_type=actor_type,
-        actor_id="tester",
+        actor_id=actor_id,
         expected_revision=expected,
     )
 
