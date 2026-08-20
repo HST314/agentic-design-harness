@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..core.errors import HarnessError
@@ -44,6 +44,16 @@ def resolve_committed_browser_path(
     events: list[dict[str, Any]],
     verify_manifest: ManifestVerifier,
 ) -> Path:
+    normalized, event = committed_browser_event(relative_path, events)
+    return verify_browser_event_path(
+        workspace, normalized.as_posix(), event, verify_manifest
+    )
+
+
+def committed_browser_event(
+    relative_path: str,
+    events: list[dict[str, Any]],
+) -> tuple[PurePosixPath, dict[str, Any]]:
     normalized = normalized_relative_path(relative_path)
     fixed = {
         ("inputs", "original"),
@@ -67,9 +77,7 @@ def resolve_committed_browser_path(
         raise HarnessError(
             "ASSET_VALIDATION_FAILED", "Only committed assets may be browsed."
         )
-    return verify_browser_event_path(
-        workspace, normalized.as_posix(), event, verify_manifest
-    )
+    return normalized, event
 
 
 def committed_browser_paths(

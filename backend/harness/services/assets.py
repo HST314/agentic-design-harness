@@ -28,6 +28,7 @@ from .asset_browser import (
     verify_browser_event_path,
 )
 from .asset_files import detect_mime, file_digest, kind_for_mime
+from .asset_reader import OpenedCommittedAsset, open_committed_asset
 
 CrashHook = Callable[[str], None]
 
@@ -727,37 +728,60 @@ class AssetService:
 
     def preview(self, task_id: str, relative_path: str) -> dict[str, Any]:
         workspace = self.initialize_task_workspace(task_id)
-        path = self._resolve_browser_path(task_id, workspace, relative_path)
-        if not path.is_file() or path.stat().st_size > self.preview_limit_bytes:
-            self._invalid("The file cannot be safely previewed.")
-        mime_type = detect_mime(path, path.name)
-        if mime_type.startswith("image/"):
-            return {"mime_type": mime_type, "content": path.read_bytes(), "encoding": None}
-        if mime_type not in SAFE_PREVIEW_MIME:
-            self._invalid("This file type is download-only.")
-        try:
-            content = path.read_text(encoding="utf-8")
-            if mime_type == "application/json":
-                json.loads(content)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            self._invalid(f"The preview content is invalid: {type(exc).__name__}.")
-        return {"mime_type": mime_type, "content": content, "encoding": "utf-8"}
+        with self._open_browser_file(task_id, workspace, relative_path) as opened:
+            if opened.size_bytes > self.preview_limit_bytes:
+                self._invalid("The file cannot be safely previewed.")
+            if opened.mime_type.startswith("image/"):
+                return {
+                    "mime_type": opened.mime_type,
+                    "content": opened.stream.read(),
+                    "encoding": None,
+                }
+            if opened.mime_type not in SAFE_PREVIEW_MIME:
+                self._invalid("This file type is download-only.")
+            try:
+                content = opened.stream.read().decode("utf-8")
+                if opened.mime_type == "application/json":
+                    json.loads(content)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self._invalid(f"The preview content is invalid: {type(exc).__name__}.")
+            return {
+                "mime_type": opened.mime_type,
+                "content": content,
+                "encoding": "utf-8",
+            }
 
     def download(self, task_id: str, relative_path: str) -> dict[str, Any]:
         workspace = self.initialize_task_workspace(task_id)
-        path = self._resolve_browser_path(task_id, workspace, relative_path)
-        if not path.is_file():
-            self._invalid("Only regular files may be downloaded.")
-        filename = quote(path.name, safe="")
+        opened = self._open_browser_file(task_id, workspace, relative_path)
+        filename = quote(opened.filename, safe="")
         return {
-            "path": path,
-            "mime_type": detect_mime(path, path.name),
+            "stream": opened.stream,
+            "mime_type": opened.mime_type,
+            "size_bytes": opened.size_bytes,
+            "sha256": opened.sha256,
             "headers": {
                 "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
                 "X-Content-Type-Options": "nosniff",
                 "Content-Security-Policy": "default-src 'none'; sandbox",
             },
         }
+
+    def _open_browser_file(
+        self, task_id: str, workspace: Path, relative_path: str
+    ) -> OpenedCommittedAsset:
+        try:
+            return open_committed_asset(
+                workspace, relative_path, self._visible_asset_events(task_id)
+            )
+        except HarnessError as exc:
+            if exc.code == "ASSET_CORRUPTED" and exc.details.get("asset_id"):
+                self._mark_corrupted(
+                    task_id,
+                    str(exc.details["asset_id"]),
+                    "browser file failed descriptor-safe verification",
+                )
+            raise
 
     def _visible_asset_events(self, task_id: str) -> list[dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
