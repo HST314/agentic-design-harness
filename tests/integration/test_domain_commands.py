@@ -57,7 +57,7 @@ class TaskCommandTests(unittest.TestCase):
         draft = image_plan("t_manual")
         saved = self._save("t_manual", draft)
         self.assertEqual(saved["task"]["status"], "AWAITING_START_CONFIRMATION")
-        self.assertEqual(saved["task_revision"], 3)
+        self.assertEqual(saved["task_revision"], 2)
         self.assertEqual(saved["plan"]["stages"][0]["status"], "READY")
         replay = self._save("t_manual", draft)
         self.assertEqual(replay, saved)
@@ -109,6 +109,24 @@ class TaskCommandTests(unittest.TestCase):
         self.assertIsNotNone(
             confirmed["plan"]["instances"][0]["requirement_lifecycle"]["first_activated_at"]
         )
+
+    def test_manual_optional_ppt_only_is_explicitly_skipped_without_partial(self) -> None:
+        create_task(self.service, "t_ppt_optional")
+        saved = self._save(
+            "t_ppt_optional",
+            ppt_plan("t_ppt_optional", required=False),
+        )
+        self.assertEqual(saved["task"]["status"], "AWAITING_START_CONFIRMATION")
+        self.assertEqual(saved["plan"]["stages"][0]["status"], "SKIPPED")
+
+        confirmed = self.service.confirm_start(
+            "t_ppt_optional",
+            envelope("confirm-ppt-optional", saved["task_revision"]),
+        )
+
+        self.assertEqual(confirmed["task"]["status"], "SUCCEEDED")
+        self.assertEqual(confirmed["plan"]["stages"][0]["status"], "SKIPPED")
+        self.assertNotEqual(confirmed["task"]["status"], "PARTIAL")
 
     def test_required_ppt_is_delayed_until_image_succeeds_and_survives_restart(self) -> None:
         create_task(self.service, "t_delayed", "auto")

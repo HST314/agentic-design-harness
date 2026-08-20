@@ -52,19 +52,43 @@ class IdempotencyRepository:
         payload: dict[str, Any],
         result: dict[str, Any],
     ) -> dict[str, Any]:
+        return self.remember_digest(
+            scope,
+            key,
+            command,
+            self.request_digest(command, payload),
+            result,
+        )
+
+    def remember_digest(
+        self,
+        scope: str,
+        key: str,
+        command: str,
+        request_sha256: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Materialize an idempotency projection from a durable command event."""
+
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self._path(scope, key)
         with FileLock(self.root / ".lock", self.lock_timeout_seconds):
-            existing = self.lookup(scope, key, command, payload)
-            if existing is not None:
-                return existing
+            if path.exists():
+                record = read_json(path)
+                if record["request_sha256"] != request_sha256:
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The idempotency key was already used for a different request.",
+                        {"scope": scope, "command": command},
+                    )
+                return record["result"]
             atomic_write_json(
                 path,
                 {
                     "scope": scope,
                     "key": key,
                     "command": command,
-                    "request_sha256": self.request_digest(command, payload),
+                    "request_sha256": request_sha256,
                     "result": result,
                 },
             )

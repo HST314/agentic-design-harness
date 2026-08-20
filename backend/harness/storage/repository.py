@@ -95,8 +95,12 @@ class SnapshotRepository(Generic[Payload]):
         actor: Actor,
         command: str,
         idempotency_key: str,
+        command_result: dict[str, Any] | None = None,
+        request_sha256: str | None = None,
         crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
+        if (command_result is None) != (request_sha256 is None):
+            raise ValueError("command_result and request_sha256 must be committed together")
         if self.validator:
             self.validator(payload)
         self.layout.initialize_task(task_id)
@@ -139,6 +143,9 @@ class SnapshotRepository(Generic[Payload]):
                 "occurred_at": wrapper["committed_at"],
                 "snapshot": wrapper,
             }
+            if command_result is not None:
+                event["command_result"] = command_result
+                event["request_sha256"] = request_sha256
             event_path = self.layout.control_root / "tasks" / task_id / "events.ndjson"
             append_record(event_path, event)
             if crash_hook:

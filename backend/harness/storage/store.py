@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts import ContractRegistry
-from .atomic import atomic_write_json, read_json
+from ..core.errors import HarnessError
+from .atomic import atomic_write_json, fsync_directory, read_json
 from .idempotency import IdempotencyRepository
 from .layout import StateLayout
 from .locks import FileLock
@@ -168,6 +169,7 @@ class FileStateStore:
 
             events = recover_records(task_directory / "events.ndjson", sink)
             recover_records(task_directory / "usage.ndjson", sink)
+            self._recover_idempotency_results(task_id, events)
             latest: dict[tuple[str, str], dict[str, Any]] = {}
             for event in events:
                 if event.get("event_type") != "OBJECT_COMMITTED":
@@ -220,6 +222,45 @@ class FileStateStore:
         self.rebuild_inbox_index("")
         return warnings
 
+    def lookup_committed_command_result(
+        self,
+        scope: str,
+        key: str,
+        command: str,
+        request_sha256: str,
+    ) -> dict[str, Any] | None:
+        """Read the exact result carried by an authoritative business commit."""
+
+        path = self.layout.control_root / "tasks" / scope / "events.ndjson"
+        committed: dict[str, Any] | None = None
+        for event in recover_records(path, self._warning_sink(scope)):
+            if event.get("command_result") is None or event.get("idempotency_key") != key:
+                continue
+            if event.get("command") != command or event.get("request_sha256") != request_sha256:
+                raise HarnessError(
+                    "IDEMPOTENCY_CONFLICT",
+                    "The idempotency key was already used for a different request.",
+                    {"scope": scope, "command": command},
+                )
+            committed = event["command_result"]
+        return committed
+
+    def _recover_idempotency_results(
+        self, task_id: str, events: list[dict[str, Any]]
+    ) -> None:
+        for event in events:
+            result = event.get("command_result")
+            request_sha256 = event.get("request_sha256")
+            if result is None or request_sha256 is None:
+                continue
+            self.idempotency.remember_digest(
+                task_id,
+                event["idempotency_key"],
+                event["command"],
+                request_sha256,
+                result,
+            )
+
     def _reconcile_plan_projections(self, task_id: str) -> None:
         """Complete an aggregate commit whose authoritative plan landed first."""
 
@@ -235,8 +276,6 @@ class FileStateStore:
         actor = Actor("system", "startup_recovery")
         for repository, object_id, payload in projections:
             current = repository.read_wrapper(task_id, object_id)
-            if current is not None and current["committed_at"] >= plan_wrapper["committed_at"]:
-                continue
             if current is not None and current["payload"] == payload:
                 continue
             repository.put(
@@ -250,6 +289,29 @@ class FileStateStore:
                     f"recover-{plan_wrapper['revision']}-{repository.object_type}-{object_id}"
                 ),
             )
+        self.retire_plan_projections(task_id, plan)
+        workspace_task = self.layout.workspace_root / "tasks" / task_id
+        atomic_write_json(workspace_task / "task-summary.json", plan["task"], mode=0o640)
+
+    def retire_plan_projections(self, task_id: str, plan: dict[str, Any]) -> None:
+        """Remove Stage/Instance projections absent from the authoritative plan."""
+
+        projection_sets = (
+            (self.stage, "stage_id", {item["stage_id"] for item in plan["stages"]}),
+            (
+                self.instance,
+                "instance_id",
+                {item["instance_id"] for item in plan["instances"]},
+            ),
+        )
+        for repository, identifier, active_ids in projection_sets:
+            for payload in repository.list(task_id):
+                object_id = payload[identifier]
+                if object_id in active_ids:
+                    continue
+                path = repository.path(task_id, object_id)
+                path.unlink(missing_ok=True)
+                fsync_directory(path.parent)
 
     def rebuild_task_index(self, _: str = "") -> None:
         tasks: list[dict[str, Any]] = []

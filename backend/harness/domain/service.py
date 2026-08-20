@@ -75,7 +75,8 @@ class TaskCommandService:
             "updated_at": now,
             "plan_revision": 1,
         }
-        wrapper = self.store.task.put(
+        result = {"task": deepcopy(payload), "revision": 1}
+        self.store.task.put(
             request["task_id"],
             request["task_id"],
             payload,
@@ -83,10 +84,12 @@ class TaskCommandService:
             actor=self._actor(envelope),
             command="create_task",
             idempotency_key=envelope.idempotency_key,
+            command_result=result,
+            request_sha256=self._request_digest("create_task", request),
         )
         workspace_task = self.store.layout.workspace_root / "tasks" / request["task_id"]
         atomic_write_json(workspace_task / "task-summary.json", payload, mode=0o640)
-        return {"task": payload, "revision": wrapper["revision"]}
+        return result
 
     def register_input_manifest(
         self,
@@ -108,7 +111,8 @@ class TaskCommandService:
     ) -> dict[str, Any]:
         task = self._task(request["task_id"])
         updated = {**task, "input_manifest": request["input_manifest"], "updated_at": utc_now()}
-        wrapper = self.store.task.put(
+        result = {"task": deepcopy(updated), "revision": envelope.expected_revision + 1}
+        self.store.task.put(
             request["task_id"],
             request["task_id"],
             updated,
@@ -116,8 +120,10 @@ class TaskCommandService:
             actor=self._actor(envelope),
             command="register_input_manifest",
             idempotency_key=envelope.idempotency_key,
+            command_result=result,
+            request_sha256=self._request_digest("register_input_manifest", request),
         )
-        return {"task": updated, "revision": wrapper["revision"]}
+        return result
 
     def save_plan(
         self,
@@ -167,22 +173,16 @@ class TaskCommandService:
         if task["status"] != "PLANNED":
             self.machine.transition("main_task", task["status"], "PLANNED")
         plan["task"]["status"] = "PLANNED"
-        first = self._persist_aggregate(plan, envelope, "save_plan", actual)
-
-        current_task_revision = first["task_revision"]
         if task["start_policy"] == "manual":
             self.machine.transition("main_task", "PLANNED", "AWAITING_START_CONFIRMATION")
             plan["task"]["status"] = "AWAITING_START_CONFIRMATION"
         else:
             self._activate_current_stages(plan, utc_now())
             target = self._aggregate_task(plan, preserve_start_confirmation=False)
-            self.machine.transition("main_task", "PLANNED", target)
+            self._validate_task_reaggregation("PLANNED", target)
             plan["task"]["status"] = target
         plan["task"]["updated_at"] = utc_now()
-        final = self._persist_aggregate(
-            plan, envelope, "activate_saved_plan", current_task_revision
-        )
-        return final
+        return self._persist_aggregate(plan, envelope, "save_plan", request, actual)
 
     def confirm_start(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
         request = {"task_id": task_id}
@@ -191,10 +191,13 @@ class TaskCommandService:
             "confirm_start",
             request,
             envelope,
-            lambda: self._confirm_start(task_id, envelope),
+            lambda: self._confirm_start(request, envelope),
         )
 
-    def _confirm_start(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
+    def _confirm_start(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        task_id = request["task_id"]
         plan = self._plan(task_id)
         task = plan["task"]
         actual = self.store.task.revision(task_id, task_id)
@@ -208,10 +211,10 @@ class TaskCommandService:
             )
         self._activate_current_stages(plan, utc_now())
         target = self._aggregate_task(plan, preserve_start_confirmation=False)
-        self.machine.transition("main_task", task["status"], target)
+        self._validate_task_reaggregation(task["status"], target)
         task["status"] = target
         task["updated_at"] = utc_now()
-        return self._persist_aggregate(plan, envelope, "confirm_start", actual)
+        return self._persist_aggregate(plan, envelope, "confirm_start", request, actual)
 
     def transition_instance(
         self,
@@ -258,7 +261,9 @@ class TaskCommandService:
             self.machine.transition("main_task", task["status"], target)
             task["status"] = target
         task["updated_at"] = utc_now()
-        return self._persist_aggregate(plan, envelope, "transition_instance", actual)
+        return self._persist_aggregate(
+            plan, envelope, "transition_instance", request, actual
+        )
 
     def cancel_task(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
         request = {"task_id": task_id}
@@ -267,10 +272,13 @@ class TaskCommandService:
             "cancel_task",
             request,
             envelope,
-            lambda: self._cancel_task(task_id, envelope),
+            lambda: self._cancel_task(request, envelope),
         )
 
-    def _cancel_task(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
+    def _cancel_task(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        task_id = request["task_id"]
         task = self._task(task_id)
         actual = self.store.task.revision(task_id, task_id)
         if envelope.expected_revision != actual:
@@ -279,7 +287,8 @@ class TaskCommandService:
         plan = self.store.plan.get(task_id, task_id)
         if plan is None:
             task = {**task, "status": "CANCELLED", "updated_at": utc_now()}
-            wrapper = self.store.task.put(
+            result = {"task": deepcopy(task), "revision": actual + 1}
+            self.store.task.put(
                 task_id,
                 task_id,
                 task,
@@ -287,8 +296,10 @@ class TaskCommandService:
                 actor=self._actor(envelope),
                 command="cancel_task",
                 idempotency_key=envelope.idempotency_key,
+                command_result=result,
+                request_sha256=self._request_digest("cancel_task", request),
             )
-            return {"task": task, "revision": wrapper["revision"]}
+            return result
         plan = deepcopy(plan)
         transitions = self.machine.catalog["agent_instance"]["transitions"]
         for instance in plan["instances"]:
@@ -300,7 +311,7 @@ class TaskCommandService:
                 stage["status"] = "CANCELLED"
         plan["task"]["status"] = "CANCELLED"
         plan["task"]["updated_at"] = utc_now()
-        return self._persist_aggregate(plan, envelope, "cancel_task", actual)
+        return self._persist_aggregate(plan, envelope, "cancel_task", request, actual)
 
     def downgrade_instance(
         self,
@@ -374,7 +385,9 @@ class TaskCommandService:
             self.machine.transition("main_task", plan["task"]["status"], target)
             plan["task"]["status"] = target
         plan["task"]["updated_at"] = utc_now()
-        return self._persist_aggregate(plan, envelope, "downgrade_instance", actual)
+        return self._persist_aggregate(
+            plan, envelope, "downgrade_instance", request, actual
+        )
 
     def _normalize_plan(
         self,
@@ -489,7 +502,8 @@ class TaskCommandService:
             if not all(stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]):
                 continue
             if stage["type"] == "ppt" and not stage["required"]:
-                self.machine.transition("stage", stage["status"], "SKIPPED")
+                if stage["status"] != "SKIPPED":
+                    self.machine.transition("stage", stage["status"], "SKIPPED")
                 stage["status"] = "SKIPPED"
                 continue
             self._activate_lifecycle(stage, now)
@@ -514,25 +528,45 @@ class TaskCommandService:
             preserve_start_confirmation=preserve_start_confirmation,
         )
 
+    def _validate_task_reaggregation(self, current: str, target: str) -> None:
+        """Validate zero-work completion through the catalog's RUNNING state."""
+
+        if current in {"PLANNED", "AWAITING_START_CONFIRMATION"} and target == "SUCCEEDED":
+            self.machine.transition("main_task", current, "RUNNING")
+            self.machine.transition("main_task", "RUNNING", "SUCCEEDED")
+            return
+        self.machine.transition("main_task", current, target)
+
     def _persist_aggregate(
         self,
         plan: dict[str, Any],
         envelope: CommandEnvelope,
         command: str,
+        request: dict[str, Any],
         expected_task_revision: int,
     ) -> dict[str, Any]:
         validate_plan(self.contracts, plan)
         task_id = plan["task"]["task_id"]
         actor = self._actor(envelope)
-        plan_wrapper = self.store.plan.put(
+        next_plan_revision = self.store.plan.revision(task_id, task_id) + 1
+        result = {
+            "task": deepcopy(plan["task"]),
+            "plan": deepcopy(plan),
+            "task_revision": expected_task_revision + 1,
+            "store_plan_revision": next_plan_revision,
+        }
+        self.store.plan.put(
             task_id,
             task_id,
             deepcopy(plan),
-            expected_revision=self.store.plan.revision(task_id, task_id),
+            expected_revision=next_plan_revision - 1,
             actor=actor,
             command=command,
             idempotency_key=envelope.idempotency_key,
+            command_result=result,
+            request_sha256=self._request_digest(command, request),
         )
+        self.store.retire_plan_projections(task_id, plan)
         task_wrapper = self.store.task.put(
             task_id,
             task_id,
@@ -564,12 +598,9 @@ class TaskCommandService:
             )
         workspace_task = self.store.layout.workspace_root / "tasks" / task_id
         atomic_write_json(workspace_task / "task-summary.json", plan["task"], mode=0o640)
-        return {
-            "task": deepcopy(plan["task"]),
-            "plan": deepcopy(plan),
-            "task_revision": task_wrapper["revision"],
-            "store_plan_revision": plan_wrapper["revision"],
-        }
+        if task_wrapper["revision"] != result["task_revision"]:
+            raise RuntimeError("task projection revision diverged from the aggregate commit")
+        return result
 
     def _idempotent(
         self,
@@ -589,13 +620,36 @@ class TaskCommandService:
             )
             if existing is not None:
                 return existing
-            result = operation()
-            return self.store.idempotency.remember(
+            request_sha256 = self._request_digest(command, request)
+            committed = self.store.lookup_committed_command_result(
                 scope,
                 envelope.idempotency_key,
                 command,
-                request,
-                result,
+                request_sha256,
+            )
+            if committed is not None:
+                return self.store.idempotency.remember_digest(
+                    scope,
+                    envelope.idempotency_key,
+                    command,
+                    request_sha256,
+                    committed,
+                )
+            result = operation()
+            committed = self.store.lookup_committed_command_result(
+                scope,
+                envelope.idempotency_key,
+                command,
+                request_sha256,
+            )
+            if committed != result:
+                raise RuntimeError("command returned without an authoritative result commit")
+            return self.store.idempotency.remember_digest(
+                scope,
+                envelope.idempotency_key,
+                command,
+                request_sha256,
+                committed,
             )
 
     def _task(self, task_id: str) -> dict[str, Any]:
@@ -613,6 +667,9 @@ class TaskCommandService:
     @staticmethod
     def _actor(envelope: CommandEnvelope) -> Actor:
         return Actor(envelope.actor_type, envelope.actor_id)
+
+    def _request_digest(self, command: str, request: dict[str, Any]) -> str:
+        return self.store.idempotency.request_digest(command, request)
 
     @staticmethod
     def _raise_revision(expected: int, actual: int, kind: str, object_id: str) -> None:

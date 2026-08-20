@@ -6,12 +6,20 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.storage.atomic import atomic_write_json
 from harness.storage.ndjson import NdjsonCorruptionError, append_record, recover_records
 from harness.storage.repository import Actor
-from runtime_helpers import build_service, build_store, create_task, envelope, image_plan
+from runtime_helpers import (
+    build_service,
+    build_store,
+    create_task,
+    envelope,
+    image_plan,
+    ppt_plan,
+)
 
 
 def task_payload(task_id: str) -> dict:
@@ -123,6 +131,103 @@ class StateStoreRecoveryTests(unittest.TestCase):
                 "first_activated_at"
             ],
             activated_at,
+        )
+
+    def test_committed_business_result_rebuilds_idempotency_after_crash(self) -> None:
+        self.store.close()
+        store, service = build_service(self.root)
+        self.store = store
+        request = {
+            "task_id": "t_command_replay",
+            "title": "Task t_command_replay",
+            "goal": "Verify the Phase 1 control-plane behavior.",
+            "master_owner": "master_default",
+            "start_policy": "manual",
+            "input_manifest": "inputs/manifests/input.json",
+        }
+
+        with patch.object(
+            store.idempotency,
+            "remember_digest",
+            side_effect=SimulatedCrash("before_idempotency_projection"),
+        ), self.assertRaises(SimulatedCrash):
+            create_task(service, "t_command_replay")
+
+        self.assertEqual(store.task.revision("t_command_replay", "t_command_replay"), 1)
+        self.assertIsNone(
+            store.idempotency.lookup(
+                "t_command_replay",
+                "create-t_command_replay",
+                "create_task",
+                request,
+            )
+        )
+
+        store.close()
+        recovered_store, recovered_service = build_service(self.root)
+        self.store = recovered_store
+        replayed = create_task(recovered_service, "t_command_replay")
+
+        self.assertEqual(replayed["revision"], 1)
+        self.assertEqual(replayed["task"]["status"], "DRAFT")
+        self.assertEqual(
+            recovered_store.task.revision("t_command_replay", "t_command_replay"), 1
+        )
+
+    def test_topology_replacement_retires_ghost_projections_during_recovery(self) -> None:
+        self.store.close()
+        store, service = build_service(self.root)
+        self.store = store
+        created = create_task(service, "t_topology", "auto")
+        old = ppt_plan("t_topology")
+        blocked = service.save_plan(
+            "t_topology",
+            stages=old["stages"],
+            instances=old["instances"],
+            task_cards=old["task_cards"],
+            envelope=envelope("save-ppt-topology", created["revision"]),
+        )
+        replacement = image_plan("t_topology")
+        command = envelope("save-image-topology", blocked["task_revision"])
+
+        with patch.object(
+            store,
+            "retire_plan_projections",
+            side_effect=SimulatedCrash("after_authoritative_plan_commit"),
+        ), self.assertRaises(SimulatedCrash):
+            service.save_plan(
+                "t_topology",
+                stages=replacement["stages"],
+                instances=replacement["instances"],
+                task_cards=replacement["task_cards"],
+                envelope=command,
+            )
+
+        self.assertEqual({item["stage_id"] for item in store.stage.list("t_topology")}, {"s_ppt"})
+        self.assertEqual(
+            {item["instance_id"] for item in store.instance.list("t_topology")},
+            {"i_ppt_1"},
+        )
+
+        store.close()
+        recovered_store, recovered_service = build_service(self.root)
+        self.store = recovered_store
+        replayed = recovered_service.save_plan(
+            "t_topology",
+            stages=replacement["stages"],
+            instances=replacement["instances"],
+            task_cards=replacement["task_cards"],
+            envelope=command,
+        )
+
+        self.assertEqual(replayed["task_revision"], 3)
+        self.assertEqual(
+            {item["stage_id"] for item in recovered_store.stage.list("t_topology")},
+            {"s_image"},
+        )
+        self.assertEqual(
+            {item["instance_id"] for item in recovered_store.instance.list("t_topology")},
+            {"i_image_1"},
         )
 
     def test_invalid_ndjson_tail_is_truncated_with_warning(self) -> None:

@@ -7,7 +7,7 @@ claimed by P1-00 through P1-03.
 | RFC 19 | Work package | Evidence | P1-03 status |
 | --- | --- | --- | --- |
 | 1 | P1-03/P1-04 | task/input command tests; asset import tests | foundation |
-| 2 | P1-03/P1-07/P1-08 | manual/auto plan tests; three-process E2E | foundation |
+| 2 | P1-03/P1-07/P1-08 | manual/auto and optional PPT-only plan tests; three-process E2E | foundation |
 | 3 | P1-07/P1-14 | supervisor isolation E2E | planned |
 | 4 | P1-07/P1-12 | instance API and browser E2E | planned |
 | 5 | P1-05/P1-13 | allocation, crash and sticky-pair tests | planned |
@@ -18,8 +18,8 @@ claimed by P1-00 through P1-03.
 | 10 | P1-09 | owner freeze and FIFO tests | planned |
 | 11 | P1-08/P1-10/P1-12 | usage completeness and UI tests | planned |
 | 12 | P1-09 | notification/deep-link tests | planned |
-| 13 | P1-02/P1-07/P1-13 | crash recovery and no-replay E2E | foundation |
-| 14 | P1-03/P1-08 | topology and unavailable adapter tests | foundation |
+| 13 | P1-02/P1-07/P1-13 | business-result/idempotency crash replay and no-replay E2E | foundation |
+| 14 | P1-03/P1-08 | topology replacement recovery and unavailable adapter tests | foundation |
 | 15 | P1-03 | delayed required-PPT blocking tests | complete |
 | 16 | P1-03/P1-09 | aggregation priority tests | complete |
 | 17 | P1-07 | process cancellation retention test | planned |
