@@ -20,6 +20,10 @@ from ..core.config import HarnessSettings, load_settings
 from ..core.errors import ErrorCatalog, HarnessError
 from ..core.logging import configure_logging, redact
 from ..domain.service import TaskCommandService
+from ..services.assets import AssetService
+from ..services.configuration import ConfigurationService
+from ..services.credentials import CredentialPoolService
+from ..services.supervisor import ProcessSupervisor
 from ..storage.store import FileStateStore
 
 
@@ -30,6 +34,10 @@ class Container:
     errors: ErrorCatalog
     store: FileStateStore
     commands: TaskCommandService
+    assets: AssetService
+    credentials: CredentialPoolService
+    configuration: ConfigurationService
+    supervisor: ProcessSupervisor
 
 
 class ContractValidationRequest(BaseModel):
@@ -46,12 +54,27 @@ def build_container(settings: HarnessSettings) -> Container:
         contracts,
         settings.lock_timeout_seconds,
     )
+    commands = TaskCommandService(store, contracts)
+    assets = AssetService(store)
+    credentials = CredentialPoolService(store)
+    configuration = ConfigurationService(store)
+    supervisor = ProcessSupervisor(
+        store,
+        commands,
+        credentials,
+        configuration,
+        host=settings.host,
+    )
     return Container(
         settings=settings,
         contracts=contracts,
         errors=errors,
         store=store,
-        commands=TaskCommandService(store, contracts),
+        commands=commands,
+        assets=assets,
+        credentials=credentials,
+        configuration=configuration,
+        supervisor=supervisor,
     )
 
 
@@ -65,13 +88,32 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         warnings = container.store.start()
+        container.configuration.initialize()
+        credential_recoveries = container.credentials.recover()
+        config_recoveries = container.configuration.recover()
+        asset_recoveries = container.assets.recover()
+        process_recoveries = container.supervisor.reconcile()
+        global_config = container.configuration.get_global()
+        assert global_config is not None
+        container.supervisor.start_monitoring(
+            global_config["supervisor"]["health_interval_seconds"]
+        )
         logger.info(
             "control_plane_started",
-            extra={"fields": {"recovery_warning_count": len(warnings)}},
+            extra={
+                "fields": {
+                    "recovery_warning_count": len(warnings),
+                    "credential_recovery_count": len(credential_recoveries),
+                    "config_recovery_count": len(config_recoveries),
+                    "asset_recovery_count": len(asset_recoveries),
+                    "process_recovery_count": len(process_recoveries),
+                }
+            },
         )
         try:
             yield
         finally:
+            container.supervisor.close()
             container.store.close()
             logger.info("control_plane_stopped")
 
