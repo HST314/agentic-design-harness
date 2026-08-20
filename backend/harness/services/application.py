@@ -229,6 +229,60 @@ class HarnessApplicationService:
             return instance
         return self.supervisor.archive_instance(task_id, instance_id)
 
+    def observe_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
+        """Poll one Agent and persist its deterministic domain-state projection."""
+
+        instance = self._instance(task_id, instance_id)
+        if instance["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+            return {"instance": instance, "observation": None, "transition": None}
+        adapter = self.adapters.get(instance["agent_type"])
+        observation = adapter.get_status(instance_id)
+        if observation.status not in {"RUNNING", "WAITING_APPROVAL", "FAILED"}:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "The Agent adapter returned a non-projectable status.",
+                {"status": observation.status},
+            )
+        transition = None
+        if observation.status != instance["status"]:
+            task_revision = self.store.task.revision(task_id, task_id)
+            observation_digest = digest_json(
+                {
+                    "status": observation.status,
+                    "step_id": observation.step_id,
+                    "capabilities": list(observation.capabilities),
+                    "details": observation.details,
+                }
+            )
+            transition = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                observation.status,
+                CommandEnvelope(
+                    idempotency_key=(
+                        f"observe-{instance_id}-{task_revision}-{observation_digest[:20]}"
+                    ),
+                    actor_type="adapter",
+                    actor_id=f"{instance['agent_type']}_adapter",
+                    expected_revision=task_revision,
+                ),
+            )
+            instance = next(
+                item
+                for item in transition["plan"]["instances"]
+                if item["instance_id"] == instance_id
+            )
+        return {
+            "instance": deepcopy(instance),
+            "observation": {
+                "status": observation.status,
+                "step_id": observation.step_id,
+                "capabilities": list(observation.capabilities),
+                "details": deepcopy(observation.details),
+            },
+            "transition": transition,
+        }
+
     def publish_delivery_and_complete(
         self,
         task_id: str,

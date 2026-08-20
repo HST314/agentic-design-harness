@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
-from ..adapters import AdapterRegistry, PptAgentContractAdapter
+from ..adapters import AdapterRegistry, ImageAgentAdapter, PptAgentContractAdapter
 from ..contracts import ContractRegistry
 from ..core.config import HarnessSettings, load_settings
 from ..core.errors import ErrorCatalog, HarnessError
@@ -27,6 +27,7 @@ from ..services.configuration import ConfigurationService
 from ..services.credentials import CredentialPoolService
 from ..services.supervisor import ProcessSupervisor
 from ..storage.store import FileStateStore
+from .v1 import build_v1_router
 
 
 @dataclass(slots=True)
@@ -69,7 +70,22 @@ def build_container(settings: HarnessSettings) -> Container:
         configuration,
         host=settings.host,
     )
-    adapters = AdapterRegistry([PptAgentContractAdapter()])
+    adapters = AdapterRegistry(
+        [
+            ImageAgentAdapter(
+                store,
+                contracts,
+                assets,
+                configuration,
+                source_root=settings.image_agent_root,
+                interpreter=settings.image_agent_python,
+                dependency_root=settings.image_agent_dependency_root,
+                revision=settings.image_agent_revision,
+                host=settings.host,
+            ),
+            PptAgentContractAdapter(),
+        ]
+    )
     application = HarnessApplicationService(
         store,
         commands,
@@ -185,5 +201,7 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         container.contracts.validate(schema_name, body.payload)
         return {"schema_version": "1.0", "valid": True, "schema": schema_name}
+
+    app.include_router(build_v1_router(container))
 
     return app

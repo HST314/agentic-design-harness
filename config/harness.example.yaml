@@ -5,3 +5,7 @@ host: 127.0.0.1
 port: 18080
 log_level: INFO
 lock_timeout_seconds: 5.0
+image_agent_root: ../image_agent_mvp
+image_agent_python: /usr/bin/python3
+image_agent_dependency_root: .runtime/image-agent-deps
+image_agent_revision: 61c5b4f1b66d5d85f62b39b5b338ac2304e94d26

@@ -2,14 +2,17 @@ PYTHON ?= python3
 TEST_DEPS ?= .test-deps
 TEST_ENV_STAMP := $(TEST_DEPS)/.requirements-dev-installed
 PYTHONPATH_VALUE := backend:$(TEST_DEPS)
+IMAGE_AGENT_ROOT ?= ../image_agent_mvp
+IMAGE_AGENT_DEPS ?= .runtime/image-agent-deps
+IMAGE_AGENT_ENV_STAMP := $(IMAGE_AGENT_DEPS)/.requirements-installed
 
-.PHONY: test test-env lint compile secret-scan boundary-check check serve frontend-check
+.PHONY: test test-env lint compile secret-scan boundary-check check serve frontend-check image-agent-env g2-e2e
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
 
 lint: test-env
-	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash
+	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash tests/e2e
 
 compile:
 	$(PYTHON) -m compileall -q backend/harness scripts tests
@@ -28,6 +31,21 @@ check: test lint compile secret-scan boundary-check frontend-check
 
 serve: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m harness
+
+image-agent-env: $(IMAGE_AGENT_ENV_STAMP)
+
+$(IMAGE_AGENT_ENV_STAMP): $(IMAGE_AGENT_ROOT)/requirements.lock requirements/image-agent-web.in
+	$(PYTHON) -m pip install --disable-pip-version-check --upgrade \
+		--target "$(IMAGE_AGENT_DEPS)" -r "$(IMAGE_AGENT_ROOT)/requirements.lock" \
+		-r requirements/image-agent-web.in
+	@touch "$(IMAGE_AGENT_ENV_STAMP)"
+
+g2-e2e: test-env image-agent-env
+	HARNESS_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
+	HARNESS_IMAGE_AGENT_PYTHON="$(shell command -v $(PYTHON))" \
+	HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT="$(abspath $(IMAGE_AGENT_DEPS))" \
+	PYTHONPATH="$(PYTHONPATH_VALUE):tests" \
+	$(PYTHON) -m unittest tests.e2e.test_g2_image_agent -v
 
 test-env: $(TEST_ENV_STAMP)
 
