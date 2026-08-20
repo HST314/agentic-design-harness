@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.adapters import PrepareRequest
 from harness.adapters.image import ImageAgentAdapter
@@ -145,6 +146,84 @@ class ImageAdapterTests(unittest.TestCase):
             self.adapter._validate_timeline(
                 {"items": [], "next_cursor": 5, "has_more": False}, previous=4
             )
+
+    def test_succeeded_job_without_snapshot_fails_closed(self) -> None:
+        observation = self.adapter._observation(
+            {"manifest": {"failed_step": None}, "snapshot": {}, "capabilities": []},
+            {"job_id": "job_123", "status": "succeeded", "result": {}},
+            8,
+            None,
+        )
+
+        self.assertEqual(observation.status, "FAILED")
+        self.assertIn("non-empty snapshot", observation.details["compatibility_error"])
+
+    def test_snapshot_scalar_types_fail_closed(self) -> None:
+        for field, malformed_value in (("waiting", "true"), ("completed", 1)):
+            with self.subTest(field=field):
+                observation = self.adapter._observation(
+                    {
+                        "manifest": {"failed_step": None},
+                        "snapshot": {
+                            "phase": "waiting_clarification",
+                            "waiting": True,
+                            field: malformed_value,
+                        },
+                        "capabilities": ["answer_clarification"],
+                    },
+                    None,
+                    3,
+                    None,
+                )
+                self.assertEqual(observation.status, "FAILED")
+                self.assertIn("malformed snapshot", observation.details["compatibility_error"])
+
+    def test_timeline_requires_strict_sequences_and_typed_pagination(self) -> None:
+        duplicate_sequences = {
+            "items": [
+                {"sequence": 1, "type": "created", "timestamp": "2026-08-20T00:00:00Z"},
+                {"sequence": 1, "type": "updated", "timestamp": "2026-08-20T00:00:01Z"},
+            ],
+            "next_cursor": 1,
+            "has_more": False,
+        }
+        with self.assertRaisesRegex(HarnessError, "timeline cursor") as duplicate:
+            self.adapter._validate_timeline(duplicate_sequences, previous=0)
+        self.assertEqual(duplicate.exception.code, "VALIDATION_ERROR")
+
+        with self.assertRaisesRegex(HarnessError, "timeline page") as pagination:
+            self.adapter._validate_timeline(
+                {"items": [], "next_cursor": 0, "has_more": "false"}, previous=0
+            )
+        self.assertEqual(pagination.exception.code, "VALIDATION_ERROR")
+
+    def test_job_record_requires_typed_terminal_and_event_shapes(self) -> None:
+        malformed_jobs = (
+            {"job_id": "not-a-job", "status": "queued"},
+            {"job_id": "job_123", "status": True},
+            {"job_id": "job_123", "status": "succeeded", "result": []},
+            {"job_id": "job_123", "status": "failed", "error": {}},
+            {
+                "job_id": "job_123",
+                "status": "queued",
+                "events": [{"seq": 1, "type": "queued", "timestamp": 1}],
+            },
+        )
+        for job in malformed_jobs:
+            with self.subTest(job=job), self.assertRaisesRegex(
+                HarnessError, "invalid job record"
+            ) as rejected:
+                self.adapter._require_job(job)
+            self.assertEqual(rejected.exception.code, "VALIDATION_ERROR")
+
+    def test_non_object_openapi_components_raise_stable_protocol_error(self) -> None:
+        document = {"info": {"version": "1.0.0"}, "paths": {}, "components": []}
+        with (
+            patch.object(self.adapter, "_request", return_value=document),
+            self.assertRaisesRegex(HarnessError, "OpenAPI metadata") as rejected,
+        ):
+            self.adapter._check_compatibility("http://127.0.0.1:1")
+        self.assertEqual(rejected.exception.code, "VALIDATION_ERROR")
 
     @staticmethod
     def _card(input_assets: list[dict[str, str]]) -> dict:
