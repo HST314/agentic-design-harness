@@ -23,6 +23,11 @@ PPT 是可选的阶段类型，不固定为第二阶段。Phase 1 只形成 Imag
 - Usage Service：标准化 Token 事件与聚合；
 - File State Store：单写者、原子快照和追加事件。
 
+跨服务写用例由 `HarnessApplicationService` 统一编排。API 与 Master 不直接拼接
+Credential、Task、Supervisor 和 Asset 调用；保存计划/创建实例先写 durable intent，
+并在同一任务锁内恢复到唯一结果。专业 Agent 只通过 typed `AgentAdapter` 与显式
+Registry 接入，PPT 在 Phase 1 使用返回 `ADAPTER_UNAVAILABLE` 的契约占位。
+
 ## Phase 0 冻结结果与 Phase 1 运行服务
 
 Phase 0 固定跨模块数据形状、状态和错误语义，并提供三种计划组合的可执行契约测试。Stage/Instance 的 requirement 生命周期快照保留原始必需性、首次激活和授权降级事实；Instance 创建与激活均锚定 Task 快照时间窗，`UNAVAILABLE` 使用持久化激活事实区分已触发阻塞与未启动占位。TaskCard 参数按 Agent 类型封闭列举，敏感来源值携带统一标记并在公开序列化边界被拒绝，已知凭据格式作为纵深防线。

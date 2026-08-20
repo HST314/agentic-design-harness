@@ -20,7 +20,7 @@ packages.
 | 11 | P1-08/P1-10/P1-12 | usage completeness and UI tests | planned |
 | 12 | P1-09 | notification/deep-link tests | planned |
 | 13 | P1-02/P1-07/P1-13 | launch/attempt idempotency, startup reconcile and model-call interruption tests | service complete; final E2E pending |
-| 14 | P1-03/P1-08 | topology replacement recovery and unavailable adapter tests | foundation |
+| 14 | P1-03/P1-08 | topology replacement, durable plan/instance recovery and typed unavailable-adapter tests | integration foundation complete; Image E2E pending |
 | 15 | P1-03 | delayed required-PPT blocking tests | complete |
 | 16 | P1-03/P1-09 | aggregation priority tests | complete |
 | 17 | P1-07 | process-group cancellation, port release and workspace-retention test | complete |

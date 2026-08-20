@@ -31,6 +31,7 @@ class RuntimeContractTests(unittest.TestCase):
             (ROOT / "tests" / "golden" / "image-task-card-mapping-v1.1.json").read_text()
         )
         self.registry.validate("task-card", fixture["harness_task_card"])
+        self.registry.validate("task-card-v1.1", fixture["harness_task_card"])
 
         old_card = json.loads(
             (ROOT / "contracts" / "v1" / "examples" / "plans" / "image-only.json").read_text()

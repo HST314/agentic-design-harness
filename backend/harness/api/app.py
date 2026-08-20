@@ -15,11 +15,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
+from ..adapters import AdapterRegistry, PptAgentContractAdapter
 from ..contracts import ContractRegistry
 from ..core.config import HarnessSettings, load_settings
 from ..core.errors import ErrorCatalog, HarnessError
 from ..core.logging import configure_logging, redact
 from ..domain.service import TaskCommandService
+from ..services.application import HarnessApplicationService
 from ..services.assets import AssetService
 from ..services.configuration import ConfigurationService
 from ..services.credentials import CredentialPoolService
@@ -38,6 +40,8 @@ class Container:
     credentials: CredentialPoolService
     configuration: ConfigurationService
     supervisor: ProcessSupervisor
+    adapters: AdapterRegistry
+    application: HarnessApplicationService
 
 
 class ContractValidationRequest(BaseModel):
@@ -65,6 +69,15 @@ def build_container(settings: HarnessSettings) -> Container:
         configuration,
         host=settings.host,
     )
+    adapters = AdapterRegistry([PptAgentContractAdapter()])
+    application = HarnessApplicationService(
+        store,
+        commands,
+        assets,
+        credentials,
+        supervisor,
+        adapters,
+    )
     return Container(
         settings=settings,
         contracts=contracts,
@@ -75,6 +88,8 @@ def build_container(settings: HarnessSettings) -> Container:
         credentials=credentials,
         configuration=configuration,
         supervisor=supervisor,
+        adapters=adapters,
+        application=application,
     )
 
 
@@ -92,6 +107,7 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
         credential_recoveries = container.credentials.recover()
         config_recoveries = container.configuration.recover()
         asset_recoveries = container.assets.recover()
+        application_recoveries = container.application.recover()
         process_recoveries = container.supervisor.reconcile()
         global_config = container.configuration.get_global()
         assert global_config is not None
@@ -106,6 +122,7 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
                     "credential_recovery_count": len(credential_recoveries),
                     "config_recovery_count": len(config_recoveries),
                     "asset_recovery_count": len(asset_recoveries),
+                    "application_recovery_count": len(application_recoveries),
                     "process_recovery_count": len(process_recoveries),
                 }
             },

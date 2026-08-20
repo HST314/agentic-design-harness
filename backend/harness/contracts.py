@@ -41,6 +41,8 @@ class ContractRegistry:
         if not isinstance(payload, dict) or "schema_version" not in payload:
             return normalized
         version = str(payload["schema_version"])
+        if normalized.endswith(f"-v{version}.schema.json") and normalized in self._validators:
+            return normalized
         versioned = normalized.removesuffix(".schema.json") + f"-v{version}.schema.json"
         if versioned in self._validators:
             return versioned
