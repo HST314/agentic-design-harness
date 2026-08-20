@@ -1,5 +1,13 @@
-# Frontend boundary
+# Harness web shell
 
-Phase 0 仅冻结前后端共享契约，不包含产品 UI。
+TypeScript/Vite control-plane shell for task navigation, inbox and settings.
+Professional Agent workflow pages remain adapter-provided deep links.
 
-Phase 1 前端将消费版本化 API，提供任务面板、实例、资源、审批、Token 和事件页签；专业 Agent 的工作流界面通过适配器深链复用，不在本仓复制。
+```bash
+npm ci
+npm run check
+npm run build
+```
+
+Browser tests live in `e2e/` and run against the Vite preview server with
+`npm run test:e2e` after the Playwright Chromium runtime is installed.

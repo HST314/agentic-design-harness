@@ -1,0 +1,235 @@
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import unittest
+from copy import deepcopy
+from pathlib import Path
+
+from harness.core.errors import HarnessError, SimulatedCrash
+from harness.storage.atomic import atomic_write_json
+from harness.storage.ndjson import NdjsonCorruptionError, append_record, recover_records
+from harness.storage.repository import Actor
+from runtime_helpers import build_service, build_store, create_task, envelope, image_plan
+
+
+def task_payload(task_id: str) -> dict:
+    timestamp = "2026-08-20T12:00:00Z"
+    return {
+        "schema_version": "1.0",
+        "task_id": task_id,
+        "title": "Crash recovery",
+        "goal": "Recover exactly one legal state.",
+        "master_owner": "master_default",
+        "start_policy": "manual",
+        "status": "DRAFT",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "input_manifest": "inputs/manifests/input.json",
+        "plan_revision": 1,
+    }
+
+
+class StateStoreRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = build_store(self.root)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temporary.cleanup()
+
+    @staticmethod
+    def crash_at(target: str):
+        def hook(checkpoint: str) -> None:
+            if checkpoint == target:
+                raise SimulatedCrash(checkpoint)
+
+        return hook
+
+    def test_event_append_is_replayed_when_snapshot_rename_did_not_happen(self) -> None:
+        with self.assertRaises(SimulatedCrash):
+            self.store.task.put(
+                "t_replay",
+                "t_replay",
+                task_payload("t_replay"),
+                expected_revision=0,
+                actor=Actor("system", "recovery_test"),
+                command="create_task",
+                idempotency_key="create-replay",
+                crash_hook=self.crash_at("after_event_append"),
+            )
+        self.assertIsNone(self.store.task.get("t_replay", "t_replay"))
+        self.store.recover()
+        self.assertEqual(self.store.task.get("t_replay", "t_replay")["status"], "DRAFT")
+        self.assertEqual(self.store.task.revision("t_replay", "t_replay"), 1)
+
+    def test_snapshot_without_index_is_recovered_and_index_rebuilt(self) -> None:
+        with self.assertRaises(SimulatedCrash):
+            self.store.task.put(
+                "t_index",
+                "t_index",
+                task_payload("t_index"),
+                expected_revision=0,
+                actor=Actor("system", "recovery_test"),
+                command="create_task",
+                idempotency_key="create-index",
+                crash_hook=self.crash_at("after_snapshot_rename"),
+            )
+        index_path = self.store.layout.control_root / "indexes" / "task-index.json"
+        self.store.recover()
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        self.assertEqual([item["task_id"] for item in index["tasks"]], ["t_index"])
+
+    def test_plan_commit_reconciles_task_stage_and_instance_projections(self) -> None:
+        self.store.close()
+        store, service = build_service(self.root)
+        self.store = store
+        created = create_task(service, "t_aggregate")
+        draft = image_plan("t_aggregate")
+        saved = service.save_plan(
+            "t_aggregate",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            envelope=envelope("save-aggregate", created["revision"]),
+        )
+        plan = deepcopy(saved["plan"])
+        activated_at = "2026-08-20T12:01:00Z"
+        plan["task"]["status"] = "RUNNING"
+        plan["task"]["updated_at"] = activated_at
+        plan["stages"][0]["requirement_lifecycle"]["first_activated_at"] = activated_at
+        plan["instances"][0]["requirement_lifecycle"]["first_activated_at"] = activated_at
+        with self.assertRaises(SimulatedCrash):
+            store.plan.put(
+                "t_aggregate",
+                "t_aggregate",
+                plan,
+                expected_revision=store.plan.revision("t_aggregate", "t_aggregate"),
+                actor=Actor("system", "crash_test"),
+                command="activate_saved_plan",
+                idempotency_key="crash-aggregate",
+                crash_hook=self.crash_at("after_snapshot_rename"),
+            )
+        self.assertEqual(
+            store.task.get("t_aggregate", "t_aggregate")["status"], "AWAITING_START_CONFIRMATION"
+        )
+        store.recover()
+        self.assertEqual(store.task.get("t_aggregate", "t_aggregate")["status"], "RUNNING")
+        self.assertEqual(
+            store.instance.get("t_aggregate", "i_image_1")["requirement_lifecycle"][
+                "first_activated_at"
+            ],
+            activated_at,
+        )
+
+    def test_invalid_ndjson_tail_is_truncated_with_warning(self) -> None:
+        path = self.root / "events.ndjson"
+        append_record(path, {"event_id": "evt_one"})
+        with path.open("ab") as handle:
+            handle.write(b'{"event_id":"torn"')
+            handle.flush()
+            os.fsync(handle.fileno())
+        warnings: list[dict] = []
+        records = recover_records(path, warnings.append)
+        self.assertEqual(records, [{"event_id": "evt_one"}])
+        self.assertEqual(warnings[0]["type"], "NDJSON_TAIL_TRUNCATED")
+        self.assertTrue(path.read_bytes().endswith(b"\n"))
+
+    def test_interior_ndjson_corruption_is_fatal(self) -> None:
+        path = self.root / "events.ndjson"
+        append_record(path, {"event_id": "evt_one"})
+        with path.open("ab") as handle:
+            handle.write(b"{}\n")
+        append_record(path, {"event_id": "evt_two"})
+        with self.assertRaises(NdjsonCorruptionError):
+            recover_records(path)
+
+    def test_snapshot_without_commit_event_is_rejected_as_ghost(self) -> None:
+        self.store.layout.initialize_task("t_ghost")
+        path = self.store.task.path("t_ghost", "t_ghost")
+        atomic_write_json(
+            path,
+            {
+                "store_version": "1.0",
+                "object_type": "task",
+                "object_id": "t_ghost",
+                "revision": 1,
+                "payload": task_payload("t_ghost"),
+                "committed_at": "2026-08-20T12:00:00Z",
+            },
+        )
+        with self.assertRaises(RuntimeError):
+            self.store.recover()
+
+    def test_same_revision_snapshot_drift_is_rebuilt_from_event(self) -> None:
+        self.store.task.put(
+            "t_drift",
+            "t_drift",
+            task_payload("t_drift"),
+            expected_revision=0,
+            actor=Actor("system", "recovery_test"),
+            command="create_task",
+            idempotency_key="create-drift",
+        )
+        path = self.store.task.path("t_drift", "t_drift")
+        wrapper = json.loads(path.read_text(encoding="utf-8"))
+        wrapper["payload"]["title"] = "Uncommitted drift"
+        atomic_write_json(path, wrapper)
+
+        warnings = self.store.recover()
+
+        self.assertEqual(self.store.task.get("t_drift", "t_drift")["title"], "Crash recovery")
+        self.assertEqual(warnings[0]["type"], "SNAPSHOT_REBUILT")
+
+    def test_failed_start_releases_the_writer_lease(self) -> None:
+        self.store.layout.initialize_task("t_bad_start")
+        atomic_write_json(
+            self.store.task.path("t_bad_start", "t_bad_start"),
+            {
+                "store_version": "1.0",
+                "object_type": "task",
+                "object_id": "t_bad_start",
+                "revision": 1,
+                "payload": task_payload("t_bad_start"),
+                "committed_at": "2026-08-20T12:00:00Z",
+            },
+        )
+
+        with self.assertRaises(RuntimeError):
+            self.store.start()
+
+        self.assertFalse(self.store.writer_lease.acquired)
+
+    def test_revision_and_idempotency_conflicts_are_explicit(self) -> None:
+        self.store.task.put(
+            "t_conflict",
+            "t_conflict",
+            task_payload("t_conflict"),
+            expected_revision=0,
+            actor=Actor("system", "test"),
+            command="create_task",
+            idempotency_key="create-conflict",
+        )
+        with self.assertRaises(HarnessError) as revision:
+            self.store.task.put(
+                "t_conflict",
+                "t_conflict",
+                task_payload("t_conflict"),
+                expected_revision=0,
+                actor=Actor("system", "test"),
+                command="update_task",
+                idempotency_key="stale",
+            )
+        self.assertEqual(revision.exception.code, "REVISION_CONFLICT")
+        request = {"value": 1}
+        self.store.idempotency.remember("t_conflict", "same-key", "command", request, {"ok": True})
+        self.assertEqual(
+            self.store.idempotency.lookup("t_conflict", "same-key", "command", request),
+            {"ok": True},
+        )
+        with self.assertRaises(HarnessError) as idempotency:
+            self.store.idempotency.lookup("t_conflict", "same-key", "command", {"value": 2})
+        self.assertEqual(idempotency.exception.code, "IDEMPOTENCY_CONFLICT")

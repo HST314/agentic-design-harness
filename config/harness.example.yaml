@@ -1,0 +1,7 @@
+control_root: control-data
+workspace_root: workspace
+contracts_root: contracts/v1
+host: 127.0.0.1
+port: 18080
+log_level: INFO
+lock_timeout_seconds: 5.0

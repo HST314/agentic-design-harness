@@ -1,0 +1,19 @@
+{
+  "name": "agentic-design-harness-web",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit",
+    "dev": "vite --host 127.0.0.1 --port 18180",
+    "preview": "vite preview --host 127.0.0.1 --port 18180",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "22.10.2",
+    "typescript": "5.7.2",
+    "vite": "6.4.3"
+  }
+}

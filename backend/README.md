@@ -1,5 +1,20 @@
 # Backend boundary
 
-Phase 0 仅冻结契约，不包含控制平面运行时代码。
+`harness` 是单控制进程的 Python 包。依赖方向固定为：
 
-Phase 1 后端将以 `contracts/v1` 为边界实现任务编排、实例与进程监管、文件化状态、资产发布、审批、通知、用量和配置服务。它不得把 Image Agent 或 PPT Agent 作为同进程 Python 模块导入。
+```text
+api -> domain -> storage
+ |       |          |
+ +---- contracts ---+
+         |
+        core
+```
+
+- `api` 负责 HTTP、生命周期和公开错误序列化；
+- `domain` 负责命令、合法转换和聚合，不直接操作文件；
+- `storage` 负责事件先行的持久化、锁、恢复和 Repository；
+- `contracts.py` 始终从仓库根 `contracts/v1` 编译 Schema；
+- `core` 只放配置、日志和稳定错误等横切能力。
+
+严禁导入 Image/PPT Agent 内部模块。未来 Adapter 通过 HTTP、进程和持久化契约
+接入，并位于独立模块，不能向核心编排散落 Agent 类型分支。

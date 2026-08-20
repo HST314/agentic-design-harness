@@ -8,6 +8,9 @@ htmlcov/
 dist/
 build/
 node_modules/
+.playwright/
+playwright-report/
+test-results/
 
 # Phase 1 runtime state and secrets must never enter version control.
 control-data/

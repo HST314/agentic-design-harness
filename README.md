@@ -1,30 +1,74 @@
 # Agentic Design Harness
 
-单机平面设计多智能体控制平面的总仓库。系统以 Master Agent 与人工共同编排任务，通过稳定契约接入彼此隔离的 Image、PPT 及后续专业 Agent。
+单机平面设计多智能体控制平面。系统由 Master Agent 与人工共同编排任务，
+通过稳定契约管理彼此隔离的 Image、PPT 及后续专业 Agent。
 
-当前仓库完成 RFC v0.2 的 Phase 0：总仓初始化与契约冻结。运行时编排、子进程监管、持久化服务和 Web 前端属于 Phase 1，不在本次交付范围内。
+当前 `main` 已完成 RFC v0.2 的 P1-00 至 P1-03：开工决策冻结、可运行工程
+骨架、File State Store 和三种计划拓扑的领域命令。它还不是完整 Phase 1
+产品；进程监管、Image Adapter、资产发布、凭据池和完整业务 API 属于后续
+工作包。
 
-## Phase 0 交付
+## 当前能力
 
-- `docs/`：RFC v0.2、架构边界、版本和兼容性规则；
-- `contracts/v1/schemas/`：核心对象与任务计划 JSON Schema；
-- `contracts/v1/examples/`：Image-only、PPT-only、Image → PPT 三种合法组合；
-- `contracts/v1/catalogs/`：状态、转换、稳定错误码和公开 TaskCard 凭据检测策略目录；
-- `backend/`、`frontend/`：为 Phase 1 保留的明确边界；
-- `tests/`：Schema、目录和跨对象语义契约测试。
+- `docs/adr/`：技术栈、进程、错误、Image 映射和状态提交协议；
+- `backend/harness/api`：应用工厂、生命周期、健康/就绪与契约校验入口；
+- `backend/harness/storage`：原子 JSON/YAML、校验和 NDJSON、文件锁、八类
+  Repository、幂等记录、恢复和索引重建；
+- `backend/harness/domain`：统一命令信封、任务/输入/计划命令、冻结状态转换、
+  人工/自动启动、取消、授权降级和确定性聚合；
+- `frontend/`：TypeScript/Vite 控制面壳、版本化 API Client、路由与响应式布局；
+- `contracts/v1/`：Phase 0 冻结的跨模块事实源；
+- `tests/`：76 条契约、单元、集成和崩溃注入测试，其中原 P0 46 条保持全绿。
 
-## 自测
+PPT-only 与 Image→PPT 可以被正确建模。必需 PPT 只有在其前置条件满足并被
+激活后才持久化为 `BLOCKED_UNAVAILABLE`；从一开始就是 optional 的 PPT 可
+跳过且不会伪造 `PARTIAL`。
 
-需要 Python 3.10+ 及 pip。统一入口会把锁定的测试依赖安装到仓库内隔离目录，不依赖系统 `venv` 包：
+## 本地验证
+
+要求 Python 3.10+、Node.js 22+ 和 npm。Python 与 npm 依赖均由锁文件固定。
 
 ```bash
 make test
+
+cd frontend
+npm ci
+cd ..
+
+make check
 ```
 
-默认解释器为 `python3`，可用 `make test PYTHON=/path/to/python3` 覆盖；隔离依赖目录也可用 `TEST_DEPS=/path/to/test-deps` 覆盖。
+`make check` 依次执行运行时及 P0 契约测试、Ruff、compileall、secret scan、
+Agent import 边界检查、前端类型检查与生产构建。浏览器层测试位于
+`frontend/e2e/`，安装 Playwright Chromium 后运行：
 
-测试不仅验证示例能通过 JSON Schema，还验证阶段依赖、实例归属与创建窗口、任务卡引用、三种计划拓扑白名单、阶段/任务聚合状态、状态转换金表、敏感来源标记与公开序列化拒绝、UTC、版本兼容性、相对路径安全和 Token 汇总不变量。
+```bash
+cd frontend
+npm run test:e2e
+```
 
-## 版本规则
+## 启动空服务
 
-当前契约版本为 `1.0`，使用 JSON Schema Draft 2020-12。所有跨模块契约根对象必须携带 `schema_version`。详见 [契约说明](contracts/README.md) 与 [版本规则](docs/contract-versioning.md)。
+```bash
+make serve
+```
+
+默认监听 `127.0.0.1:18080`：
+
+- `GET /healthz`：进程存活；
+- `GET /readyz`：契约注册表有效且唯一写者租约已获得；
+- `POST /api/v1/contracts/{schema}/validate`：使用 `contracts/v1` 验证载荷。
+
+可复制 `config/harness.example.yaml` 并通过 `HARNESS_CONFIG` 指定。运行状态写入
+`control-data/`，任务工作区写入 `workspace/tasks/`，二者均不会进入版本控制。
+
+## 边界
+
+- Harness 不导入 Image/PPT Agent 的 Python 包，也不与其共享依赖环境；
+- Master 和人工只能通过领域命令/API 改变控制平面状态；
+- API Key 不进入任务卡、共享目录、事件、日志或响应；
+- 当前前端只承载控制面，专业工作流通过 Adapter 提供的 HTTP 深链打开；
+- P1-00 至 P1-03 不宣称已实际拉起 Image Agent 或完成完整 Phase 1 验收。
+
+完整范围、状态语义与 18 条 Phase 1 验收标准见 [RFC v0.2](docs/rfc-v0.2.md)，
+测试追踪见 [Phase 1 验收矩阵](docs/verification/phase1-traceability.md)。

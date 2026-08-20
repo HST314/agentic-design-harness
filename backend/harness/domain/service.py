@@ -1,0 +1,628 @@
+"""Idempotent MainTask, plan and state-transition command handlers."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Any
+
+from ..contracts import ContractRegistry
+from ..core.errors import HarnessError
+from ..storage.atomic import atomic_write_json
+from ..storage.layout import validate_identifier
+from ..storage.locks import FileLock
+from ..storage.repository import Actor
+from ..storage.store import FileStateStore
+from .commands import CommandEnvelope
+from .plan import validate_plan
+from .state_machine import StateMachine
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+class TaskCommandService:
+    """The only domain layer allowed to choose aggregate Task/Stage states."""
+
+    def __init__(self, store: FileStateStore, contracts: ContractRegistry) -> None:
+        self.store = store
+        self.contracts = contracts
+        self.machine = StateMachine(contracts.root / "catalogs" / "status-codes.json")
+
+    def create_task(
+        self,
+        *,
+        task_id: str,
+        title: str,
+        goal: str,
+        master_owner: str,
+        start_policy: str,
+        input_manifest: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        request = {
+            "task_id": task_id,
+            "title": title,
+            "goal": goal,
+            "master_owner": master_owner,
+            "start_policy": start_policy,
+            "input_manifest": input_manifest,
+        }
+        return self._idempotent(
+            task_id,
+            "create_task",
+            request,
+            envelope,
+            lambda: self._create_task(request, envelope),
+        )
+
+    def _create_task(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
+        if envelope.expected_revision != 0:
+            raise HarnessError(
+                "REVISION_CONFLICT",
+                "Task creation requires expected revision zero.",
+                {"expected_revision": envelope.expected_revision, "actual_revision": 0},
+            )
+        now = utc_now()
+        payload = {
+            "schema_version": "1.0",
+            **request,
+            "status": "DRAFT",
+            "created_at": now,
+            "updated_at": now,
+            "plan_revision": 1,
+        }
+        wrapper = self.store.task.put(
+            request["task_id"],
+            request["task_id"],
+            payload,
+            expected_revision=0,
+            actor=self._actor(envelope),
+            command="create_task",
+            idempotency_key=envelope.idempotency_key,
+        )
+        workspace_task = self.store.layout.workspace_root / "tasks" / request["task_id"]
+        atomic_write_json(workspace_task / "task-summary.json", payload, mode=0o640)
+        return {"task": payload, "revision": wrapper["revision"]}
+
+    def register_input_manifest(
+        self,
+        task_id: str,
+        input_manifest: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        request = {"task_id": task_id, "input_manifest": input_manifest}
+        return self._idempotent(
+            task_id,
+            "register_input_manifest",
+            request,
+            envelope,
+            lambda: self._update_task_input(request, envelope),
+        )
+
+    def _update_task_input(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        task = self._task(request["task_id"])
+        updated = {**task, "input_manifest": request["input_manifest"], "updated_at": utc_now()}
+        wrapper = self.store.task.put(
+            request["task_id"],
+            request["task_id"],
+            updated,
+            expected_revision=envelope.expected_revision,
+            actor=self._actor(envelope),
+            command="register_input_manifest",
+            idempotency_key=envelope.idempotency_key,
+        )
+        return {"task": updated, "revision": wrapper["revision"]}
+
+    def save_plan(
+        self,
+        task_id: str,
+        *,
+        stages: list[dict[str, Any]],
+        instances: list[dict[str, Any]],
+        task_cards: list[dict[str, Any]],
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        request = {
+            "task_id": task_id,
+            "stages": stages,
+            "instances": instances,
+            "task_cards": task_cards,
+        }
+        return self._idempotent(
+            task_id,
+            "save_plan",
+            request,
+            envelope,
+            lambda: self._save_plan(request, envelope),
+        )
+
+    def _save_plan(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
+        task_id = request["task_id"]
+        task = self._task(task_id)
+        if task["status"] not in {"DRAFT", "PLANNED", "BLOCKED_UNAVAILABLE", "FAILED"}:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A plan cannot be replaced while this task state is active or terminal.",
+                {"current": task["status"]},
+            )
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        business_revision = task["plan_revision"]
+        if self.store.plan.get(task_id, task_id) is not None:
+            business_revision += 1
+        plan = self._normalize_plan(
+            task,
+            business_revision,
+            request["stages"],
+            request["instances"],
+            request["task_cards"],
+        )
+        if task["status"] != "PLANNED":
+            self.machine.transition("main_task", task["status"], "PLANNED")
+        plan["task"]["status"] = "PLANNED"
+        first = self._persist_aggregate(plan, envelope, "save_plan", actual)
+
+        current_task_revision = first["task_revision"]
+        if task["start_policy"] == "manual":
+            self.machine.transition("main_task", "PLANNED", "AWAITING_START_CONFIRMATION")
+            plan["task"]["status"] = "AWAITING_START_CONFIRMATION"
+        else:
+            self._activate_current_stages(plan, utc_now())
+            target = self._aggregate_task(plan, preserve_start_confirmation=False)
+            self.machine.transition("main_task", "PLANNED", target)
+            plan["task"]["status"] = target
+        plan["task"]["updated_at"] = utc_now()
+        final = self._persist_aggregate(
+            plan, envelope, "activate_saved_plan", current_task_revision
+        )
+        return final
+
+    def confirm_start(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
+        request = {"task_id": task_id}
+        return self._idempotent(
+            task_id,
+            "confirm_start",
+            request,
+            envelope,
+            lambda: self._confirm_start(task_id, envelope),
+        )
+
+    def _confirm_start(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
+        plan = self._plan(task_id)
+        task = plan["task"]
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        if task["status"] != "AWAITING_START_CONFIRMATION":
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "Only a task awaiting manual start can be confirmed.",
+                {"current": task["status"]},
+            )
+        self._activate_current_stages(plan, utc_now())
+        target = self._aggregate_task(plan, preserve_start_confirmation=False)
+        self.machine.transition("main_task", task["status"], target)
+        task["status"] = target
+        task["updated_at"] = utc_now()
+        return self._persist_aggregate(plan, envelope, "confirm_start", actual)
+
+    def transition_instance(
+        self,
+        task_id: str,
+        instance_id: str,
+        target_status: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "target_status": target_status,
+        }
+        return self._idempotent(
+            task_id,
+            "transition_instance",
+            request,
+            envelope,
+            lambda: self._transition_instance(request, envelope),
+        )
+
+    def _transition_instance(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        task_id = request["task_id"]
+        plan = self._plan(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        instance = next(
+            (item for item in plan["instances"] if item["instance_id"] == request["instance_id"]),
+            None,
+        )
+        if instance is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        self.machine.transition("agent_instance", instance["status"], request["target_status"])
+        instance["status"] = request["target_status"]
+        if request["target_status"] in {"STARTING", "RUNNING"}:
+            self._activate_lifecycle(instance, utc_now())
+        self._refresh_stages(plan, utc_now())
+        task = plan["task"]
+        target = self._aggregate_task(plan, preserve_start_confirmation=False)
+        if target != task["status"]:
+            self.machine.transition("main_task", task["status"], target)
+            task["status"] = target
+        task["updated_at"] = utc_now()
+        return self._persist_aggregate(plan, envelope, "transition_instance", actual)
+
+    def cancel_task(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
+        request = {"task_id": task_id}
+        return self._idempotent(
+            task_id,
+            "cancel_task",
+            request,
+            envelope,
+            lambda: self._cancel_task(task_id, envelope),
+        )
+
+    def _cancel_task(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
+        task = self._task(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        self.machine.transition("main_task", task["status"], "CANCELLED")
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            task = {**task, "status": "CANCELLED", "updated_at": utc_now()}
+            wrapper = self.store.task.put(
+                task_id,
+                task_id,
+                task,
+                expected_revision=actual,
+                actor=self._actor(envelope),
+                command="cancel_task",
+                idempotency_key=envelope.idempotency_key,
+            )
+            return {"task": task, "revision": wrapper["revision"]}
+        plan = deepcopy(plan)
+        transitions = self.machine.catalog["agent_instance"]["transitions"]
+        for instance in plan["instances"]:
+            if "CANCELLED" in transitions[instance["status"]]:
+                instance["status"] = "CANCELLED"
+        stage_transitions = self.machine.catalog["stage"]["transitions"]
+        for stage in plan["stages"]:
+            if "CANCELLED" in stage_transitions[stage["status"]]:
+                stage["status"] = "CANCELLED"
+        plan["task"]["status"] = "CANCELLED"
+        plan["task"]["updated_at"] = utc_now()
+        return self._persist_aggregate(plan, envelope, "cancel_task", actual)
+
+    def downgrade_instance(
+        self,
+        task_id: str,
+        instance_id: str,
+        reason: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        request = {"task_id": task_id, "instance_id": instance_id, "reason": reason}
+        return self._idempotent(
+            task_id,
+            "downgrade_instance",
+            request,
+            envelope,
+            lambda: self._downgrade_instance(request, envelope),
+        )
+
+    def _downgrade_instance(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError(
+                "VALIDATION_ERROR", "Only a human or Master may authorize a downgrade."
+            )
+        task_id = request["task_id"]
+        plan = self._plan(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        instance = next(
+            (item for item in plan["instances"] if item["instance_id"] == request["instance_id"]),
+            None,
+        )
+        if instance is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        lifecycle = instance["requirement_lifecycle"]
+        if (
+            not instance["required"]
+            or not lifecycle["original_required"]
+            or lifecycle["first_activated_at"] is None
+        ):
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "Only an activated, originally required instance can be downgraded.",
+            )
+        new_plan_revision = max(2, plan["task"]["plan_revision"] + 1)
+        authorization = {
+            "authorization_id": f"auth_{uuid.uuid4().hex}",
+            "authorized_at": utc_now(),
+            "authorized_by_type": envelope.actor_type,
+            "authorized_by_id": envelope.actor_id,
+            "plan_revision": new_plan_revision,
+            "reason": request["reason"],
+        }
+        instance["required"] = False
+        lifecycle["authorized_downgrade"] = authorization
+        stage = next(item for item in plan["stages"] if item["stage_id"] == instance["stage_id"])
+        remaining_required = [
+            item
+            for item in plan["instances"]
+            if item["stage_id"] == stage["stage_id"] and item["required"]
+        ]
+        if not remaining_required:
+            stage["required"] = False
+            self._activate_lifecycle(stage, lifecycle["first_activated_at"])
+            stage["requirement_lifecycle"]["authorized_downgrade"] = authorization
+        plan["task"]["plan_revision"] = new_plan_revision
+        self._refresh_stages(plan, utc_now())
+        target = self._aggregate_task(plan, preserve_start_confirmation=False)
+        if target != plan["task"]["status"]:
+            self.machine.transition("main_task", plan["task"]["status"], target)
+            plan["task"]["status"] = target
+        plan["task"]["updated_at"] = utc_now()
+        return self._persist_aggregate(plan, envelope, "downgrade_instance", actual)
+
+    def _normalize_plan(
+        self,
+        task: dict[str, Any],
+        plan_revision: int,
+        stages: list[dict[str, Any]],
+        instances: list[dict[str, Any]],
+        task_cards: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        normalized_stages = []
+        for raw in sorted(deepcopy(stages), key=lambda item: item["position"]):
+            required = bool(raw["required"])
+            normalized_stages.append(
+                {
+                    **raw,
+                    "schema_version": "1.0",
+                    "task_id": task["task_id"],
+                    "required": required,
+                    "requirement_lifecycle": {
+                        "original_required": required,
+                        "first_activated_at": None,
+                        "authorized_downgrade": None,
+                    },
+                    "status": "PENDING",
+                }
+            )
+        normalized_instances = []
+        for raw in deepcopy(instances):
+            required = bool(raw["required"])
+            normalized_instances.append(
+                {
+                    **raw,
+                    "schema_version": "1.0",
+                    "task_id": task["task_id"],
+                    "required": required,
+                    "requirement_lifecycle": {
+                        "original_required": required,
+                        "first_activated_at": None,
+                        "authorized_downgrade": None,
+                    },
+                    "status": "READY" if raw["agent_type"] == "image" else "UNAVAILABLE",
+                    "process": None,
+                    "ui_url": None,
+                    "created_at": now,
+                }
+            )
+        normalized_cards = [
+            {
+                **deepcopy(raw),
+                "schema_version": "1.0",
+                "task_id": task["task_id"],
+                "created_at": now,
+            }
+            for raw in task_cards
+        ]
+        normalized_task = {
+            **deepcopy(task),
+            "status": "PLANNED",
+            "plan_revision": plan_revision,
+            "updated_at": now,
+        }
+        plan = {
+            "schema_version": "1.0",
+            "task": normalized_task,
+            "stages": normalized_stages,
+            "instances": normalized_instances,
+            "task_cards": normalized_cards,
+        }
+        self._refresh_stages(plan, now, activate_new=False)
+        validate_plan(self.contracts, plan)
+        return plan
+
+    def _refresh_stages(self, plan: dict[str, Any], now: str, *, activate_new: bool = True) -> None:
+        stage_by_id = {item["stage_id"]: item for item in plan["stages"]}
+        instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
+        for stage in sorted(plan["stages"], key=lambda item: item["position"]):
+            before = stage["status"]
+            target = self.machine.aggregate_stage(stage, stage_by_id, instance_by_id)
+            dependencies_ready = all(
+                stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]
+            )
+            if activate_new and dependencies_ready and stage["type"] == "ppt":
+                if stage["required"]:
+                    self._activate_lifecycle(stage, now)
+                    for instance_id in stage["instance_ids"]:
+                        self._activate_lifecycle(instance_by_id[instance_id], now)
+                    target = "UNAVAILABLE"
+                else:
+                    target = "SKIPPED"
+            if target != before and before not in {"SKIPPED", "CANCELLED"}:
+                self._validate_stage_reaggregation(before, target)
+            stage["status"] = target
+
+    def _validate_stage_reaggregation(self, current: str, target: str) -> None:
+        """Validate plan-revision reaggregation through catalog-listed intermediate states."""
+
+        if current == "FAILED" and target == "SUCCEEDED":
+            self.machine.transition("stage", "FAILED", "RUNNING")
+            self.machine.transition("stage", "RUNNING", "SUCCEEDED")
+            return
+        if current == "FAILED" and target == "SKIPPED":
+            self.machine.transition("stage", "FAILED", "READY")
+            self.machine.transition("stage", "READY", "SKIPPED")
+            return
+        self.machine.transition("stage", current, target)
+
+    def _activate_current_stages(self, plan: dict[str, Any], now: str) -> None:
+        stage_by_id = {item["stage_id"]: item for item in plan["stages"]}
+        instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
+        for stage in sorted(plan["stages"], key=lambda item: item["position"]):
+            if not all(stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]):
+                continue
+            if stage["type"] == "ppt" and not stage["required"]:
+                self.machine.transition("stage", stage["status"], "SKIPPED")
+                stage["status"] = "SKIPPED"
+                continue
+            self._activate_lifecycle(stage, now)
+            for instance_id in stage["instance_ids"]:
+                self._activate_lifecycle(instance_by_id[instance_id], now)
+            target = self.machine.aggregate_stage(stage, stage_by_id, instance_by_id)
+            if target != stage["status"]:
+                self.machine.transition("stage", stage["status"], target)
+                stage["status"] = target
+
+    @staticmethod
+    def _activate_lifecycle(item: dict[str, Any], now: str) -> None:
+        lifecycle = item["requirement_lifecycle"]
+        if lifecycle["first_activated_at"] is None:
+            lifecycle["first_activated_at"] = now
+
+    def _aggregate_task(self, plan: dict[str, Any], *, preserve_start_confirmation: bool) -> str:
+        return self.machine.aggregate_task(
+            plan["task"],
+            plan["stages"],
+            plan["instances"],
+            preserve_start_confirmation=preserve_start_confirmation,
+        )
+
+    def _persist_aggregate(
+        self,
+        plan: dict[str, Any],
+        envelope: CommandEnvelope,
+        command: str,
+        expected_task_revision: int,
+    ) -> dict[str, Any]:
+        validate_plan(self.contracts, plan)
+        task_id = plan["task"]["task_id"]
+        actor = self._actor(envelope)
+        plan_wrapper = self.store.plan.put(
+            task_id,
+            task_id,
+            deepcopy(plan),
+            expected_revision=self.store.plan.revision(task_id, task_id),
+            actor=actor,
+            command=command,
+            idempotency_key=envelope.idempotency_key,
+        )
+        task_wrapper = self.store.task.put(
+            task_id,
+            task_id,
+            deepcopy(plan["task"]),
+            expected_revision=expected_task_revision,
+            actor=actor,
+            command=command,
+            idempotency_key=envelope.idempotency_key,
+        )
+        for stage in plan["stages"]:
+            self.store.stage.put(
+                task_id,
+                stage["stage_id"],
+                deepcopy(stage),
+                expected_revision=self.store.stage.revision(task_id, stage["stage_id"]),
+                actor=actor,
+                command=command,
+                idempotency_key=envelope.idempotency_key,
+            )
+        for instance in plan["instances"]:
+            self.store.instance.put(
+                task_id,
+                instance["instance_id"],
+                deepcopy(instance),
+                expected_revision=self.store.instance.revision(task_id, instance["instance_id"]),
+                actor=actor,
+                command=command,
+                idempotency_key=envelope.idempotency_key,
+            )
+        workspace_task = self.store.layout.workspace_root / "tasks" / task_id
+        atomic_write_json(workspace_task / "task-summary.json", plan["task"], mode=0o640)
+        return {
+            "task": deepcopy(plan["task"]),
+            "plan": deepcopy(plan),
+            "task_revision": task_wrapper["revision"],
+            "store_plan_revision": plan_wrapper["revision"],
+        }
+
+    def _idempotent(
+        self,
+        scope: str,
+        command: str,
+        request: dict[str, Any],
+        envelope: CommandEnvelope,
+        operation: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        validate_identifier(scope, "task_id")
+        with FileLock(
+            self.store.layout.control_root / "locks" / f"command-{scope}.lock",
+            self.store.lock_timeout_seconds,
+        ):
+            existing = self.store.idempotency.lookup(
+                scope, envelope.idempotency_key, command, request
+            )
+            if existing is not None:
+                return existing
+            result = operation()
+            return self.store.idempotency.remember(
+                scope,
+                envelope.idempotency_key,
+                command,
+                request,
+                result,
+            )
+
+    def _task(self, task_id: str) -> dict[str, Any]:
+        task = self.store.task.get(task_id, task_id)
+        if task is None:
+            raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
+        return deepcopy(task)
+
+    def _plan(self, task_id: str) -> dict[str, Any]:
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            raise HarnessError("TASK_NOT_FOUND", "The task does not have a saved plan.")
+        return deepcopy(plan)
+
+    @staticmethod
+    def _actor(envelope: CommandEnvelope) -> Actor:
+        return Actor(envelope.actor_type, envelope.actor_id)
+
+    @staticmethod
+    def _raise_revision(expected: int, actual: int, kind: str, object_id: str) -> None:
+        raise HarnessError(
+            "REVISION_CONFLICT",
+            "The object revision changed before this command committed.",
+            {
+                "object_type": kind,
+                "object_id": object_id,
+                "expected_revision": expected,
+                "actual_revision": actual,
+            },
+        )
