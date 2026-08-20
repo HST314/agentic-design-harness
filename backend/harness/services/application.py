@@ -119,7 +119,14 @@ class HarnessApplicationService:
                 if intent["state"] == "COMMITTED":
                     continue
                 try:
-                    result = self._resume_save_plan(path, None)
+                    if intent["kind"] == "SAVE_PLAN_AND_CREATE_INSTANCES":
+                        result = self._resume_save_plan(path, None)
+                    elif intent["kind"] == "START_READY_INSTANCES":
+                        result = self._resume_start(path, None)
+                    else:
+                        raise HarnessError(
+                            "VALIDATION_ERROR", "The application intent kind is invalid."
+                        )
                     results.append(
                         {"operation_id": operation_id, "status": "RECOVERED", "result": result}
                     )
@@ -139,69 +146,69 @@ class HarnessApplicationService:
         *,
         operation_id: str,
         envelope: CommandEnvelope,
+        crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
         validate_identifier(operation_id, "operation_id")
-        plan = self._plan(task_id)
-        if plan["task"]["status"] == "AWAITING_START_CONFIRMATION":
-            plan = self.commands.confirm_start(task_id, envelope)["plan"]
-        elif plan["task"]["status"] not in {"RUNNING", "BLOCKED_UNAVAILABLE"}:
-            raise HarnessError(
-                "INVALID_STATE_TRANSITION",
-                "Only a planned task may start ready Agent instances.",
-                {"current": plan["task"]["status"]},
-            )
-        task_root = self.store.layout.workspace_root / "tasks" / task_id
-        cards = {item["instance_id"]: item for item in plan["task_cards"]}
-        launches: list[dict[str, Any]] = []
-        unavailable: list[str] = []
-        for instance in sorted(plan["instances"], key=lambda item: item["instance_id"]):
-            if instance["status"] == "UNAVAILABLE":
-                unavailable.append(instance["instance_id"])
-                continue
-            if instance["status"] != "READY":
-                continue
-            adapter = self.adapters.get(instance["agent_type"])
-            if not adapter.available:
-                unavailable.append(instance["instance_id"])
-                continue
-            self._require_valid_card(adapter, cards[instance["instance_id"]])
-            prepare = PrepareRequest(
-                instance=deepcopy(instance),
-                task_card=deepcopy(cards[instance["instance_id"]]),
-                task_root=task_root,
-                config_ref=task_root
-                / "instances"
-                / instance["instance_id"]
-                / "runtime"
-                / "runtime.yaml",
-                credential_ref=(
-                    instance["credential_pair_ref"],
-                    instance["credential_pair_revision"],
-                ),
-            )
-            spec = adapter.prepare(prepare)
-            launch_id = self._derived_id("launch", operation_id, instance["instance_id"])
-            attempt_id = self._derived_id("attempt", operation_id, instance["instance_id"])
-            launch = self.supervisor.start_instance(
-                task_id,
-                instance["instance_id"],
-                spec,
-                launch_id=launch_id,
-                attempt_id=attempt_id,
-            )
-            adapter_result = adapter.start(instance["instance_id"], attempt_id)
-            launches.append(
-                {
-                    "instance_id": instance["instance_id"],
-                    "launch": launch,
-                    "adapter": {
-                        "accepted": adapter_result.accepted,
-                        "operation_id": adapter_result.operation_id,
-                        "details": adapter_result.details,
-                    },
+        request = {
+            "task_id": task_id,
+            "envelope": envelope.model_dump(mode="json"),
+        }
+        request_sha256 = digest_json(request)
+        intent_path = self._intent_path(operation_id)
+        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
+            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        ):
+            if intent_path.exists():
+                intent = read_json(intent_path)
+                if (
+                    intent.get("kind") != "START_READY_INSTANCES"
+                    or intent.get("request_sha256") != request_sha256
+                ):
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The application operation id was reused for another request.",
+                        {"operation_id": operation_id},
+                    )
+                if intent["state"] == "COMMITTED":
+                    return deepcopy(intent["result"])
+            else:
+                plan = self._plan(task_id)
+                if plan["task"]["status"] not in {
+                    "AWAITING_START_CONFIRMATION",
+                    "RUNNING",
+                    "BLOCKED_UNAVAILABLE",
+                }:
+                    raise HarnessError(
+                        "INVALID_STATE_TRANSITION",
+                        "Only a planned task may start ready Agent instances.",
+                        {"current": plan["task"]["status"]},
+                    )
+                targets = [
+                    item["instance_id"]
+                    for item in plan["instances"]
+                    if item["status"] == "READY"
+                ]
+                unavailable = [
+                    item["instance_id"]
+                    for item in plan["instances"]
+                    if item["status"] == "UNAVAILABLE"
+                ]
+                intent = {
+                    "schema_version": "1.0",
+                    "kind": "START_READY_INSTANCES",
+                    "operation_id": operation_id,
+                    "request_sha256": request_sha256,
+                    "request": request,
+                    "target_instance_ids": targets,
+                    "unavailable": unavailable,
+                    "state": "PREPARED",
+                    "prepared_at": utc_now(),
+                    "result": None,
                 }
-            )
-        return {"task_id": task_id, "launches": launches, "unavailable": unavailable}
+                atomic_write_json(intent_path, intent)
+                if crash_hook:
+                    crash_hook("after_start_intent")
+            return self._resume_start(intent_path, crash_hook)
 
     def cancel_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
         instance = self._instance(task_id, instance_id)
@@ -239,7 +246,7 @@ class HarnessApplicationService:
             item for item in plan["task_cards"] if item["instance_id"] == instance_id
         )
         published = [
-            item["manifest"]
+            self.assets.verify_asset(task_id, item["manifest"]["asset_id"])
             for item in self.assets.list_assets(task_id)
             if item["integrity_status"] == "VERIFIED"
             and item["manifest"].get("producer_instance_id") == instance_id
@@ -247,6 +254,7 @@ class HarnessApplicationService:
         complete = all(
             any(
                 candidate["role"] == expected["role"]
+                and candidate["kind"] == expected["kind"]
                 and candidate["mime_type"] in expected["accepted_mime_types"]
                 for candidate in published
             )
@@ -293,6 +301,15 @@ class HarnessApplicationService:
                 )
                 if crash_hook:
                     crash_hook(f"after_instance_created:{raw['instance_id']}")
+            else:
+                adapter = self.adapters.get_optional(raw["agent_type"])
+                if adapter is not None and not adapter.available:
+                    instance.update(
+                        {
+                            "credential_pair_ref": f"{raw['agent_type']}_adapter_unavailable",
+                            "credential_pair_revision": 1,
+                        }
+                    )
             assigned_instances.append(instance)
         result = self.commands.save_plan(
             request["task_id"],
@@ -303,6 +320,107 @@ class HarnessApplicationService:
         )
         if crash_hook:
             crash_hook("after_plan_commit")
+        intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
+        atomic_write_json(intent_path, intent)
+        return deepcopy(result)
+
+    def _resume_start(
+        self, intent_path: Path, crash_hook: CrashHook | None
+    ) -> dict[str, Any]:
+        intent = read_json(intent_path)
+        task_id = intent["request"]["task_id"]
+        plan = self._plan(task_id)
+        if plan["task"]["status"] == "AWAITING_START_CONFIRMATION":
+            plan = self.commands.confirm_start(
+                task_id,
+                CommandEnvelope.model_validate(intent["request"]["envelope"]),
+            )["plan"]
+        elif plan["task"]["status"] not in {"RUNNING", "BLOCKED_UNAVAILABLE"}:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A prepared start intent no longer belongs to an active task.",
+                {"current": plan["task"]["status"]},
+            )
+        task_root = self.store.layout.workspace_root / "tasks" / task_id
+        instances = {item["instance_id"]: item for item in plan["instances"]}
+        cards = {item["instance_id"]: item for item in plan["task_cards"]}
+        launches: list[dict[str, Any]] = []
+        for instance_id in intent["target_instance_ids"]:
+            instance = instances.get(instance_id)
+            if instance is None or instance["status"] in {
+                "CANCELLED",
+                "SUPERSEDED",
+                "ARCHIVED",
+            }:
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "A prepared start intent no longer owns a startable instance.",
+                    {"instance_id": instance_id},
+                )
+            adapter = self.adapters.get(instance["agent_type"])
+            if not adapter.available:
+                raise HarnessError(
+                    "ADAPTER_UNAVAILABLE",
+                    "A prepared start intent references an unavailable adapter.",
+                    {"instance_id": instance_id},
+                )
+            self._require_valid_card(adapter, cards[instance_id])
+            spec = adapter.prepare(
+                PrepareRequest(
+                    instance=deepcopy(instance),
+                    task_card=deepcopy(cards[instance_id]),
+                    task_root=task_root,
+                    config_ref=task_root
+                    / "instances"
+                    / instance_id
+                    / "runtime"
+                    / "runtime.yaml",
+                    credential_ref=(
+                        instance["credential_pair_ref"],
+                        instance["credential_pair_revision"],
+                    ),
+                )
+            )
+            launch_id = self._derived_id("launch", intent["operation_id"], instance_id)
+            attempt_id = self._derived_id("attempt", intent["operation_id"], instance_id)
+            launch = self.supervisor.start_instance(
+                task_id,
+                instance_id,
+                spec,
+                launch_id=launch_id,
+                attempt_id=attempt_id,
+            )
+            if launch["state"] != "RUNNING":
+                raise HarnessError(
+                    "PROCESS_START_FAILED",
+                    "A prepared start intent cannot reuse a non-running launch.",
+                    {"instance_id": instance_id, "launch_state": launch["state"]},
+                )
+            if crash_hook:
+                crash_hook(f"after_process_started:{instance_id}")
+            adapter_result = adapter.start(instance_id, attempt_id)
+            if not adapter_result.accepted:
+                raise HarnessError(
+                    "PROCESS_START_FAILED",
+                    "The Agent adapter rejected the prepared start operation.",
+                    {"instance_id": instance_id},
+                )
+            launches.append(
+                {
+                    "instance_id": instance_id,
+                    "launch": self._launch_summary(launch),
+                    "adapter": {
+                        "accepted": adapter_result.accepted,
+                        "operation_id": adapter_result.operation_id,
+                        "details": adapter_result.details,
+                    },
+                }
+            )
+        result = {
+            "task_id": task_id,
+            "launches": launches,
+            "unavailable": intent["unavailable"],
+        }
         intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
         atomic_write_json(intent_path, intent)
         return deepcopy(result)
@@ -319,7 +437,7 @@ class HarnessApplicationService:
         for instance in request["instances"]:
             adapter = self.adapters.get_optional(instance["agent_type"])
             has_provider = instance["instance_id"] in request["providers"]
-            if adapter is not None and adapter.available and not has_provider:
+            if (adapter is None or adapter.available) and not has_provider:
                 raise HarnessError(
                     "VALIDATION_ERROR",
                     "A runnable Agent instance requires an explicit Provider mapping.",
@@ -404,3 +522,19 @@ class HarnessApplicationService:
     def _derived_id(prefix: str, operation_id: str, instance_id: str) -> str:
         digest = hashlib.sha256(f"{operation_id}:{instance_id}".encode()).hexdigest()
         return f"{prefix}_{digest[:24]}"
+
+    @staticmethod
+    def _launch_summary(launch: dict[str, Any]) -> dict[str, Any]:
+        fields = (
+            "task_id",
+            "instance_id",
+            "launch_id",
+            "attempt_id",
+            "state",
+            "host",
+            "port",
+            "pid",
+            "started_at",
+            "code_identity",
+        )
+        return {name: launch.get(name) for name in fields}

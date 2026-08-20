@@ -41,16 +41,24 @@ class AgentRuntimeArtifact:
             self.revision
         ):
             _artifact_invalid("The runtime artifact id or revision is invalid.")
-        if not self.source_root.is_absolute() or self.source_root.is_symlink():
+        if (
+            not self.source_root.is_absolute()
+            or self.source_root.is_symlink()
+        ):
             _artifact_invalid("The runtime artifact root must be an absolute directory.")
         try:
-            if not self.source_root.is_dir():
+            if (
+                not self.source_root.is_dir()
+                or self.source_root.resolve(strict=True) != self.source_root
+            ):
                 _artifact_invalid("The runtime artifact root does not exist.")
         except OSError:
             _artifact_invalid("The runtime artifact root cannot be inspected.")
         _artifact_relative_path(self.entrypoint_relpath)
         if not self.dependency_lock_relpaths:
             _artifact_invalid("At least one dependency lock belongs to every runtime artifact.")
+        if len(self.dependency_lock_relpaths) != len(set(self.dependency_lock_relpaths)):
+            _artifact_invalid("Runtime artifact dependency locks must be unique.")
         for relative_path in self.dependency_lock_relpaths:
             _artifact_relative_path(relative_path)
         if self.environment_root is not None and (
@@ -236,7 +244,11 @@ def _walk_artifact(
     for name in names:
         if name in {".", ".."}:
             continue
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         try:
             child_fd = os.open(name, flags, dir_fd=directory_fd)
         except OSError:

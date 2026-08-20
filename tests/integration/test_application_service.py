@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +21,7 @@ from harness.services.application import HarnessApplicationService
 from harness.services.assets import AssetService
 from harness.services.configuration import ConfigurationService
 from harness.services.credentials import CredentialPoolService
+from harness.services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from harness.services.supervisor import ProcessSupervisor
 from harness.storage.ndjson import recover_records
 from runtime_helpers import build_service, create_task, envelope, image_plan, ppt_plan
@@ -26,20 +29,28 @@ from runtime_helpers import build_service, create_task, envelope, image_plan, pp
 CREDENTIAL_FIXTURE = (
     Path(__file__).resolve().parents[1] / "fixtures" / "p1" / "credential-pairs.json"
 )
+FAKE_AGENT = Path(__file__).resolve().parents[1] / "fixtures" / "fake_agent_process.py"
 
 
 class FakeImageAdapter:
     agent_type = "image"
     available = True
 
+    def __init__(self) -> None:
+        self.runtime_spec = None
+        self.start_calls = []
+
     def validate_task_card(self, card):
         errors = () if card.get("agent_type") == "image" else ("wrong agent type",)
         return ValidationResult(valid=not errors, errors=errors)
 
     def prepare(self, request):
-        raise AssertionError("process preparation is outside this integration test")
+        if self.runtime_spec is None:
+            raise AssertionError("no runtime artifact was configured for this test")
+        return self.runtime_spec
 
     def start(self, instance_id, operation_id):
+        self.start_calls.append((instance_id, operation_id))
         return AdapterCommandResult(True, operation_id)
 
     def get_status(self, instance_id):
@@ -78,8 +89,9 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.supervisor = ProcessSupervisor(
             self.store, self.commands, self.credentials, self.configuration
         )
+        self.fake_adapter = FakeImageAdapter()
         self.adapters = AdapterRegistry(
-            [FakeImageAdapter(), PptAgentContractAdapter()]
+            [self.fake_adapter, PptAgentContractAdapter()]
         )
         self.application = HarnessApplicationService(
             self.store,
@@ -89,11 +101,40 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             self.supervisor,
             self.adapters,
         )
+        self.read_only_artifacts: list[Path] = []
 
     def tearDown(self) -> None:
         self.supervisor.close()
         self.store.close()
+        for root in self.read_only_artifacts:
+            root.chmod(0o755)
+            for path in root.rglob("*"):
+                if not path.is_symlink():
+                    path.chmod(0o755 if path.is_dir() else 0o644)
         self.temporary.cleanup()
+
+    def _configure_runtime_artifact(self, name: str) -> None:
+        artifact_root = self.root / name
+        artifact_root.mkdir()
+        entrypoint = artifact_root / "fake_agent_process.py"
+        shutil.copyfile(FAKE_AGENT, entrypoint)
+        (artifact_root / "requirements.lock").write_text(
+            "stdlib-only\n", encoding="utf-8"
+        )
+        for path in artifact_root.rglob("*"):
+            path.chmod(0o444)
+        artifact_root.chmod(0o555)
+        self.read_only_artifacts.append(artifact_root)
+        self.fake_adapter.runtime_spec = ProcessSpec(
+            command=(sys.executable, str(entrypoint)),
+            runtime_artifact=AgentRuntimeArtifact(
+                artifact_id=name,
+                revision="1",
+                source_root=artifact_root,
+                entrypoint_relpath="fake_agent_process.py",
+                dependency_lock_relpaths=("requirements.lock",),
+            ),
+        )
 
     def test_plan_and_instance_creation_is_atomic_to_callers_and_idempotent(self) -> None:
         created = create_task(self.commands, "t_application")
@@ -195,7 +236,83 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             envelope=envelope("save-ppt-application-plan", created["revision"]),
         )
         self.assertEqual(result["plan"]["instances"][0]["status"], "UNAVAILABLE")
+        self.assertEqual(
+            result["plan"]["instances"][0]["credential_pair_ref"],
+            "ppt_adapter_unavailable",
+        )
         self.assertEqual(recover_records(self.credentials.events_path), [])
+
+    def test_start_intent_replays_adapter_start_after_process_crash_window(self) -> None:
+        self._configure_runtime_artifact("application-fake-agent")
+        created = create_task(self.commands, "t_start_application")
+        draft = image_plan("t_start_application")
+        saved = self.application.save_plan_and_create_instances(
+            "t_start_application",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_start_application",
+            envelope=envelope("prepare-start-application", created["revision"]),
+        )
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_process_started:i_image_1":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.application.confirm_and_start_ready_instances(
+                "t_start_application",
+                operation_id="start_application_instances",
+                envelope=envelope(
+                    "start-application-instances", saved["task_revision"]
+                ),
+                crash_hook=crash,
+            )
+        self.assertEqual(self.fake_adapter.start_calls, [])
+        recovered = self.application.recover()
+        self.assertEqual(recovered[0]["status"], "RECOVERED")
+        self.assertEqual(len(self.fake_adapter.start_calls), 1)
+        replay = self.application.confirm_and_start_ready_instances(
+            "t_start_application",
+            operation_id="start_application_instances",
+            envelope=envelope("start-application-instances", saved["task_revision"]),
+        )
+        self.assertEqual(len(replay["launches"]), 1)
+        self.assertEqual(len(self.fake_adapter.start_calls), 1)
+        self.application.cancel_instance("t_start_application", "i_image_1")
+
+    def test_start_intent_is_durable_before_manual_confirmation(self) -> None:
+        self._configure_runtime_artifact("pre-confirmation-fake-agent")
+        created = create_task(self.commands, "t_confirm_recovery")
+        draft = image_plan("t_confirm_recovery")
+        saved = self.application.save_plan_and_create_instances(
+            "t_confirm_recovery",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_confirm_recovery",
+            envelope=envelope("prepare-confirm-recovery", created["revision"]),
+        )
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_start_intent":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.application.confirm_and_start_ready_instances(
+                "t_confirm_recovery",
+                operation_id="start_confirm_recovery",
+                envelope=envelope("start-confirm-recovery", saved["task_revision"]),
+                crash_hook=crash,
+            )
+        plan = self.store.plan.get("t_confirm_recovery", "t_confirm_recovery")
+        self.assertEqual(plan["task"]["status"], "AWAITING_START_CONFIRMATION")
+        recovered = self.application.recover()
+        self.assertEqual(recovered[0]["status"], "RECOVERED")
+        self.assertEqual(len(self.fake_adapter.start_calls), 1)
+        self.application.cancel_instance("t_confirm_recovery", "i_image_1")
 
     def test_concurrent_plan_operations_cannot_leave_losing_assignments(self) -> None:
         created = create_task(self.commands, "t_concurrent_application")
@@ -227,6 +344,60 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             if item["event_type"] == "CREDENTIAL_PAIR_ASSIGNED"
         ]
         self.assertEqual(len(assignments), 2)
+
+    def test_delivery_completion_requires_live_kind_and_mime_matches(self) -> None:
+        created = create_task(self.commands, "t_delivery_application", "auto")
+        draft = image_plan("t_delivery_application")
+        saved = self.application.save_plan_and_create_instances(
+            "t_delivery_application",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_delivery_application",
+            envelope=envelope("prepare-delivery-application", created["revision"]),
+        )
+        starting = self.commands.transition_instance(
+            "t_delivery_application",
+            "i_image_1",
+            "STARTING",
+            envelope("delivery-starting", saved["task_revision"], "adapter"),
+        )
+        running = self.commands.transition_instance(
+            "t_delivery_application",
+            "i_image_1",
+            "RUNNING",
+            envelope("delivery-running", starting["task_revision"], "adapter"),
+        )
+        instance_root = self.assets.initialize_instance_workspace(
+            "t_delivery_application", "i_image_1"
+        )
+        wrong_kind = instance_root / "outputs" / "final.md"
+        wrong_kind.write_text("# not an image\n", encoding="utf-8")
+        incomplete = self.application.publish_delivery_and_complete(
+            "t_delivery_application",
+            "i_image_1",
+            source_relative_path="instances/i_image_1/outputs/final.md",
+            role="final_artwork",
+            description="Wrong kind regression",
+            operation_id="publish_wrong_kind",
+            envelope=envelope("complete-wrong-kind", running["task_revision"], "adapter"),
+        )
+        self.assertFalse(incomplete["complete"])
+
+        final_image = instance_root / "outputs" / "final.png"
+        final_image.write_bytes(b"\x89PNG\r\n\x1a\napplication-delivery")
+        completed = self.application.publish_delivery_and_complete(
+            "t_delivery_application",
+            "i_image_1",
+            source_relative_path="instances/i_image_1/outputs/final.png",
+            role="final_artwork",
+            description="Verified final artwork",
+            operation_id="publish_final_image",
+            envelope=envelope("complete-final-image", running["task_revision"], "adapter"),
+        )
+        self.assertTrue(completed["complete"])
+        self.assertEqual(completed["transition"]["task"]["status"], "SUCCEEDED")
 
 
 if __name__ == "__main__":

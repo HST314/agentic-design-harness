@@ -447,6 +447,16 @@ class ProcessSupervisorTests(unittest.TestCase):
         self.assertEqual(symlinked.exception.code, "PROCESS_START_FAILED")
         self.assertFalse(self.supervisor._launch_path("launch_1").exists())
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX named pipes")
+    def test_runtime_artifact_rejects_special_files_without_blocking(self) -> None:
+        make_artifact_writable(self.artifact_root)
+        os.mkfifo(self.artifact_root / "named-pipe")
+        make_artifact_read_only(self.artifact_root)
+        with self.assertRaises(HarnessError) as special:
+            self._start(1)
+        self.assertEqual(special.exception.code, "PROCESS_START_FAILED")
+        self.assertFalse(self.supervisor._launch_path("launch_1").exists())
+
     def test_code_change_is_rejected_before_the_live_process_is_stopped(self) -> None:
         make_artifact_writable(self.artifact_root)
         helper = self.artifact_root / "helper.py"

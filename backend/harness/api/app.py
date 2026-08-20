@@ -107,8 +107,8 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
         credential_recoveries = container.credentials.recover()
         config_recoveries = container.configuration.recover()
         asset_recoveries = container.assets.recover()
-        application_recoveries = container.application.recover()
         process_recoveries = container.supervisor.reconcile()
+        application_recoveries = container.application.recover()
         global_config = container.configuration.get_global()
         assert global_config is not None
         container.supervisor.start_monitoring(
