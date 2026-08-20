@@ -5,8 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.core.errors import HarnessError, SimulatedCrash
+from harness.services import asset_reader
 from harness.services.assets import AssetService, file_digest
 from harness.storage.ndjson import recover_records
 from runtime_helpers import build_service, create_task, envelope, image_plan
@@ -98,6 +100,45 @@ class AssetServiceTests(unittest.TestCase):
         download = self.assets.download("t_assets", imported["relative_path"])
         self.assertEqual(download["headers"]["X-Content-Type-Options"], "nosniff")
         self.assertTrue(download["headers"]["Content-Disposition"].startswith("attachment;"))
+        self.assertNotIn("path", download)
+        self.assertEqual(download["stream"].read(), b"# Registered brief\n")
+        download["stream"].close()
+
+    def test_preview_and_download_keep_the_verified_inode_during_symlink_swap(self) -> None:
+        imported = self.assets.import_bytes(
+            "t_assets",
+            filename="race.md",
+            content=b"# committed content\n",
+            description="Race target",
+            source="user_upload",
+            idempotency_key="import-race-target",
+        )
+        task_root = self.store.layout.workspace_root / "tasks" / "t_assets"
+        target = task_root / imported["relative_path"]
+        backup = target.with_name("race.backup")
+        outside = self.root / "outside-secret.md"
+        outside.write_bytes(b"# outside content must never be returned\n")
+        original_detect = asset_reader.detect_mime_stream
+
+        def swap_after_open(stream, filename):
+            target.rename(backup)
+            target.symlink_to(outside)
+            return original_detect(stream, filename)
+
+        with patch.object(asset_reader, "detect_mime_stream", side_effect=swap_after_open):
+            preview = self.assets.preview("t_assets", imported["relative_path"])
+        self.assertEqual(preview["content"], "# committed content\n")
+        target.unlink()
+        backup.rename(target)
+
+        with patch.object(asset_reader, "detect_mime_stream", side_effect=swap_after_open):
+            download = self.assets.download("t_assets", imported["relative_path"])
+        try:
+            self.assertEqual(download["stream"].read(), b"# committed content\n")
+        finally:
+            download["stream"].close()
+            target.unlink()
+            backup.rename(target)
 
     def test_path_traversal_symlinks_and_unknown_mime_are_rejected(self) -> None:
         with self.assertRaises(HarnessError) as absolute:

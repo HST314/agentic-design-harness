@@ -3,10 +3,11 @@
 单机平面设计多智能体控制平面。系统由 Master Agent 与人工共同编排任务，
 通过稳定契约管理彼此隔离的 Image、PPT 及后续专业 Agent。
 
-当前 `main` 已完成 RFC v0.2 的 P1-00 至 P1-07：开工决策冻结、可运行工程
-骨架、File State Store、三种计划拓扑的领域命令，以及资产、凭据、配置和
-单机进程监管服务。它还不是完整 Phase 1 产品；Adapter、审批/用量、版本化
-业务 API 和统一前端属于后续工作包。
+当前 `main` 已完成 RFC v0.2 的 P1-00 至 P1-07 和 G1.5 集成前置加固：开工
+决策冻结、可运行工程骨架、File State Store、三种计划拓扑的领域命令，以及
+资产、凭据、配置、单机进程监管、typed Adapter 注册表和跨服务应用用例边界。
+它还不是完整 Phase 1 产品；真实 Image Adapter、审批/用量、版本化业务 API
+和统一前端属于后续工作包。
 
 ## 当前能力
 
@@ -17,9 +18,11 @@
 - `backend/harness/domain`：统一命令信封、任务/输入/计划命令、冻结状态转换、
   人工/自动启动、取消、授权降级和确定性聚合；
 - `backend/harness/services`：受控资产导入/发布、完整凭据对轮询、全局/实例
-  配置以及一实例一进程的监管与崩溃恢复；
+  配置、一实例一进程的监管与崩溃恢复，以及 durable 应用用例编排；
+- `backend/harness/adapters`：typed Adapter Protocol、显式 Registry 与 PPT
+  不可运行契约占位；
 - `frontend/`：TypeScript/Vite 控制面壳、版本化 API Client、路由与响应式布局；
-- `contracts/v1/`：Phase 0 冻结的跨模块事实源；
+- `contracts/v1/`：Phase 0 冻结的跨模块事实源及 consumer-first TaskCard 1.1；
 - `tests/`：契约、单元、集成和崩溃注入测试，其中原 P0 46 条保持全绿。
 
 PPT-only 与 Image→PPT 可以被正确建模。必需 PPT 只有在其前置条件满足并被

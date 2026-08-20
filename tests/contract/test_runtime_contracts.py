@@ -26,6 +26,22 @@ class RuntimeContractTests(unittest.TestCase):
             self.registry.validate("main-task", {"schema_version": "2.0"})
         self.assertEqual(captured.exception.code, "SCHEMA_VERSION_UNSUPPORTED")
 
+    def test_registry_dispatches_task_card_minor_without_upgrading_other_objects(self) -> None:
+        fixture = json.loads(
+            (ROOT / "tests" / "golden" / "image-task-card-mapping-v1.1.json").read_text()
+        )
+        self.registry.validate("task-card", fixture["harness_task_card"])
+        self.registry.validate("task-card-v1.1", fixture["harness_task_card"])
+
+        old_card = json.loads(
+            (ROOT / "contracts" / "v1" / "examples" / "plans" / "image-only.json").read_text()
+        )["task_cards"][0]
+        self.registry.validate("task-card", old_card)
+
+        with self.assertRaises(HarnessError) as unsupported:
+            self.registry.validate("main-task", {"schema_version": "1.1"})
+        self.assertEqual(unsupported.exception.code, "SCHEMA_VERSION_UNSUPPORTED")
+
     def test_registry_reports_a_stable_validation_error(self) -> None:
         with self.assertRaises(HarnessError) as captured:
             self.registry.validate("main-task", {})

@@ -25,7 +25,7 @@
 - Stage/Instance 必须保存 `requirement_lifecycle`：原始 `required`、首次激活时间，以及可空的授权降级主体、时间和生效计划修订；Instance 创建时间必须满足 `task.created_at <= instance.created_at <= task.updated_at`，首次激活必须落在 Task 创建/更新时间窗内且不能早于 Instance 创建，授权降级不能早于激活或晚于 Task 快照；
 - `UNAVAILABLE` 是否已触发以持久化的 `first_activated_at` 事实为准，不从当前 Task 终态反推；`BLOCKED_UNAVAILABLE` 的阻塞项必须携带激活事实，仍等待前置依赖或人工确认启动前取消的占位可保持 `first_activated_at = null`，且不得据此提前聚合为阻塞；
 - 任务卡只能引用 `asset_id + manifest_relpath`，不能传宿主机绝对路径；
-- TaskCard 的公开参数采用 Agent 类型正向白名单：Image 仅允许 `aspect_ratio` / `variants`，PPT 仅允许 `slide_count` / `planned_asset_role`；未知参数和跨 Agent 参数均拒绝；
+- TaskCard 1.0 的公开参数采用 Agent 类型正向白名单：Image 仅允许 `aspect_ratio` / `variants`，PPT 仅允许 `slide_count` / `planned_asset_role`；TaskCard 1.1 为 Image 新增可选 `usage_context`、`category_id`、`category_version`，其他对象仍为 1.0；未知参数和跨 Agent 参数均拒绝；
 - TaskCard 的 `objective` / `instructions` 在 Schema 层拒绝常见明文 Key 形态；组合契约按 `credential-detection-policy.json` 递归扫描整个 TaskCard（含字段名和嵌套值）。来自凭据对、环境变量、密钥存储或受信请求密钥字段的值必须携带不可直接 JSON 序列化的 `sensitive_value` 内部标记，公开序列化器遇到标记即拒绝；Provider 格式与显式凭据赋值规则作为纵深防线。策略不再仅凭字符分布或裸十六进制格式猜测秘密，因此 base36/hex Key 由敏感来源标记或显式凭据赋值上下文阻断，业务单号、32/64 位十六进制素材 ID、摘要文件名和普通长文件名不会被无上下文误拒；
 - 已发布资产由最终文件实测 MIME、大小和 SHA-256，且记录发布来源；
 - API Key 明文不会出现在任何公开契约中；

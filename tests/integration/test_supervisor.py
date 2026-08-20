@@ -18,6 +18,7 @@ from urllib.request import urlopen
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.configuration import ConfigurationService, GlobalConfigBody
 from harness.services.credentials import CredentialPoolService
+from harness.services.process_runtime import AgentRuntimeArtifact
 from harness.services.supervisor import ProcessSpec, ProcessSupervisor, process_start_identity
 from harness.storage.atomic import atomic_write_json, read_json
 from harness.storage.repository import Actor
@@ -26,6 +27,24 @@ from runtime_helpers import build_service, create_task, envelope, image_plan
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
 CREDENTIAL_FIXTURE = FIXTURE_ROOT / "p1" / "credential-pairs.json"
 FAKE_AGENT = FIXTURE_ROOT / "fake_agent_process.py"
+
+
+def make_artifact_read_only(root: Path) -> None:
+    for path in sorted(root.rglob("*"), reverse=True):
+        if path.is_symlink():
+            continue
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    root.chmod(0o555)
+
+
+def make_artifact_writable(root: Path) -> None:
+    if not root.exists():
+        return
+    root.chmod(0o755)
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            continue
+        path.chmod(0o755 if path.is_dir() else 0o644)
 
 
 def creation_summary(task_id: str, raw: dict) -> dict:
@@ -94,9 +113,24 @@ class ProcessSupervisorTests(unittest.TestCase):
             self.credentials,
             self.configuration,
         )
+        self.artifact_root = self.root / "fake-runtime-artifact"
+        self.artifact_root.mkdir()
+        self.artifact_entrypoint = self.artifact_root / "fake_agent_process.py"
+        shutil.copyfile(FAKE_AGENT, self.artifact_entrypoint)
+        (self.artifact_root / "requirements.lock").write_text(
+            "stdlib-only\n", encoding="utf-8"
+        )
+        make_artifact_read_only(self.artifact_root)
+        self.runtime_artifact = AgentRuntimeArtifact(
+            artifact_id="fake-agent",
+            revision="1",
+            source_root=self.artifact_root,
+            entrypoint_relpath="fake_agent_process.py",
+            dependency_lock_relpaths=("requirements.lock",),
+        )
         self.spec = ProcessSpec(
-            command=(sys.executable, str(FAKE_AGENT)),
-            agent_code_ref="fake-agent@1",
+            command=(sys.executable, str(self.artifact_entrypoint)),
+            runtime_artifact=self.runtime_artifact,
         )
 
     def tearDown(self) -> None:
@@ -110,6 +144,7 @@ class ProcessSupervisorTests(unittest.TestCase):
             with suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=0.5)
         self.store.close()
+        make_artifact_writable(self.artifact_root)
         self.temporary.cleanup()
 
     def _start(self, index: int, spec: ProcessSpec | None = None) -> dict:
@@ -216,7 +251,7 @@ class ProcessSupervisorTests(unittest.TestCase):
     def test_logs_are_redacted_and_launch_secret_file_is_removed(self) -> None:
         spec = ProcessSpec(
             command=self.spec.command,
-            agent_code_ref=self.spec.agent_code_ref,
+            runtime_artifact=self.runtime_artifact,
             public_environment={"FAKE_LONG_LOG": "1"},
         )
         launch = self._start(1, spec)
@@ -387,8 +422,8 @@ class ProcessSupervisorTests(unittest.TestCase):
 
     def test_health_timeout_fails_start_and_releases_port(self) -> None:
         unhealthy = ProcessSpec(
-            command=(sys.executable, str(FAKE_AGENT)),
-            agent_code_ref="fake-agent@1",
+            command=self.spec.command,
+            runtime_artifact=self.runtime_artifact,
             public_environment={"FAKE_HEALTHY": "0"},
         )
         with self.assertRaises(HarnessError) as captured:
@@ -398,18 +433,58 @@ class ProcessSupervisorTests(unittest.TestCase):
         self.assertEqual(instance["status"], "FAILED_TO_START")
         self.assertEqual(read_json(self.supervisor.port_allocator.path)["claims"], {})
 
+    def test_runtime_artifact_rejects_writable_and_symlinked_content(self) -> None:
+        make_artifact_writable(self.artifact_root)
+        with self.assertRaises(HarnessError) as writable:
+            self._start(1)
+        self.assertEqual(writable.exception.code, "PROCESS_START_FAILED")
+        self.assertFalse(self.supervisor._launch_path("launch_1").exists())
+
+        (self.artifact_root / "linked.py").symlink_to(FAKE_AGENT)
+        make_artifact_read_only(self.artifact_root)
+        with self.assertRaises(HarnessError) as symlinked:
+            self._start(1)
+        self.assertEqual(symlinked.exception.code, "PROCESS_START_FAILED")
+        self.assertFalse(self.supervisor._launch_path("launch_1").exists())
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX named pipes")
+    def test_runtime_artifact_rejects_special_files_without_blocking(self) -> None:
+        make_artifact_writable(self.artifact_root)
+        os.mkfifo(self.artifact_root / "named-pipe")
+        make_artifact_read_only(self.artifact_root)
+        with self.assertRaises(HarnessError) as special:
+            self._start(1)
+        self.assertEqual(special.exception.code, "PROCESS_START_FAILED")
+        self.assertFalse(self.supervisor._launch_path("launch_1").exists())
+
     def test_code_change_is_rejected_before_the_live_process_is_stopped(self) -> None:
-        pinned_code = self.root / "pinned-agent.py"
-        shutil.copyfile(FAKE_AGENT, pinned_code)
-        spec = ProcessSpec(
-            command=(sys.executable, str(pinned_code)),
-            agent_code_ref="pinned-agent@1",
-        )
-        launch = self._start(1, spec)
-        pinned_code.write_text(
-            pinned_code.read_text(encoding="utf-8") + "\n# changed\n",
+        make_artifact_writable(self.artifact_root)
+        helper = self.artifact_root / "helper.py"
+        self.artifact_entrypoint.write_text(
+            "from helper import main\n\nif __name__ == '__main__':\n    main()\n",
             encoding="utf-8",
         )
+        shutil.copyfile(FAKE_AGENT, helper)
+        make_artifact_read_only(self.artifact_root)
+        spec = ProcessSpec(
+            command=(sys.executable, str(self.artifact_entrypoint)),
+            runtime_artifact=self.runtime_artifact,
+        )
+        launch = self._start(1, spec)
+        artifact_record = read_json(self.supervisor._launch_path("launch_1"))[
+            "runtime_artifact"
+        ]
+        self.assertEqual(artifact_record["artifact_id"], "fake-agent")
+        self.assertEqual(
+            {item["path"] for item in artifact_record["source_manifest"]},
+            {"fake_agent_process.py", "helper.py", "requirements.lock"},
+        )
+        make_artifact_writable(self.artifact_root)
+        helper.write_text(
+            helper.read_text(encoding="utf-8") + "\n# imported module changed\n",
+            encoding="utf-8",
+        )
+        make_artifact_read_only(self.artifact_root)
         with self.assertRaises(HarnessError) as changed:
             self.supervisor.restart_instance(
                 "t_process",

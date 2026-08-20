@@ -7,22 +7,35 @@ import json
 import os
 import zipfile
 from pathlib import Path
+from typing import BinaryIO
 
 
 def file_digest(path: Path) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    size = 0
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(descriptor, "rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            size += len(chunk)
-            digest.update(chunk)
-    return size, digest.hexdigest()
+        return stream_digest(handle)
 
 
 def detect_mime(path: Path, filename: str) -> str:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(descriptor, "rb") as handle:
+        return detect_mime_stream(handle, filename)
+
+
+def stream_digest(handle: BinaryIO) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    handle.seek(0)
+    while chunk := handle.read(1024 * 1024):
+        size += len(chunk)
+        digest.update(chunk)
+    handle.seek(0)
+    return size, digest.hexdigest()
+
+
+def detect_mime_stream(handle: BinaryIO, filename: str) -> str:
+    handle.seek(0)
+    try:
         header = handle.read(8192)
         if header.startswith(b"\x89PNG\r\n\x1a\n"):
             return "image/png"
@@ -66,6 +79,8 @@ def detect_mime(path: Path, filename: str) -> str:
         if "\x00" not in text:
             return "text/plain"
         return "application/octet-stream"
+    finally:
+        handle.seek(0)
 
 
 def kind_for_mime(mime_type: str) -> str:
