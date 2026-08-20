@@ -158,6 +158,34 @@ class ConfigurationServiceTests(unittest.TestCase):
         self.assertFalse(recovered["restart_required"])
         self.assertEqual(len(calls), call_count)
 
+    def test_hot_applied_instance_update_replays_authoritative_result(self) -> None:
+        self._start_first_instance()
+
+        def apply(_: str, __: str, path: Path) -> bool:
+            return path.is_file()
+
+        hot = ConfigurationService(self.store, apply_config=apply)
+        first = hot.update_instance(
+            "t_config",
+            "i_image_1",
+            {"image_runtime_policy": {"watermark": True}},
+            expected_revision=1,
+            idempotency_key="hot-instance-idempotency",
+            actor=self.actor,
+        )
+        replay = hot.update_instance(
+            "t_config",
+            "i_image_1",
+            {"image_runtime_policy": {"watermark": True}},
+            expected_revision=1,
+            idempotency_key="hot-instance-idempotency",
+            actor=self.actor,
+        )
+
+        self.assertEqual(replay, first)
+        self.assertFalse(first["restart_required"])
+        self.assertIsNotNone(first["applied_at"])
+
     def test_global_commit_recovers_before_and_during_target_projection(self) -> None:
         body = GlobalConfigBody.model_validate(
             {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from pathlib import Path
 
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.assets import AssetService, file_digest
+from harness.storage.ndjson import recover_records
 from runtime_helpers import build_service, create_task, envelope, image_plan
 
 
@@ -229,6 +231,96 @@ class AssetServiceTests(unittest.TestCase):
         self.assertEqual(corrupted.exception.code, "ASSET_CORRUPTED")
         listed = self.assets.list_assets("t_assets")
         self.assertEqual(listed[0]["integrity_status"], "CORRUPTED")
+
+    def test_preseeded_publication_target_cannot_be_committed(self) -> None:
+        candidate = self.instance_root / "outputs" / "candidate.png"
+        candidate.write_bytes(b"\x89PNG\r\n\x1a\ninstance-candidate")
+        idempotency_key = "publish-preseeded"
+        transaction_digest = hashlib.sha256(
+            f"i_image_1:{idempotency_key}".encode()
+        ).hexdigest()
+        publication_id = f"pub_{transaction_digest[:24]}"
+        asset_digest = hashlib.sha256(
+            f"t_assets:{publication_id}".encode()
+        ).hexdigest()
+        asset_id = f"a_pub_{asset_digest[:20]}"
+        destination = (
+            self.store.layout.workspace_root
+            / "tasks"
+            / "t_assets"
+            / "resources"
+            / "shared"
+            / asset_id
+            / "candidate.png"
+        )
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"\x89PNG\r\n\x1a\npreseeded-hostile-content")
+
+        with self.assertRaises(HarnessError):
+            self.assets.publish_delivery(
+                "t_assets",
+                "i_image_1",
+                source_relative_path="instances/i_image_1/outputs/candidate.png",
+                role="final_artwork",
+                description="Must come from the instance candidate",
+                idempotency_key=idempotency_key,
+            )
+
+        self.assertEqual(
+            destination.read_bytes(), b"\x89PNG\r\n\x1a\npreseeded-hostile-content"
+        )
+        self.assertFalse(
+            any(
+                event.get("publication_id") == publication_id
+                for event in recover_records(self.assets._event_path("t_assets"))
+            )
+        )
+
+    def test_browser_rejects_every_uncommitted_file(self) -> None:
+        task_root = self.store.layout.workspace_root / "tasks" / "t_assets"
+        private_candidate = self.instance_root / "outputs" / "draft.png"
+        private_candidate.write_bytes(b"\x89PNG\r\n\x1a\nuncommitted-output")
+        forged_public = task_root / "resources" / "shared" / "a_forged" / "forged.png"
+        forged_public.parent.mkdir(parents=True)
+        forged_public.write_bytes(b"\x89PNG\r\n\x1a\nuncommitted-shared")
+        forged_manifest = task_root / "resources" / "manifests" / "a_forged.json"
+        forged_manifest.write_text("{}", encoding="utf-8")
+
+        listed = {
+            item["relative_path"] for item in self.assets.list_files("t_assets", "all")
+        }
+        for relative_path in (
+            "instances/i_image_1/outputs/draft.png",
+            "resources/shared/a_forged/forged.png",
+            "resources/manifests/a_forged.json",
+        ):
+            self.assertNotIn(relative_path, listed)
+            with self.assertRaises(HarnessError):
+                self.assets.preview("t_assets", relative_path)
+            with self.assertRaises(HarnessError):
+                self.assets.download("t_assets", relative_path)
+
+        committed = self.assets.import_bytes(
+            "t_assets",
+            filename="verified.md",
+            content=b"# verified before tampering\n",
+            description="Live verification target",
+            source="user_upload",
+            idempotency_key="browser-live-verification",
+        )
+        committed_path = task_root / committed["relative_path"]
+        committed_path.chmod(0o640)
+        committed_path.write_text("tampered after commit", encoding="utf-8")
+        self.assertNotIn(
+            committed["relative_path"],
+            {
+                item["relative_path"]
+                for item in self.assets.list_files("t_assets", "inputs")
+            },
+        )
+        with self.assertRaises(HarnessError) as corrupted:
+            self.assets.preview("t_assets", committed["relative_path"])
+        self.assertEqual(corrupted.exception.code, "ASSET_CORRUPTED")
 
     def test_import_visibility_commit_recovers_a_pre_event_crash(self) -> None:
         def crash_after_prepare(checkpoint: str) -> None:

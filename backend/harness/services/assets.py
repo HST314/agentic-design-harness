@@ -8,7 +8,6 @@ import os
 import re
 import tempfile
 import uuid
-import zipfile
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
@@ -23,6 +22,12 @@ from ..storage.ndjson import append_record, recover_records
 from ..storage.paths import normalized_relative_path, resolve_task_path
 from ..storage.repository import utc_now
 from ..storage.store import FileStateStore
+from .asset_browser import (
+    browser_roots,
+    resolve_committed_browser_path,
+    verify_browser_event_path,
+)
+from .asset_files import detect_mime, file_digest, kind_for_mime
 
 CrashHook = Callable[[str], None]
 
@@ -479,6 +484,8 @@ class AssetService:
         record = read_json(record_path)
         if record["state"] == "COMMITTED":
             self.verify_asset(record["task_id"], record["asset_id"])
+            self._publication_temporary_path(record).unlink(missing_ok=True)
+            self._publication_manifest_temporary_path(record).unlink(missing_ok=True)
             return deepcopy(record["manifest"])
         task_id = record["task_id"]
         committed_event = self._publication_event(task_id, record["publication_id"])
@@ -492,27 +499,36 @@ class AssetService:
                 }
             )
             atomic_write_json(record_path, record)
+            self._publication_temporary_path(record).unlink(missing_ok=True)
+            self._publication_manifest_temporary_path(record).unlink(missing_ok=True)
             return deepcopy(committed_event["manifest"])
         workspace = self.store.layout.workspace_root / "tasks" / task_id
-        source = resolve_task_path(
-            workspace,
-            record["source_relative_path"],
-            allowed_prefixes=(f"instances/{record['instance_id']}/outputs",),
-        )
         destination_parts = normalized_relative_path(record["destination_relpath"])
-        (workspace.joinpath(*destination_parts.parts[:-1])).mkdir(
-            parents=True, exist_ok=True, mode=0o700
-        )
+        shared_root = resolve_task_path(workspace, "resources/shared")
+        destination_directory = shared_root / record["asset_id"]
+        if destination_directory.is_symlink():
+            self._invalid("The publication directory cannot be a symlink.")
+        destination_directory.mkdir(mode=0o700, exist_ok=True)
+        if destination_directory.is_symlink() or not destination_directory.is_dir():
+            self._invalid("The publication directory is invalid.")
+        if destination_directory != workspace.joinpath(*destination_parts.parts[:-1]):
+            self._invalid("The publication destination does not match its asset identity.")
         destination = resolve_task_path(
             workspace,
             record["destination_relpath"],
             allowed_prefixes=("resources/shared",),
             require_exists=False,
         )
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = destination.parent / f".{record['publication_id']}.tmp"
+        temporary = self._publication_temporary_path(record)
 
-        if not destination.exists():
+        if record["state"] == "PREPARED":
+            if destination.exists():
+                self._invalid("The publication destination is already occupied.")
+            source = resolve_task_path(
+                workspace,
+                record["source_relative_path"],
+                allowed_prefixes=(f"instances/{record['instance_id']}/outputs",),
+            )
             if temporary.exists():
                 temporary.unlink()
             size, sha256 = self._copy_file(source, temporary, self.max_file_bytes)
@@ -533,7 +549,16 @@ class AssetService:
             atomic_write_json(record_path, record)
             if crash_hook:
                 crash_hook("after_temporary_copy")
-            os.replace(temporary, destination)
+        if not temporary.is_file() or temporary.is_symlink():
+            self._corrupted(record["asset_id"])
+        if destination.exists():
+            if not self._same_regular_file(temporary, destination):
+                self._invalid("The publication destination is not owned by this transaction.")
+        else:
+            try:
+                os.link(temporary, destination, follow_symlinks=False)
+            except FileExistsError:
+                self._invalid("The publication destination is already occupied.")
             os.chmod(destination, 0o440)
             fsync_directory(destination.parent)
             if crash_hook:
@@ -546,34 +571,52 @@ class AssetService:
             record.get("copied_sha256"),
             record.get("copied_mime_type"),
         )
-        if None not in expected and expected != (final_size, final_sha256, final_mime):
+        if None in expected or expected != (final_size, final_sha256, final_mime):
             self._mark_corrupted(task_id, record["asset_id"], "final file changed before commit")
             raise HarnessError(
                 "ASSET_CORRUPTED",
                 "The published asset does not match its publication transaction.",
                 {"asset_id": record["asset_id"]},
             )
-        now = utc_now()
-        manifest = {
-            "schema_version": "1.0",
-            "asset_id": record["asset_id"],
-            "task_id": task_id,
-            "producer_instance_id": record["instance_id"],
-            "kind": kind_for_mime(final_mime),
-            "role": record["request"]["role"],
-            "relative_path": record["destination_relpath"],
-            "mime_type": final_mime,
-            "size_bytes": final_size,
-            "sha256": final_sha256,
-            "description": record["request"]["description"],
-            "source_relative_path": record["source_relative_path"],
-            "publication_id": record["publication_id"],
-            "published_at": now,
-            "created_at": record["created_at"],
-        }
+        manifest = record.get("prepared_manifest")
+        if manifest is None:
+            now = utc_now()
+            manifest = {
+                "schema_version": "1.0",
+                "asset_id": record["asset_id"],
+                "task_id": task_id,
+                "producer_instance_id": record["instance_id"],
+                "kind": kind_for_mime(final_mime),
+                "role": record["request"]["role"],
+                "relative_path": record["destination_relpath"],
+                "mime_type": final_mime,
+                "size_bytes": final_size,
+                "sha256": final_sha256,
+                "description": record["request"]["description"],
+                "source_relative_path": record["source_relative_path"],
+                "publication_id": record["publication_id"],
+                "published_at": now,
+                "created_at": record["created_at"],
+            }
+            record["prepared_manifest"] = manifest
+            atomic_write_json(record_path, record)
+        else:
+            now = manifest["published_at"]
         self.store.contracts.validate("asset-manifest", manifest)
         manifest_path = workspace / record["manifest_relpath"]
-        atomic_write_json(manifest_path, manifest, mode=0o640)
+        manifest_temporary = self._publication_manifest_temporary_path(record)
+        if manifest_path.exists():
+            if not self._same_regular_file(manifest_temporary, manifest_path):
+                self._invalid("The publication manifest target is already occupied.")
+        else:
+            manifest_temporary.unlink(missing_ok=True)
+            atomic_write_json(manifest_temporary, manifest, mode=0o640)
+            try:
+                os.link(manifest_temporary, manifest_path, follow_symlinks=False)
+            except FileExistsError:
+                self._invalid("The publication manifest target is already occupied.")
+            os.chmod(manifest_path, 0o440)
+            fsync_directory(manifest_path.parent)
         if crash_hook:
             crash_hook("after_manifest_rename")
         if not self._publication_event(task_id, record["publication_id"]):
@@ -595,6 +638,8 @@ class AssetService:
             crash_hook("after_publication_event")
         record.update({"state": "COMMITTED", "manifest": manifest, "committed_at": now})
         atomic_write_json(record_path, record)
+        temporary.unlink(missing_ok=True)
+        manifest_temporary.unlink(missing_ok=True)
         return deepcopy(manifest)
 
     def list_assets(self, task_id: str) -> list[dict[str, Any]]:
@@ -631,17 +676,42 @@ class AssetService:
         if group not in {"inputs", "shared", "instances", "all"}:
             self._invalid("Unknown resource-browser group.")
         entries: list[dict[str, Any]] = []
-        for root in self._browser_roots(workspace, group):
-            for path in sorted(root.rglob("*")):
-                if path.is_symlink():
-                    # Keep one hostile entry from making the whole browser
-                    # unavailable. Direct access remains fail-closed.
+        roots = browser_roots(workspace, group)
+        for event in self._visible_asset_events(task_id):
+            manifest = event["manifest"]
+            try:
+                self._verify_manifest_file(task_id, manifest)
+                verified = [
+                    (
+                        relative,
+                        verify_browser_event_path(
+                            workspace,
+                            relative,
+                            event,
+                            self._verify_manifest_file,
+                            verify_asset=False,
+                        ),
+                    )
+                    for relative in (
+                        manifest["relative_path"],
+                        event["manifest_relpath"],
+                    )
+                ]
+            except HarnessError:
+                self._mark_corrupted(
+                    task_id, event["asset_id"], "browser file failed live verification"
+                )
+                continue
+            for relative, path in verified:
+                if not any(path == root or root in path.parents for root in roots):
                     continue
-                if not path.is_file() or path.name.startswith("."):
-                    continue
-                relative = path.relative_to(workspace).as_posix()
-                mime_type = detect_mime(path, path.name)
-                size, sha256 = file_digest(path)
+                if relative == manifest["relative_path"]:
+                    mime_type = manifest["mime_type"]
+                    size = manifest["size_bytes"]
+                    sha256 = manifest["sha256"]
+                else:
+                    mime_type = detect_mime(path, path.name)
+                    size, sha256 = file_digest(path)
                 entries.append(
                     {
                         "relative_path": relative,
@@ -657,7 +727,7 @@ class AssetService:
 
     def preview(self, task_id: str, relative_path: str) -> dict[str, Any]:
         workspace = self.initialize_task_workspace(task_id)
-        path = self._resolve_browser_path(workspace, relative_path)
+        path = self._resolve_browser_path(task_id, workspace, relative_path)
         if not path.is_file() or path.stat().st_size > self.preview_limit_bytes:
             self._invalid("The file cannot be safely previewed.")
         mime_type = detect_mime(path, path.name)
@@ -675,7 +745,7 @@ class AssetService:
 
     def download(self, task_id: str, relative_path: str) -> dict[str, Any]:
         workspace = self.initialize_task_workspace(task_id)
-        path = self._resolve_browser_path(workspace, relative_path)
+        path = self._resolve_browser_path(task_id, workspace, relative_path)
         if not path.is_file():
             self._invalid("Only regular files may be downloaded.")
         filename = quote(path.name, safe="")
@@ -696,49 +766,38 @@ class AssetService:
                 latest[event["asset_id"]] = event
         return sorted(latest.values(), key=lambda item: (item["occurred_at"], item["asset_id"]))
 
-    @staticmethod
-    def _browser_roots(workspace: Path, group: str) -> list[Path]:
-        roots: list[Path] = []
-        if group in {"inputs", "all"}:
-            roots.extend(
-                workspace / item
-                for item in ("inputs/original", "inputs/selected", "inputs/manifests")
-            )
-        if group in {"shared", "all"}:
-            roots.extend(
-                workspace / item for item in ("resources/shared", "resources/manifests")
-            )
-        if group in {"instances", "all"}:
-            instances = workspace / "instances"
-            for instance_root in sorted(instances.iterdir() if instances.exists() else []):
-                if instance_root.is_symlink():
-                    raise HarnessError(
-                        "PATH_OUTSIDE_TASK_ROOT",
-                        "Symlinked instance resources are not browseable.",
-                    )
-                if instance_root.is_dir():
-                    roots.append(instance_root / "outputs")
-        return roots
+    def _resolve_browser_path(
+        self, task_id: str, workspace: Path, relative_path: str
+    ) -> Path:
+        return resolve_committed_browser_path(
+            workspace,
+            relative_path,
+            self._visible_asset_events(task_id),
+            self._verify_manifest_file,
+        )
 
     @staticmethod
-    def _resolve_browser_path(workspace: Path, relative_path: str) -> Path:
-        normalized = normalized_relative_path(relative_path)
-        fixed = {
-            ("inputs", "original"),
-            ("inputs", "selected"),
-            ("inputs", "manifests"),
-            ("resources", "shared"),
-            ("resources", "manifests"),
-        }
-        parts = normalized.parts
-        instance_output = len(parts) >= 4 and parts[0] == "instances" and parts[2] == "outputs"
-        if parts[:2] not in fixed and not instance_output:
-            raise HarnessError(
-                "PATH_OUTSIDE_TASK_ROOT",
-                "Only registered resources and instance outputs are browseable.",
-                {"path": relative_path},
+    def _same_regular_file(first: Path, second: Path) -> bool:
+        try:
+            return (
+                not first.is_symlink()
+                and not second.is_symlink()
+                and first.is_file()
+                and second.is_file()
+                and os.path.samestat(os.lstat(first), os.lstat(second))
             )
-        return resolve_task_path(workspace, normalized.as_posix())
+        except OSError:
+            return False
+
+    def _publication_temporary_path(self, record: dict[str, Any]) -> Path:
+        workspace = self.store.layout.workspace_root / "tasks" / record["task_id"]
+        destination = workspace / record["destination_relpath"]
+        return destination.parent / f".{record['publication_id']}.tmp"
+
+    def _publication_manifest_temporary_path(self, record: dict[str, Any]) -> Path:
+        workspace = self.store.layout.workspace_root / "tasks" / record["task_id"]
+        manifest = workspace / record["manifest_relpath"]
+        return manifest.parent / f".{record['publication_id']}.tmp"
 
     def _verify_manifest_file(self, task_id: str, manifest: dict[str, Any]) -> None:
         workspace = self.store.layout.workspace_root / "tasks" / task_id
@@ -901,72 +960,3 @@ class AssetService:
             "The asset no longer matches its committed manifest.",
             {"asset_id": asset_id},
         )
-
-
-def file_digest(path: Path) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    size = 0
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(descriptor, "rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            size += len(chunk)
-            digest.update(chunk)
-    return size, digest.hexdigest()
-
-
-def detect_mime(path: Path, filename: str) -> str:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(descriptor, "rb") as handle:
-        header = handle.read(8192)
-        if header.startswith(b"\x89PNG\r\n\x1a\n"):
-            return "image/png"
-        if header.startswith(b"\xff\xd8\xff"):
-            return "image/jpeg"
-        if header.startswith((b"GIF87a", b"GIF89a")):
-            return "image/gif"
-        if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
-            return "image/webp"
-        if header.startswith(b"%PDF-"):
-            return "application/pdf"
-        if header.startswith(b"PK\x03\x04"):
-            try:
-                handle.seek(0)
-                with zipfile.ZipFile(handle) as archive:
-                    names = set(archive.namelist())
-                if "ppt/presentation.xml" in names:
-                    return (
-                        "application/vnd.openxmlformats-officedocument."
-                        "presentationml.presentation"
-                    )
-                if "word/document.xml" in names:
-                    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            except (OSError, zipfile.BadZipFile):
-                return "application/octet-stream"
-            return "application/octet-stream"
-        try:
-            text = header.decode("utf-8")
-        except UnicodeDecodeError:
-            return "application/octet-stream"
-        suffix = Path(filename).suffix.lower()
-        if suffix == ".json":
-            try:
-                handle.seek(0)
-                json.loads(handle.read().decode("utf-8"))
-                return "application/json"
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return "application/octet-stream"
-        if suffix in {".md", ".markdown"}:
-            return "text/markdown"
-        if "\x00" not in text:
-            return "text/plain"
-        return "application/octet-stream"
-
-
-def kind_for_mime(mime_type: str) -> str:
-    if mime_type.startswith("image/"):
-        return "image"
-    if mime_type.endswith("presentationml.presentation"):
-        return "presentation"
-    if mime_type in {"application/pdf", "application/json", "text/markdown", "text/plain"}:
-        return "document"
-    return "other"

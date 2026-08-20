@@ -518,7 +518,11 @@ class ProcessSupervisor:
         result: dict[str, list[str]] = {}
         for stream in ("stdout", "stderr"):
             path = root / f"{stream}.log"
-            lines = tail_lines(path, max_lines)
+            lines = tail_lines(
+                path,
+                max_lines,
+                trusted_root=self.store.layout.workspace_root,
+            )
             result[stream] = [str(redact(line)) for line in lines[-max_lines:]]
         return {"task_id": task_id, "instance_id": instance_id, "logs": result}
 
@@ -639,18 +643,28 @@ class ProcessSupervisor:
             item["instance_id"] == instance_id for item in plan["instances"]
         )
         if planned:
-            revision = self.store.task.revision(task_id, task_id)
-            result = self.commands.transition_instance(
-                task_id,
-                instance_id,
-                target,
-                CommandEnvelope(
-                    idempotency_key=idempotency_key,
-                    actor_type="system",
-                    actor_id="process_supervisor",
-                    expected_revision=revision,
-                ),
-            )
+            deadline = time.monotonic() + self.store.lock_timeout_seconds
+            while True:
+                revision = self.store.task.revision(task_id, task_id)
+                try:
+                    result = self.commands.transition_instance(
+                        task_id,
+                        instance_id,
+                        target,
+                        CommandEnvelope(
+                            idempotency_key=idempotency_key,
+                            actor_type="system",
+                            actor_id="process_supervisor",
+                            expected_revision=revision,
+                        ),
+                    )
+                    break
+                except HarnessError as exc:
+                    current = self._instance(task_id, instance_id)
+                    if current["status"] == target:
+                        return current
+                    if exc.code != "REVISION_CONFLICT" or time.monotonic() >= deadline:
+                        raise
             return next(
                 item
                 for item in result["plan"]["instances"]
