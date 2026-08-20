@@ -22,6 +22,7 @@ from ..core.errors import ErrorCatalog, HarnessError
 from ..core.logging import configure_logging, redact
 from ..domain.service import TaskCommandService
 from ..services.application import HarnessApplicationService
+from ..services.approvals import ApprovalInboxService
 from ..services.assets import AssetService
 from ..services.configuration import ConfigurationService
 from ..services.credentials import CredentialPoolService
@@ -38,6 +39,7 @@ class Container:
     store: FileStateStore
     commands: TaskCommandService
     assets: AssetService
+    approvals: ApprovalInboxService
     credentials: CredentialPoolService
     configuration: ConfigurationService
     supervisor: ProcessSupervisor
@@ -61,6 +63,7 @@ def build_container(settings: HarnessSettings) -> Container:
     )
     commands = TaskCommandService(store, contracts)
     assets = AssetService(store)
+    approvals = ApprovalInboxService(store)
     credentials = CredentialPoolService(store)
     configuration = ConfigurationService(store)
     supervisor = ProcessSupervisor(
@@ -90,6 +93,7 @@ def build_container(settings: HarnessSettings) -> Container:
         store,
         commands,
         assets,
+        approvals,
         credentials,
         supervisor,
         adapters,
@@ -101,6 +105,7 @@ def build_container(settings: HarnessSettings) -> Container:
         store=store,
         commands=commands,
         assets=assets,
+        approvals=approvals,
         credentials=credentials,
         configuration=configuration,
         supervisor=supervisor,

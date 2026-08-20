@@ -2,7 +2,11 @@ import "./styles.css";
 import {
   ApiClient,
   type AgentInstance,
+  type ApprovalDetailResponse,
+  type AssetManifest,
+  type InboxItem,
   type InstanceDetailResponse,
+  type TaskFile,
 } from "./api/client";
 import { currentRoute, navigate, routePath, type Route, type RouteName } from "./router";
 
@@ -45,7 +49,7 @@ const pageCopy: Record<
   inbox: {
     eyebrow: "FIFO 队列",
     title: "收件箱",
-    description: "审批与运行通知将在 G3 工作包接入。",
+    description: "按事件顺序处理人工审批与运行通知，已读和已处理分别记录。",
   },
   settings: {
     eyebrow: "运行配置",
@@ -76,6 +80,8 @@ const statusLabels: Record<string, string> = {
 function icon(name: string): string {
   const paths: Record<string, string> = {
     arrow: '<path d="m9 18 6-6-6-6"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
+    download: '<path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/>',
     external: '<path d="M14 3h7v7M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m21 15-5-5L5 20"/>',
     inbox: '<path d="M4 4h16l2 11h-6l-2 3h-4l-2-3H2L4 4Z"/>',
@@ -137,6 +143,7 @@ async function renderRoute(route: Route, version: number): Promise<void> {
     if (route.name === "tasks") await renderTasks(version);
     else if (route.name === "task") await renderTask(route.taskId, version);
     else if (route.name === "instance") await renderInstance(route.instanceId, version);
+    else if (route.name === "inbox") await renderInbox(version);
     else renderPlaceholder(route.name, version);
   } catch (error) {
     if (version !== renderVersion) return;
@@ -165,7 +172,7 @@ async function renderTasks(version: number): Promise<void> {
 }
 
 async function renderTask(taskId: string, version: number): Promise<void> {
-  const response = await api.task(taskId);
+  const [response, resources] = await Promise.all([api.task(taskId), api.taskFiles(taskId)]);
   if (version !== renderVersion) return;
   const plan = response.plan;
   pageContent().innerHTML = `
@@ -190,7 +197,8 @@ async function renderTask(taskId: string, version: number): Promise<void> {
             )
             .join("")}</div>`
         : emptyState("layers", "尚未保存执行计划", "保存计划并创建实例后，可在此查看纵向执行链。", false)
-    }`;
+    }
+    ${renderResources(taskId, resources.items, resources.assets)}`;
   wireNavigation();
 }
 
@@ -202,7 +210,10 @@ async function renderInstance(instanceId: string, version: number): Promise<void
   renderInstanceContent(response);
   wireNavigation();
   if (["STARTING", "RUNNING"].includes(response.instance.status)) {
-    pollTimer = window.setTimeout(() => void renderInstance(instanceId, version), 1500);
+    pollTimer = window.setTimeout(
+      () => void renderRoute({ name: "instance", instanceId }, version),
+      1500,
+    );
   }
 }
 
@@ -248,7 +259,16 @@ function renderInstanceContent(response: InstanceDetailResponse): void {
     }
     ${
       observation?.capabilities.length
-        ? `<section class="capability-card"><div><p class="eyebrow">冻结能力</p><h3>等待下一步决议</h3><p>G2 只展示 Image Agent 返回的能力；审批与推进将在 G3 接入。</p></div><div class="chip-list">${observation.capabilities.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div></section>`
+        ? `<section class="capability-card"><div><p class="eyebrow">冻结能力</p><h3>等待下一步决议</h3><p>审批项会冻结当前处理人，裁决后由 Harness 幂等推进专业工作流。</p></div><div class="chip-list">${observation.capabilities.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div></section>`
+        : ""
+    }
+    <section class="approval-routing" aria-labelledby="routing-title">
+      <div><p class="eyebrow">审批路由</p><h3 id="routing-title">${instance.approval_mode === "human" ? "由人工处理" : "由 Master 处理"}</h3><p>新的审批项采用此设置；已经创建的审批仍保留原处理人。</p></div>
+      <button class="button button--secondary" type="button" data-approval-mode="${instance.approval_mode === "human" ? "master" : "human"}">切换为${instance.approval_mode === "human" ? " Master" : "人工"}</button>
+    </section>
+    ${
+      response.pending_approval
+        ? `<section class="pending-card"><div><p class="eyebrow">待处理审批</p><h3>${escapeHtml(actionLabel(response.pending_approval.step_id))}</h3><p class="identifier">${escapeHtml(response.pending_approval.approval_id)}</p></div><a class="button button--primary" href="/inbox?approval_id=${encodeURIComponent(response.pending_approval.approval_id)}" data-inbox-link>前往收件箱${icon("arrow")}</a></section>`
         : ""
     }`;
   root.querySelector<HTMLButtonElement>("[data-refresh]")?.addEventListener("click", (event) => {
@@ -258,11 +278,171 @@ function renderInstanceContent(response: InstanceDetailResponse): void {
     button.setAttribute("aria-busy", "true");
     button.innerHTML = `${icon("refresh")}正在刷新`;
     const route = currentRoute();
-    if (route.name === "instance") void renderInstance(route.instanceId, renderVersion);
+    if (route.name === "instance") void renderRoute(route, renderVersion);
+  });
+  root.querySelector<HTMLButtonElement>("[data-approval-mode]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const approvalMode = button.dataset.approvalMode;
+    if (!approvalMode || button.disabled) return;
+    const idleLabel = button.textContent ?? "切换审批模式";
+    setButtonBusy(button, "正在保存");
+    try {
+      await api.updateApprovalMode(instance.instance_id, {
+        approval_mode: approvalMode,
+        envelope: commandEnvelope("human", "human_operator", response.task_revision),
+      });
+      await renderInstance(instance.instance_id, renderVersion);
+    } catch (error) {
+      showInlineError(button, error);
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = idleLabel;
+    }
+  });
+  root.querySelector<HTMLElement>("[data-inbox-link]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    const approvalId = response.pending_approval?.approval_id;
+    window.history.pushState({}, "", `/inbox?approval_id=${encodeURIComponent(approvalId ?? "")}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
   });
 }
 
-function renderPlaceholder(route: "inbox" | "settings", version: number): void {
+async function renderInbox(version: number): Promise<void> {
+  const response = await api.inbox();
+  const approvalEntries = await Promise.all(
+    response.items.map(async (item): Promise<[string, ApprovalDetailResponse | null]> => {
+      if (!item.approval_id) return [item.inbox_id, null];
+      try {
+        return [item.inbox_id, await api.approval(item.approval_id)];
+      } catch {
+        return [item.inbox_id, null];
+      }
+    }),
+  );
+  if (version !== renderVersion) return;
+  const approvals = new Map(approvalEntries);
+  const selectedApproval = new URLSearchParams(window.location.search).get("approval_id");
+  const pendingCount = response.items.filter((item) => item.status !== "HANDLED").length;
+  pageContent().innerHTML = response.items.length
+    ? `<div class="page-heading"><div><p class="eyebrow">人工队列</p><h2>按到达顺序处理</h2><p>最早事件排在最前；待处理、已读和已处理彼此独立。</p></div><span class="count-pill">${pendingCount} 待处理</span></div>
+       <div class="inbox-list">${response.items
+         .map((item) => renderInboxItem(item, approvals.get(item.inbox_id) ?? null, selectedApproval))
+         .join("")}</div>`
+    : emptyState("inbox", "收件箱已清空", "新的审批与运行通知会按事件顺序出现在这里。", false);
+  wireInboxActions();
+  const selected = root.querySelector<HTMLElement>("[data-selected-approval]");
+  selected?.scrollIntoView({ block: "center" });
+}
+
+function renderInboxItem(
+  item: InboxItem & { store_revision?: number },
+  details: ApprovalDetailResponse | null,
+  selectedApproval: string | null,
+): string {
+  const selected = selectedApproval === item.approval_id;
+  const actions = details?.payload.available_actions ?? [];
+  const pending = details?.approval.status === "PENDING";
+  return `<article class="inbox-card${selected ? " inbox-card--selected" : ""}" data-inbox-id="${escapeHtml(item.inbox_id)}" ${selected ? "data-selected-approval" : ""}>
+    <div class="inbox-card__head"><div>${inboxStatusBadge(item.status)}<span class="event-kind">${escapeHtml(item.kind)}</span></div><time datetime="${escapeHtml(item.created_at)}">${formatDate(item.created_at)}</time></div>
+    <h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.message)}</p>
+    <dl class="inbox-meta">${detailItem("任务", item.task_id)}${detailItem("实例", item.instance_id ?? "—")}${detailItem("队列序号", item.sequence.toString())}</dl>
+    ${
+      details
+        ? `<details class="approval-context"><summary>查看审批上下文</summary><pre>${escapeHtml(JSON.stringify(details.payload.context, null, 2))}</pre></details>`
+        : ""
+    }
+    <div class="inbox-actions">
+      ${item.status === "UNREAD" ? `<button class="button button--secondary" type="button" data-mark-read data-revision="${item.store_revision ?? item.revision}">${icon("check")}标为已读</button>` : ""}
+      ${item.instance_id ? `<a class="button button--secondary" href="${routePath({ name: "instance", instanceId: item.instance_id })}" data-instance="${escapeHtml(item.instance_id)}">查看实例</a>` : ""}
+    </div>
+    ${
+      details && pending
+        ? `<form class="approval-form" data-approval-id="${escapeHtml(details.approval.approval_id)}" data-approval-revision="${details.approval_revision}">
+          <div class="field"><label for="action-${escapeHtml(item.inbox_id)}">推进动作</label><select id="action-${escapeHtml(item.inbox_id)}" name="action" ${actions.length ? "" : "disabled"}>${actions.map((action) => `<option value="${escapeHtml(action)}">${escapeHtml(actionLabel(action))} · ${escapeHtml(action)}</option>`).join("")}</select></div>
+          <div class="field"><label for="payload-${escapeHtml(item.inbox_id)}">动作参数（JSON）</label><textarea id="payload-${escapeHtml(item.inbox_id)}" name="payload" rows="4" spellcheck="false">{}</textarea><small>只填写当前动作需要的字段；无参数时保留 {}。</small></div>
+          <div class="field"><label for="actor-${escapeHtml(item.inbox_id)}">操作人 ID</label><input id="actor-${escapeHtml(item.inbox_id)}" name="actor_id" value="human_operator" pattern="[A-Za-z][A-Za-z0-9_-]{0,127}" required></div>
+          <div class="form-actions"><button class="button button--primary" type="submit" data-decision="APPROVED">批准并推进</button><button class="button button--danger" type="submit" data-decision="REJECTED">拒绝</button></div>
+          <p class="form-feedback" role="status" aria-live="polite"></p>
+        </form>`
+        : item.approval_id
+          ? `<p class="handled-copy">${details ? "该审批已完成处理。" : "审批详情暂时不可用，请刷新重试。"}</p>`
+          : ""
+    }
+  </article>`;
+}
+
+function wireInboxActions(): void {
+  wireNavigation();
+  root.querySelectorAll<HTMLButtonElement>("[data-mark-read]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const card = button.closest<HTMLElement>("[data-inbox-id]");
+      if (!card?.dataset.inboxId || button.disabled) return;
+      setButtonBusy(button, "正在保存");
+      try {
+        await api.updateInboxStatus(card.dataset.inboxId, {
+          status: "READ",
+          envelope: commandEnvelope("human", "human_operator", Number(button.dataset.revision)),
+        });
+        await renderInbox(renderVersion);
+      } catch (error) {
+        showInlineError(button, error);
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.innerHTML = `${icon("check")}重试标为已读`;
+      }
+    });
+  });
+  root.querySelectorAll<HTMLFormElement>(".approval-form").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const submitter = (event as SubmitEvent).submitter as HTMLButtonElement | null;
+      const approvalId = form.dataset.approvalId;
+      if (!submitter || !approvalId) return;
+      const feedback = form.querySelector<HTMLElement>(".form-feedback");
+      const controls = Array.from(form.querySelectorAll<HTMLButtonElement>("button"));
+      controls.forEach((control) => { control.disabled = true; });
+      submitter.setAttribute("aria-busy", "true");
+      if (feedback) feedback.textContent = "正在提交决议…";
+      try {
+        const data = new FormData(form);
+        const actorId = String(data.get("actor_id") ?? "");
+        const decision = submitter.dataset.decision ?? "APPROVED";
+        const payload = JSON.parse(String(data.get("payload") ?? "{}")) as Record<string, unknown>;
+        await api.resolveApproval(approvalId, {
+          decision,
+          action: decision === "APPROVED" ? String(data.get("action") ?? "") : null,
+          payload,
+          operation_id: operationId("approval"),
+          envelope: commandEnvelope("human", actorId, Number(form.dataset.approvalRevision)),
+        });
+        if (feedback) feedback.textContent = "决议已提交，正在同步状态。";
+        await renderInbox(renderVersion);
+      } catch (error) {
+        if (feedback) {
+          feedback.classList.add("form-feedback--error");
+          feedback.textContent = error instanceof Error ? error.message : "提交失败，请重试。";
+        }
+        controls.forEach((control) => { control.disabled = false; });
+        submitter.removeAttribute("aria-busy");
+      }
+    });
+  });
+}
+
+function renderResources(taskId: string, files: TaskFile[], assets: AssetManifest[]): string {
+  const manifests = new Map(assets.map((entry) => [entry.manifest.relative_path, entry]));
+  const deliverables = files.filter((file) => !file.relative_path.includes("/manifests/"));
+  return `<section class="resources-section" aria-labelledby="resources-title"><div class="section-heading"><div><p class="eyebrow">受控资源</p><h2 id="resources-title">任务文件</h2><p>这里只展示已提交并通过实时完整性校验的输入和交付物。</p></div><span class="count-pill">${deliverables.length} 个文件</span></div>
+    ${deliverables.length ? `<div class="resource-grid">${deliverables.map((file) => {
+      const asset = manifests.get(file.relative_path);
+      const imagePreview = file.previewable && file.mime_type.startsWith("image/");
+      return `<article class="resource-card">${imagePreview ? `<img src="${escapeHtml(api.previewUrl(taskId, file.relative_path))}" alt="${escapeHtml(file.filename)} 预览" loading="lazy">` : `<div class="resource-file-icon" aria-hidden="true">${icon("image")}</div>`}<div class="resource-card__body"><p class="eyebrow">${escapeHtml(asset?.manifest.role ?? file.mime_type)}</p><h3 title="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}</h3><p>${escapeHtml(asset?.manifest.description || formatBytes(file.size_bytes))}</p><dl class="resource-meta">${detailItem("来源实例", asset?.manifest.producer_instance_id ?? "用户输入")}${detailItem("完整性", asset?.integrity_status ?? "VERIFIED")}</dl><a class="button button--secondary" href="${escapeHtml(api.downloadUrl(taskId, file.relative_path))}" download>${icon("download")}下载文件</a></div></article>`;
+    }).join("")}</div>` : `<div class="resource-empty">当前没有已提交的任务资源。</div>`}
+  </section>`;
+}
+
+function renderPlaceholder(route: "settings", version: number): void {
   if (version !== renderVersion) return;
   const copy = pageCopy[route];
   pageContent().innerHTML = emptyState(
@@ -294,6 +474,63 @@ function breadcrumb(items: Array<{ label: string; route?: Route }>): string {
 
 function detailItem(label: string, value: string): string {
   return `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`;
+}
+
+function inboxStatusBadge(status: InboxItem["status"]): string {
+  const labels = { UNREAD: "未读", READ: "已读", HANDLED: "已处理" };
+  const style = status === "UNREAD" ? "warning" : status === "HANDLED" ? "success" : "neutral";
+  return `<span class="badge badge--${style}"><span aria-hidden="true"></span>${labels[status]}</span>`;
+}
+
+function actionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    answer_clarification: "回答澄清问题",
+    approve_taskbook: "批准任务书",
+    select_master: "选择主方案",
+    approve_final: "批准最终交付",
+    choose_category: "选择视觉类别",
+    choose_skill: "选择创作技能",
+    submit_manual_action: "提交人工动作",
+    regenerate: "重新生成",
+  };
+  return labels[action] ?? action;
+}
+
+function operationId(prefix: string): string {
+  const suffix = typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().replaceAll("-", "")
+    : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  return `${prefix}_${suffix}`;
+}
+
+function commandEnvelope(actorType: "human" | "master", actorId: string, revision: number): Record<string, unknown> {
+  return {
+    idempotency_key: operationId("ui"),
+    expected_revision: revision,
+    actor_type: actorType,
+    actor_id: actorId,
+  };
+}
+
+function setButtonBusy(button: HTMLButtonElement, label: string): void {
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.textContent = label;
+}
+
+function showInlineError(anchor: HTMLElement, error: unknown): void {
+  anchor.parentElement?.querySelector("[data-inline-error]")?.remove();
+  const message = error instanceof Error ? error.message : "操作失败，请重试。";
+  anchor.insertAdjacentHTML(
+    "afterend",
+    `<p class="inline-error" data-inline-error role="alert">${escapeHtml(message)}</p>`,
+  );
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function statusBadge(status: string): string {

@@ -274,6 +274,52 @@ class TaskCommandService:
             lambda: self._transition_instance(request, envelope),
         )
 
+    def set_approval_mode(
+        self,
+        task_id: str,
+        instance_id: str,
+        approval_mode: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "approval_mode": approval_mode,
+        }
+        return self._idempotent(
+            task_id,
+            "set_approval_mode",
+            request,
+            envelope,
+            lambda: self._set_approval_mode(request, envelope),
+        )
+
+    def _set_approval_mode(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        if request["approval_mode"] not in {"human", "master"}:
+            raise HarnessError("VALIDATION_ERROR", "The approval mode is invalid.")
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError(
+                "VALIDATION_ERROR", "Only a human or Master may change approval routing."
+            )
+        task_id = request["task_id"]
+        plan = self._plan(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        instance = next(
+            (item for item in plan["instances"] if item["instance_id"] == request["instance_id"]),
+            None,
+        )
+        if instance is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        instance["approval_mode"] = request["approval_mode"]
+        plan["task"]["updated_at"] = utc_now()
+        return self._persist_aggregate(
+            plan, envelope, "set_approval_mode", request, actual
+        )
+
     def _transition_instance(
         self, request: dict[str, Any], envelope: CommandEnvelope
     ) -> dict[str, Any]:

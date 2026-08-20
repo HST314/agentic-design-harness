@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,6 +20,7 @@ from harness.adapters import (
 )
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.application import HarnessApplicationService
+from harness.services.approvals import ApprovalInboxService
 from harness.services.assets import AssetService
 from harness.services.configuration import ConfigurationService
 from harness.services.credentials import CredentialPoolService
@@ -40,6 +43,10 @@ class FakeImageAdapter:
     def __init__(self) -> None:
         self.runtime_spec = None
         self.start_calls = []
+        self.advance_calls = []
+        self.observation = AdapterObservation("RUNNING")
+        self.deliveries = []
+        self.advance_delay = 0.0
 
     def validate_task_card(self, card):
         errors = () if card.get("agent_type") == "image" else ("wrong agent type",)
@@ -55,16 +62,19 @@ class FakeImageAdapter:
         return AdapterCommandResult(True, operation_id)
 
     def get_status(self, instance_id):
-        return AdapterObservation("RUNNING")
+        return self.observation
 
     def request_advance(self, instance_id, action, payload, operation_id):
+        if self.advance_delay:
+            time.sleep(self.advance_delay)
+        self.advance_calls.append((instance_id, action, payload, operation_id))
         return AdapterCommandResult(True, operation_id)
 
     def apply_config(self, instance_id, config, revision, operation_id):
         return AdapterCommandResult(True, operation_id)
 
     def collect_deliveries(self, instance_id):
-        return []
+        return self.deliveries
 
     def collect_usage(self, instance_id, cursor):
         return []
@@ -85,6 +95,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         pairs = json.loads(CREDENTIAL_FIXTURE.read_text(encoding="utf-8"))["pairs"]
         self.credentials.configure_pool(pairs)
         self.assets = AssetService(self.store)
+        self.approvals = ApprovalInboxService(self.store)
         self.configuration = ConfigurationService(self.store)
         self.configuration.initialize()
         self.supervisor = ProcessSupervisor(
@@ -98,6 +109,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             self.store,
             self.commands,
             self.assets,
+            self.approvals,
             self.credentials,
             self.supervisor,
             self.adapters,
@@ -564,6 +576,213 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
         self.assertTrue(completed["complete"])
         self.assertEqual(completed["transition"]["task"]["status"], "SUCCEEDED")
+
+    def test_waiting_observation_resolves_once_after_crash_and_handles_inbox(self) -> None:
+        created = create_task(self.commands, "t_approval_application", "auto")
+        draft = image_plan("t_approval_application")
+        saved = self.application.save_plan_and_create_instances(
+            "t_approval_application",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_approval_application",
+            envelope=envelope("prepare-approval-application", created["revision"]),
+        )
+        starting = self.commands.transition_instance(
+            "t_approval_application",
+            "i_image_1",
+            "STARTING",
+            envelope("approval-starting", saved["task_revision"], "adapter"),
+        )
+        self.commands.transition_instance(
+            "t_approval_application",
+            "i_image_1",
+            "RUNNING",
+            envelope("approval-running", starting["task_revision"], "adapter"),
+        )
+        self.fake_adapter.observation = AdapterObservation(
+            "WAITING_APPROVAL",
+            step_id="waiting_human_approval",
+            capabilities=("approve_taskbook",),
+            details={
+                "job_id": "job_approval",
+                "approval_context": {"taskbook": "frozen"},
+            },
+        )
+
+        observed = self.application.observe_instance(
+            "t_approval_application", "i_image_1"
+        )
+        replayed_observation = self.application.observe_instance(
+            "t_approval_application", "i_image_1"
+        )
+        approval = observed["approval"]["approval"]
+        self.assertEqual(
+            replayed_observation["approval"]["approval"]["approval_id"],
+            approval["approval_id"],
+        )
+        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 1)
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_adapter_advance":
+                raise SimulatedCrash(checkpoint)
+
+        resolve_envelope = envelope(
+            "resolve-approval-application",
+            observed["approval"]["approval_revision"],
+        )
+        with self.assertRaises(SimulatedCrash):
+            self.application.resolve_approval(
+                approval["approval_id"],
+                decision="APPROVED",
+                action="approve_taskbook",
+                payload={},
+                operation_id="resolve_approval_application",
+                envelope=resolve_envelope,
+                crash_hook=crash,
+            )
+        self.assertEqual(len(self.fake_adapter.advance_calls), 1)
+
+        recovered = self.application.recover()
+        recovered_result = next(
+            item for item in recovered if item["operation_id"] == "resolve_approval_application"
+        )
+        self.assertEqual(recovered_result["status"], "RECOVERED")
+        self.assertEqual(len(self.fake_adapter.advance_calls), 1)
+        replay = self.application.resolve_approval(
+            approval["approval_id"],
+            decision="APPROVED",
+            action="approve_taskbook",
+            payload={},
+            operation_id="resolve_approval_application",
+            envelope=resolve_envelope,
+        )
+        self.assertEqual(replay["approval"]["status"], "APPROVED")
+        self.assertEqual(replay["instance"]["status"], "RUNNING")
+        self.assertEqual(self.approvals.list_inbox(owner="human")[0]["status"], "HANDLED")
+
+    def test_completed_observation_publishes_required_asset_before_success(self) -> None:
+        created = create_task(self.commands, "t_collect_application", "auto")
+        draft = image_plan("t_collect_application")
+        saved = self.application.save_plan_and_create_instances(
+            "t_collect_application",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_collect_application",
+            envelope=envelope("prepare-collect-application", created["revision"]),
+        )
+        starting = self.commands.transition_instance(
+            "t_collect_application",
+            "i_image_1",
+            "STARTING",
+            envelope("collect-starting", saved["task_revision"], "adapter"),
+        )
+        self.commands.transition_instance(
+            "t_collect_application",
+            "i_image_1",
+            "RUNNING",
+            envelope("collect-running", starting["task_revision"], "adapter"),
+        )
+        content = b"\x89PNG\r\n\x1a\ncollected-delivery"
+        instance_root = self.assets.initialize_instance_workspace(
+            "t_collect_application", "i_image_1"
+        )
+        output = instance_root / "outputs" / "final.png"
+        output.write_bytes(content)
+        self.fake_adapter.deliveries = [
+            {
+                "source_relative_path": "instances/i_image_1/outputs/final.png",
+                "kind": "image",
+                "role": "final_artwork",
+                "description": "Collected final artwork",
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        ]
+        self.fake_adapter.observation = AdapterObservation(
+            "RUNNING",
+            step_id="completed",
+            details={"completed": True},
+        )
+
+        completed = self.application.observe_instance(
+            "t_collect_application", "i_image_1"
+        )
+        self.assertEqual(completed["instance"]["status"], "SUCCEEDED")
+        published = self.assets.list_assets("t_collect_application")
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0]["manifest"]["producer_instance_id"], "i_image_1")
+        self.assertEqual(published[0]["manifest"]["role"], "final_artwork")
+        notifications = self.approvals.list_inbox(owner="human")
+        self.assertEqual(
+            [item["kind"] for item in notifications],
+            ["INSTANCE_SUCCEEDED", "TASK_SUCCEEDED"],
+        )
+        self.application.observe_instance("t_collect_application", "i_image_1")
+        self.assertEqual(len(self.assets.list_assets("t_collect_application")), 1)
+        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
+        self.assertEqual(self.application.recover(), [])
+        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
+
+    def test_concurrent_approval_operations_cannot_advance_the_agent_twice(self) -> None:
+        created = create_task(self.commands, "t_concurrent_approval", "auto")
+        draft = image_plan("t_concurrent_approval")
+        saved = self.application.save_plan_and_create_instances(
+            "t_concurrent_approval",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_concurrent_approval",
+            envelope=envelope("prepare-concurrent-approval", created["revision"]),
+        )
+        starting = self.commands.transition_instance(
+            "t_concurrent_approval",
+            "i_image_1",
+            "STARTING",
+            envelope("concurrent-approval-starting", saved["task_revision"], "adapter"),
+        )
+        self.commands.transition_instance(
+            "t_concurrent_approval",
+            "i_image_1",
+            "RUNNING",
+            envelope("concurrent-approval-running", starting["task_revision"], "adapter"),
+        )
+        self.fake_adapter.observation = AdapterObservation(
+            "WAITING_APPROVAL",
+            step_id="waiting_human_approval",
+            capabilities=("approve_taskbook",),
+            details={"job_id": "job_concurrent_approval"},
+        )
+        observed = self.application.observe_instance(
+            "t_concurrent_approval", "i_image_1"
+        )
+        approval = observed["approval"]
+        self.fake_adapter.advance_delay = 0.1
+
+        def resolve(index: int):
+            try:
+                return self.application.resolve_approval(
+                    approval["approval"]["approval_id"],
+                    decision="APPROVED",
+                    action="approve_taskbook",
+                    payload={},
+                    operation_id=f"resolve_concurrent_approval_{index}",
+                    envelope=envelope(
+                        f"resolve-concurrent-approval-{index}",
+                        approval["approval_revision"],
+                    ),
+                )
+            except HarnessError as exc:
+                return exc
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(resolve, (1, 2)))
+        self.assertEqual(sum(isinstance(item, dict) for item in outcomes), 1)
+        self.assertEqual(sum(isinstance(item, HarnessError) for item in outcomes), 1)
+        self.assertEqual(len(self.fake_adapter.advance_calls), 1)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
+from harness.domain.commands import CommandEnvelope
 from harness.storage.repository import utc_now
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -164,6 +165,91 @@ class ApplicationTests(unittest.TestCase):
                         {"agent_type": "ppt", "available": False},
                     ],
                 )
+
+                current_revision = plan.json()["task_revision"]
+                for index, status in enumerate(("STARTING", "RUNNING", "WAITING_APPROVAL")):
+                    transition = container.commands.transition_instance(
+                        "t_api_g2",
+                        "i_api_g2",
+                        status,
+                        CommandEnvelope.model_validate(
+                            self._envelope(f"api-g3-transition-{index}", current_revision)
+                        ),
+                    )
+                    current_revision = transition["task_revision"]
+                created_approval = container.approvals.ensure_workflow_approval(
+                    "t_api_g2",
+                    "i_api_g2",
+                    step_id="waiting_human_approval",
+                    capabilities=["approve_taskbook"],
+                    context={"taskbook": "review"},
+                    operation_id="job_api_g3",
+                )
+                approval_id = created_approval["approval"]["approval_id"]
+
+                mode = client.put(
+                    "/api/v1/instances/i_api_g2/approval-mode",
+                    json={
+                        "approval_mode": "master",
+                        "envelope": self._envelope("api-g3-mode", current_revision),
+                    },
+                )
+                self.assertEqual(mode.status_code, 200, mode.text)
+                approval = client.get(f"/api/v1/approvals/{approval_id}")
+                self.assertEqual(approval.status_code, 200, approval.text)
+                self.assertEqual(approval.json()["approval"]["owner"], "human")
+                waiting = client.get("/api/v1/instances/i_api_g2?refresh=false")
+                self.assertEqual(waiting.json()["pending_approval"]["approval_id"], approval_id)
+
+                inbox = client.get("/api/v1/inbox?owner=human")
+                self.assertEqual(inbox.status_code, 200, inbox.text)
+                item = inbox.json()["items"][0]
+                marked_read = client.post(
+                    f"/api/v1/inbox/{item['inbox_id']}/status",
+                    json={
+                        "status": "READ",
+                        "envelope": self._envelope(
+                            "api-g3-read", item["store_revision"]
+                        ),
+                    },
+                )
+                self.assertEqual(marked_read.json()["item"]["status"], "READ")
+                resolved = client.post(
+                    f"/api/v1/approvals/{approval_id}/resolve",
+                    json={
+                        "decision": "REJECTED",
+                        "action": None,
+                        "payload": {},
+                        "operation_id": "reject_api_g3",
+                        "envelope": self._envelope(
+                            "api-g3-reject", approval.json()["approval_revision"]
+                        ),
+                    },
+                )
+                self.assertEqual(resolved.status_code, 200, resolved.text)
+                self.assertEqual(resolved.json()["approval"]["status"], "REJECTED")
+                handled_items = client.get("/api/v1/inbox?owner=human").json()["items"]
+                approval_item = next(
+                    entry for entry in handled_items if entry["approval_id"] == approval_id
+                )
+                self.assertEqual(approval_item["status"], "HANDLED")
+
+                files = client.get("/api/v1/tasks/t_api_g2/files?group=inputs")
+                self.assertEqual(files.status_code, 200, files.text)
+                brief = next(
+                    entry for entry in files.json()["items"] if entry["filename"] == "brief.md"
+                )
+                preview = client.get(
+                    "/api/v1/tasks/t_api_g2/files/preview",
+                    params={"path": brief["relative_path"]},
+                )
+                self.assertEqual(preview.text, "# API brief\n")
+                download = client.get(
+                    "/api/v1/tasks/t_api_g2/files/download",
+                    params={"path": brief["relative_path"]},
+                )
+                self.assertEqual(download.content, b"# API brief\n")
+                self.assertEqual(download.headers["x-content-sha256"], brief["sha256"])
 
     @staticmethod
     def _envelope(key: str, expected_revision: int) -> dict[str, object]:
