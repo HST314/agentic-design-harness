@@ -148,6 +148,28 @@ class TaskCommandService:
             lambda: self._save_plan(request, envelope),
         )
 
+    def validate_plan_request(
+        self,
+        task_id: str,
+        *,
+        stages: list[dict[str, Any]],
+        instances: list[dict[str, Any]],
+        task_cards: list[dict[str, Any]],
+    ) -> None:
+        """Validate a plan without allocating credentials or committing projections."""
+
+        task = self._task(task_id)
+        if task["status"] not in {"DRAFT", "PLANNED", "BLOCKED_UNAVAILABLE", "FAILED"}:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A plan cannot be replaced while this task state is active or terminal.",
+                {"current": task["status"]},
+            )
+        plan_revision = task["plan_revision"]
+        if self.store.plan.get(task_id, task_id) is not None:
+            plan_revision += 1
+        self._normalize_plan(task, plan_revision, stages, instances, task_cards)
+
     def _save_plan(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
         task_id = request["task_id"]
         task = self._task(task_id)
@@ -438,7 +460,7 @@ class TaskCommandService:
         normalized_cards = [
             {
                 **deepcopy(raw),
-                "schema_version": "1.0",
+                "schema_version": raw.get("schema_version", "1.0"),
                 "task_id": task["task_id"],
                 "created_at": now,
             }

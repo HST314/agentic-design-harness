@@ -1,0 +1,78 @@
+"""Phase 1 contract placeholder for the intentionally unavailable PPT Agent."""
+
+from __future__ import annotations
+
+from typing import Any, NoReturn
+
+from ..core.errors import HarnessError
+from ..services.process_runtime import ProcessSpec
+from .base import (
+    AdapterCommandResult,
+    AdapterObservation,
+    AdapterRecoveryResult,
+    PrepareRequest,
+    ValidationResult,
+)
+
+
+class PptAgentContractAdapter:
+    agent_type = "ppt"
+    available = False
+
+    def validate_task_card(self, card: dict[str, Any]) -> ValidationResult:
+        errors = () if card.get("agent_type") == self.agent_type else (
+            "Task card agent_type must be ppt.",
+        )
+        return ValidationResult(valid=not errors, errors=errors)
+
+    def prepare(self, request: PrepareRequest) -> ProcessSpec:
+        self._unavailable(request.instance.get("instance_id"))
+
+    def start(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        self._unavailable(instance_id)
+
+    def get_status(self, instance_id: str) -> AdapterObservation:
+        return AdapterObservation(
+            status="UNAVAILABLE",
+            details={"instance_id": instance_id, "reason": "PPT Agent is not connected."},
+        )
+
+    def request_advance(
+        self,
+        instance_id: str,
+        action: str,
+        payload: dict[str, Any],
+        operation_id: str,
+    ) -> AdapterCommandResult:
+        self._unavailable(instance_id)
+
+    def apply_config(
+        self,
+        instance_id: str,
+        config: dict[str, Any],
+        revision: int,
+        operation_id: str,
+    ) -> AdapterCommandResult:
+        self._unavailable(instance_id)
+
+    def collect_deliveries(self, instance_id: str) -> list[dict[str, Any]]:
+        self._unavailable(instance_id)
+
+    def collect_usage(
+        self, instance_id: str, cursor: str | None
+    ) -> list[dict[str, Any]]:
+        self._unavailable(instance_id)
+
+    def get_ui_url(self, instance_id: str) -> str | None:
+        return None
+
+    def recover(self, instance_snapshot: dict[str, Any]) -> AdapterRecoveryResult:
+        return AdapterRecoveryResult(recovered=True, status="UNAVAILABLE")
+
+    @staticmethod
+    def _unavailable(instance_id: object) -> NoReturn:
+        raise HarnessError(
+            "ADAPTER_UNAVAILABLE",
+            "PPT Agent is not available in Phase 1.",
+            {"agent_type": "ppt", "instance_id": instance_id},
+        )

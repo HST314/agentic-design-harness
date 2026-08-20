@@ -3,10 +3,12 @@
 ## 当前版本
 
 - JSON Schema dialect：Draft 2020-12；
-- 当前业务契约版本：`1.0`；
+- 默认业务契约版本：`1.0`；TaskCard 消费者额外支持 `1.1`；
 - `$id` 基址：`https://hst314.github.io/agentic-design-harness/contracts/v1/`。
 
-每个跨边界根对象必须包含 `schema_version`。消费者必须先检查版本，再读取业务字段；任何未明确列入支持清单的完整版本必须返回 `SCHEMA_VERSION_UNSUPPORTED`，不得静默降级。
+每个跨边界根对象必须包含 `schema_version`。消费者必须先检查版本，再读取业务字段；版本按文档类型的支持清单精确分派，任何未明确列入支持清单的完整版本必须返回 `SCHEMA_VERSION_UNSUPPORTED`，不得静默降级。
+
+TaskCard 1.1 是 P1 Image Adapter 的 consumer-first 兼容 minor：它只新增可选的 `parameters.usage_context`、`category_id` 与 `category_version`。TaskCard 1.0 Schema 保持冻结；Harness 同时读取 1.0/1.1，其他根对象仍只读取 1.0。
 
 ## 版本变化
 

@@ -37,6 +37,7 @@ from .process_runtime import (
     process_spec_digest,
     process_start_identity,
     reject_credential_arguments,
+    runtime_artifact_identity,
     tail_lines,
     validate_launch_identity,
 )
@@ -180,7 +181,8 @@ class ProcessSupervisor:
                     "The instance Provider does not match its complete credential pair.",
                     {"instance_id": instance_id},
                 )
-            code_identity = process_code_identity(spec)
+            runtime_identity = runtime_artifact_identity(spec)
+            code_identity = runtime_identity.digest
             self._enforce_code_identity(task_id, instance_id, code_identity)
             supervisor = config["config"]["supervisor"]
             port = self.port_allocator.allocate(
@@ -202,7 +204,7 @@ class ProcessSupervisor:
                 "command_sha256": digest_json(list(spec.command)),
                 "spec_sha256": process_spec_digest(spec),
                 "code_identity": code_identity,
-                "agent_code_ref": spec.agent_code_ref,
+                "runtime_artifact": runtime_identity.as_dict(),
                 "health_path": spec.health_path,
                 "readiness_path": spec.readiness_path,
                 "ui_path": spec.ui_path,
@@ -724,6 +726,7 @@ class ProcessSupervisor:
         environment.update(
             {
                 "PYTHONUNBUFFERED": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
                 "HARNESS_TASK_ID": task_id,
                 "HARNESS_INSTANCE_ID": instance_id,
                 "HARNESS_INSTANCE_PORT": str(port),

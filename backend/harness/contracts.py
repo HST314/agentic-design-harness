@@ -34,30 +34,38 @@ class ContractRegistry:
             for name, schema in self.schemas.items()
         }
 
+    def _validator_name(self, schema_name: str, payload: Any) -> str:
+        normalized = (
+            schema_name if schema_name.endswith(".schema.json") else f"{schema_name}.schema.json"
+        )
+        if not isinstance(payload, dict) or "schema_version" not in payload:
+            return normalized
+        version = str(payload["schema_version"])
+        if normalized.endswith(f"-v{version}.schema.json") and normalized in self._validators:
+            return normalized
+        versioned = normalized.removesuffix(".schema.json") + f"-v{version}.schema.json"
+        if versioned in self._validators:
+            return versioned
+        if version == "1.0":
+            return normalized
+        raise HarnessError(
+            "SCHEMA_VERSION_UNSUPPORTED",
+            "The declared contract version is not supported.",
+            {"schema_version": version},
+        )
+
     @property
     def ready(self) -> bool:
         return bool(self.schemas) and "common.schema.json" in self.schemas
 
     def validate(self, schema_name: str, payload: Any) -> None:
-        normalized = (
-            schema_name if schema_name.endswith(".schema.json") else f"{schema_name}.schema.json"
-        )
+        normalized = self._validator_name(schema_name, payload)
         validator = self._validators.get(normalized)
         if validator is None:
             raise HarnessError(
                 "VALIDATION_ERROR",
                 "Unknown contract schema.",
                 {"schema": normalized},
-            )
-        if (
-            isinstance(payload, dict)
-            and "schema_version" in payload
-            and payload["schema_version"] != "1.0"
-        ):
-            raise HarnessError(
-                "SCHEMA_VERSION_UNSUPPORTED",
-                "The declared contract version is not supported.",
-                {"schema_version": str(payload["schema_version"])},
             )
         errors = sorted(validator.iter_errors(payload), key=lambda item: list(item.path))
         if errors:

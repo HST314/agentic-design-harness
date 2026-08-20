@@ -30,7 +30,10 @@
       "type": "array",
       "minItems": 1,
       "items": {
-        "$ref": "task-card.schema.json"
+        "oneOf": [
+          {"$ref": "task-card.schema.json"},
+          {"$ref": "task-card-v1.1.schema.json"}
+        ]
       }
     }
   }
