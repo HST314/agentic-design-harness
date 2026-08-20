@@ -177,6 +177,15 @@ class TaskCommandService:
             plan_revision += 1
         self._normalize_plan(task, plan_revision, stages, instances, task_cards)
 
+    def validate_task_revision(self, task_id: str, expected_revision: int) -> None:
+        """Fail if an application workflow no longer owns its task revision."""
+
+        with self.task_guard(task_id):
+            self._task(task_id)
+            actual = self.store.task.revision(task_id, task_id)
+            if expected_revision != actual:
+                self._raise_revision(expected_revision, actual, "task", task_id)
+
     def _save_plan(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
         task_id = request["task_id"]
         task = self._task(task_id)

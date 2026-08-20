@@ -122,11 +122,24 @@ class SnapshotRepository(Generic[Payload]):
                         "actual_revision": actual_revision,
                     },
                 )
+            commit_base_revision = actual_revision
+            if current is None:
+                event_path = self.layout.control_root / "tasks" / task_id / "events.ndjson"
+                commit_base_revision = max(
+                    (
+                        int(event["revision"])
+                        for event in recover_records(event_path)
+                        if event.get("event_type") == "OBJECT_COMMITTED"
+                        and event.get("object_type") == self.object_type
+                        and event.get("object_id") == object_id
+                    ),
+                    default=0,
+                )
             wrapper = {
                 "store_version": "1.0",
                 "object_type": self.object_type,
                 "object_id": object_id,
-                "revision": actual_revision + 1,
+                "revision": commit_base_revision + 1,
                 "payload": payload,
                 "committed_at": utc_now(),
             }
