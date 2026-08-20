@@ -51,22 +51,23 @@ it never hides a missing field with a default.
 | persisted workflow failure | `FAILED` |
 | process exits unexpectedly | `CRASHED` |
 
-Approval resolution is capability-driven. `approve`, `answer`, `select_master`,
-`approve_skill`, `approve_additional_rounds`, `accept`, `regenerate` and
-`terminate` may be sent only when present in the frozen capability list. The
-Adapter maps the resolution to the Image `AdvanceRequest` field for that
-capability and submits it through the asynchronous job endpoint with the
-Harness idempotency key. Unknown phases or capabilities fail closed with
-`VALIDATION_ERROR` and are recorded for adapter compatibility review.
+Approval resolution is capability-driven. Only capabilities with a strict Image
+`AdvanceRequest` mapping are exposed to Harness approval: taskbook/final approval,
+clarification answers and safe defaults, category/skill decisions, taskbook revision,
+master selection, calibration review, human prompt tuning and deterministic no-payload
+continuations. Workbench-only capabilities are not presented as control-plane actions.
+The Adapter submits the mapped payload through the asynchronous job endpoint with a
+derived Harness idempotency key and reconciles that job on later observations. Unknown
+phases/capabilities and unsupported payload fields fail closed.
 
 ### Delivery boundary
 
-An Image `artifact://` reference is process-local. Completion discovery resolves
-it only inside the instance output root and creates a candidate publication
-request. Asset Service validates ownership and content, copies and re-hashes the
-final public file, commits its manifest and `ASSET_PUBLISHED`, and only then may
-the Adapter report the required delivery as complete. No local path crosses the
-Harness contract boundary.
+An Image `artifact://` reference is process-local. Completion discovery accepts only the
+Agent's finalized delivery marker and envelope, opens the delivery through descriptor-safe
+non-following reads, verifies its SHA-256 and stages it into the instance output boundary.
+Asset Service then validates ownership/content, copies and re-hashes the public file, commits
+its manifest and `ASSET_PUBLISHED`, and only then may the application mark the required
+delivery complete. No Agent-local path crosses the Harness contract boundary.
 
 ### Token boundary
 

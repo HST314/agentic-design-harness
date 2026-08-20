@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/inbox-item.schema.json",
+  "title": "InboxItem",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "inbox_id",
+    "task_id",
+    "instance_id",
+    "approval_id",
+    "kind",
+    "owner",
+    "status",
+    "title",
+    "message",
+    "deep_link",
+    "created_at",
+    "sequence",
+    "revision",
+    "dedupe_key"
+  ],
+  "properties": {
+    "schema_version": {"$ref": "common.schema.json#/$defs/schemaVersion"},
+    "inbox_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "task_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "instance_id": {
+      "oneOf": [
+        {"$ref": "common.schema.json#/$defs/identifier"},
+        {"type": "null"}
+      ]
+    },
+    "approval_id": {
+      "oneOf": [
+        {"$ref": "common.schema.json#/$defs/identifier"},
+        {"type": "null"}
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "APPROVAL_REQUIRED",
+        "INSTANCE_SUCCEEDED",
+        "INSTANCE_FAILED",
+        "INSTANCE_CRASHED",
+        "TASK_SUCCEEDED",
+        "TASK_FAILED",
+        "STAGE_READY",
+        "CONFIG_RESTART_REQUIRED",
+        "BUDGET_APPROVAL_REQUIRED"
+      ]
+    },
+    "owner": {"type": "string", "enum": ["human", "master"]},
+    "status": {"type": "string", "enum": ["UNREAD", "READ", "HANDLED"]},
+    "title": {
+      "allOf": [
+        {"$ref": "common.schema.json#/$defs/credentialSafeText"},
+        {"minLength": 1, "maxLength": 256}
+      ]
+    },
+    "message": {
+      "allOf": [
+        {"$ref": "common.schema.json#/$defs/credentialSafeText"},
+        {"minLength": 1, "maxLength": 4000}
+      ]
+    },
+    "deep_link": {"$ref": "common.schema.json#/$defs/relativePath"},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "revision": {"type": "integer", "minimum": 1},
+    "dedupe_key": {"type": "string", "minLength": 1, "maxLength": 512},
+    "read_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "read_by_type": {"$ref": "common.schema.json#/$defs/actorType"},
+    "read_by_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "handled_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "handled_by_type": {"$ref": "common.schema.json#/$defs/actorType"},
+    "handled_by_id": {"$ref": "common.schema.json#/$defs/identifier"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "UNREAD"}}, "required": ["status"]},
+      "then": {
+        "not": {
+          "anyOf": [
+            {"required": ["read_at"]},
+            {"required": ["read_by_type"]},
+            {"required": ["read_by_id"]},
+            {"required": ["handled_at"]},
+            {"required": ["handled_by_type"]},
+            {"required": ["handled_by_id"]}
+          ]
+        }
+      },
+      "else": {"required": ["read_at", "read_by_type", "read_by_id"]}
+    },
+    {
+      "if": {"properties": {"status": {"const": "HANDLED"}}, "required": ["status"]},
+      "then": {"required": ["handled_at", "handled_by_type", "handled_by_id"]},
+      "else": {
+        "not": {
+          "anyOf": [
+            {"required": ["handled_at"]},
+            {"required": ["handled_by_type"]},
+            {"required": ["handled_by_id"]}
+          ]
+        }
+      }
+    }
+  ]
+}

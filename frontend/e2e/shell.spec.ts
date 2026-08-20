@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
+  let approvalResolved = false;
   await page.route("**/readyz", async (route) => {
     await route.fulfill({
       status: 200,
@@ -76,13 +77,72 @@ test.beforeEach(async ({ page }) => {
       }),
     });
   });
+  await page.route("**/api/v1/tasks/t_ui/files?group=all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        items: [
+          {
+            relative_path: "resources/shared/a_final/final.png",
+            filename: "final.png",
+            mime_type: "image/png",
+            size_bytes: 2048,
+            sha256: "a".repeat(64),
+            previewable: true,
+          },
+        ],
+        assets: [
+          {
+            integrity_status: "VERIFIED",
+            manifest: {
+              asset_id: "a_final",
+              producer_instance_id: "i_ui",
+              role: "final_image",
+              relative_path: "resources/shared/a_final/final.png",
+              description: "评审通过的最终主视觉",
+              created_at: "2026-08-20T12:05:00Z",
+            },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/v1/tasks/t_ui/files/preview?path=*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "image/png", body: "preview" });
+  });
   await page.route("**/api/v1/instances/i_ui", async (route) => {
+    if (route.request().method() === "PUT") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ schema_version: "1.0", instance: { approval_mode: "master" } }),
+      });
+      return;
+    }
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         schema_version: "1.0",
         task_id: "t_ui",
+        task_revision: 2,
+        pending_approval: approvalResolved
+          ? null
+          : {
+              approval_id: "ap_ui",
+              task_id: "t_ui",
+              instance_id: "i_ui",
+              step_id: "approve_taskbook",
+              kind: "WORKFLOW",
+              owner: "human",
+              status: "PENDING",
+              payload_ref: "approvals/ap_ui/request.json",
+              created_at: "2026-08-20T12:01:00Z",
+              sequence: 1,
+              revision: 1,
+            },
         instance: {
           instance_id: "i_ui",
           task_id: "t_ui",
@@ -106,6 +166,72 @@ test.beforeEach(async ({ page }) => {
           details: { job_status: "succeeded", timeline_cursor: 7 },
         },
       }),
+    });
+  });
+  await page.route("**/api/v1/inbox?owner=human", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        items: [
+          {
+            inbox_id: "in_ui",
+            task_id: "t_ui",
+            instance_id: "i_ui",
+            approval_id: "ap_ui",
+            kind: "APPROVAL_REQUIRED",
+            owner: "human",
+            status: approvalResolved ? "HANDLED" : "UNREAD",
+            title: "工作流等待决议",
+            message: "任务书等待批准。",
+            deep_link: "inbox?approval_id=ap_ui",
+            created_at: "2026-08-20T12:01:00Z",
+            sequence: 1,
+            revision: approvalResolved ? 2 : 1,
+            store_revision: approvalResolved ? 2 : 1,
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/v1/approvals/ap_ui", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        approval: {
+          approval_id: "ap_ui",
+          task_id: "t_ui",
+          instance_id: "i_ui",
+          step_id: "approve_taskbook",
+          kind: "WORKFLOW",
+          owner: "human",
+          status: approvalResolved ? "APPROVED" : "PENDING",
+          payload_ref: "approvals/ap_ui/request.json",
+          created_at: "2026-08-20T12:01:00Z",
+          sequence: 1,
+          revision: approvalResolved ? 2 : 1,
+        },
+        approval_revision: approvalResolved ? 2 : 1,
+        payload: { available_actions: ["approve_taskbook"], context: { phase: "taskbook_review" } },
+      }),
+    });
+  });
+  await page.route("**/api/v1/approvals/ap_ui/resolve", async (route) => {
+    approvalResolved = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "1.0", status: "RUNNING" }),
+    });
+  });
+  await page.route("**/api/v1/inbox/in_ui/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "1.0", item: { status: "READ" } }),
     });
   });
 });
@@ -144,10 +270,21 @@ test("task and instance pages preserve the Image workbench boundary", async ({ p
   await page.getByRole("link", { name: "查看任务" }).click();
   await expect(page).toHaveURL(/\/tasks\/t_ui$/);
   await expect(page.getByRole("heading", { name: "阶段与实例" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "任务文件" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "final.png" })).toBeVisible();
   await page.getByRole("link", { name: /Image Agent/ }).click();
   await expect(page).toHaveURL(/\/instances\/i_ui$/);
   await expect(page.getByText("等待下一步决议")).toBeVisible();
   const workbench = page.getByRole("link", { name: "打开工作台" });
   await expect(workbench).toHaveAttribute("href", "http://127.0.0.1:18123/");
   await expect(workbench).toHaveAttribute("target", "_blank");
+});
+
+test("human approval resolves once and the inbox records it as handled", async ({ page }) => {
+  await page.goto("/inbox?approval_id=ap_ui");
+  await expect(page.getByRole("heading", { name: "按到达顺序处理" })).toBeVisible();
+  await expect(page.getByText("工作流等待决议")).toBeVisible();
+  await page.getByRole("button", { name: "批准并推进" }).click();
+  await expect(page.getByText("该审批已完成处理。")).toBeVisible();
+  await expect(page.getByText("已处理", { exact: true })).toBeVisible();
 });

@@ -17,6 +17,7 @@ from ..storage.layout import validate_identifier
 from ..storage.locks import FileLock
 from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
+from .approvals import ApprovalInboxService
 from .assets import AssetService
 from .credentials import CredentialPoolService
 from .supervisor import ProcessSupervisor
@@ -32,6 +33,7 @@ class HarnessApplicationService:
         store: FileStateStore,
         commands: TaskCommandService,
         assets: AssetService,
+        approvals: ApprovalInboxService,
         credentials: CredentialPoolService,
         supervisor: ProcessSupervisor,
         adapters: AdapterRegistry,
@@ -39,6 +41,7 @@ class HarnessApplicationService:
         self.store = store
         self.commands = commands
         self.assets = assets
+        self.approvals = approvals
         self.credentials = credentials
         self.supervisor = supervisor
         self.adapters = adapters
@@ -115,7 +118,12 @@ class HarnessApplicationService:
         results: list[dict[str, Any]] = []
         for path in sorted(self.intent_root.glob("*.json")):
             operation_id = path.stem
-            task_id = read_json(path)["request"]["task_id"]
+            initial = read_json(path)
+            task_id = initial.get("task_id") or initial.get("request", {}).get("task_id")
+            if not isinstance(task_id, str):
+                raise HarnessError(
+                    "VALIDATION_ERROR", "The application intent has no task owner."
+                )
             with (
                 FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
                 FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
@@ -129,6 +137,8 @@ class HarnessApplicationService:
                             result = self._resume_save_plan(path, None)
                     elif intent["kind"] == "START_READY_INSTANCES":
                         result = self._resume_start(path, None)
+                    elif intent["kind"] == "RESOLVE_APPROVAL":
+                        result = self._resume_approval(path, None)
                     else:
                         raise HarnessError(
                             "VALIDATION_ERROR", "The application intent kind is invalid."
@@ -145,6 +155,7 @@ class HarnessApplicationService:
                             "error_code": exc.code,
                         }
                     )
+        self.approvals.reconcile_terminal_notifications()
         return results
 
     def confirm_and_start_ready_instances(
@@ -243,6 +254,22 @@ class HarnessApplicationService:
                 "The Agent adapter returned a non-projectable status.",
                 {"status": observation.status},
             )
+        if observation.details.get("completed") is True:
+            delivery = self._collect_publish_and_complete(
+                task_id, instance_id, adapter, observation
+            )
+            return {
+                "instance": deepcopy(delivery["instance"]),
+                "observation": {
+                    "status": observation.status,
+                    "step_id": observation.step_id,
+                    "capabilities": list(observation.capabilities),
+                    "details": deepcopy(observation.details),
+                },
+                "transition": delivery["transition"],
+                "approval": None,
+                "delivery": delivery,
+            }
         transition = None
         if observation.status != instance["status"]:
             task_revision = self.store.task.revision(task_id, task_id)
@@ -272,6 +299,39 @@ class HarnessApplicationService:
                 for item in transition["plan"]["instances"]
                 if item["instance_id"] == instance_id
             )
+        approval = None
+        if observation.status == "WAITING_APPROVAL":
+            operation_id = str(
+                observation.details.get("job_id")
+                or digest_json(
+                    {
+                        "instance_id": instance_id,
+                        "step_id": observation.step_id,
+                        "details": observation.details,
+                    }
+                )[:24]
+            )
+            approval = self.approvals.ensure_workflow_approval(
+                task_id,
+                instance_id,
+                step_id=str(observation.step_id),
+                capabilities=list(observation.capabilities),
+                context=deepcopy(observation.details.get("approval_context") or {}),
+                operation_id=operation_id,
+            )
+        elif observation.status == "FAILED":
+            self.approvals.ensure_notification(
+                task_id,
+                kind="INSTANCE_FAILED",
+                owner="human",
+                title="Image Agent 执行失败",
+                message=f"实例 {instance_id} 已进入失败状态。请查看实例详情。",
+                deep_link=f"instances/{instance_id}",
+                dedupe_key=(
+                    f"instance-failed:{instance_id}"
+                ),
+                instance_id=instance_id,
+            )
         return {
             "instance": deepcopy(instance),
             "observation": {
@@ -281,7 +341,100 @@ class HarnessApplicationService:
                 "details": deepcopy(observation.details),
             },
             "transition": transition,
+            "approval": approval,
         }
+
+    def resolve_approval(
+        self,
+        approval_id: str,
+        *,
+        decision: str,
+        action: str | None,
+        payload: dict[str, Any],
+        operation_id: str,
+        envelope: CommandEnvelope,
+        crash_hook: CrashHook | None = None,
+    ) -> dict[str, Any]:
+        validate_identifier(approval_id, "approval_id")
+        validate_identifier(operation_id, "operation_id")
+        initial_approval = self.approvals.get_approval(approval_id)
+        task_id = initial_approval["approval"]["task_id"]
+        request = {
+            "approval_id": approval_id,
+            "decision": decision,
+            "action": action,
+            "payload": deepcopy(payload),
+            "envelope": envelope.model_dump(mode="json"),
+        }
+        request_sha256 = digest_json(request)
+        intent_path = self._intent_path(operation_id)
+        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
+            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        ):
+            if intent_path.exists():
+                intent = read_json(intent_path)
+                if (
+                    intent.get("kind") != "RESOLVE_APPROVAL"
+                    or intent.get("request_sha256") != request_sha256
+                ):
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The application operation id was reused for another request.",
+                        {"operation_id": operation_id},
+                    )
+                if intent["state"] == "COMMITTED":
+                    return deepcopy(intent["result"])
+            else:
+                approval_details = self.approvals.get_approval(approval_id)
+                approval = approval_details["approval"]
+                approval_payload = approval_details["payload"]
+                if approval["status"] != "PENDING":
+                    raise HarnessError(
+                        "INVALID_STATE_TRANSITION", "Only a pending approval may be resolved."
+                    )
+                if envelope.actor_type != approval["owner"]:
+                    raise HarnessError(
+                        "VALIDATION_ERROR", "The approval must be resolved by its frozen owner."
+                    )
+                if envelope.expected_revision != approval_details["approval_revision"]:
+                    raise HarnessError(
+                        "REVISION_CONFLICT",
+                        "The approval revision changed before the decision was prepared.",
+                        {
+                            "expected_revision": envelope.expected_revision,
+                            "actual_revision": approval_details["approval_revision"],
+                        },
+                    )
+                if decision == "APPROVED":
+                    if action not in approval_payload["available_actions"]:
+                        raise HarnessError(
+                            "VALIDATION_ERROR",
+                            "The selected action is not available for this approval.",
+                        )
+                elif decision == "REJECTED":
+                    if action is not None or payload:
+                        raise HarnessError(
+                            "VALIDATION_ERROR", "A rejected approval cannot submit an Agent action."
+                        )
+                else:
+                    raise HarnessError("VALIDATION_ERROR", "The approval decision is invalid.")
+                intent = {
+                    "schema_version": "1.0",
+                    "kind": "RESOLVE_APPROVAL",
+                    "operation_id": operation_id,
+                    "request_sha256": request_sha256,
+                    "request": request,
+                    "task_id": task_id,
+                    "instance_id": approval["instance_id"],
+                    "state": "PREPARED",
+                    "prepared_at": utc_now(),
+                    "advance": None,
+                    "result": None,
+                }
+                atomic_write_json(intent_path, intent)
+                if crash_hook:
+                    crash_hook("after_approval_intent")
+            return self._resume_approval(intent_path, crash_hook)
 
     def publish_delivery_and_complete(
         self,
@@ -302,6 +455,187 @@ class HarnessApplicationService:
             description=description,
             idempotency_key=operation_id,
         )
+        complete = self._required_deliveries_satisfied(task_id, instance_id)
+        transition = None
+        if complete:
+            transition = self.commands.transition_instance(
+                task_id, instance_id, "SUCCEEDED", envelope
+            )
+        return {"manifest": manifest, "complete": complete, "transition": transition}
+
+    def _resume_approval(
+        self, intent_path: Path, crash_hook: CrashHook | None
+    ) -> dict[str, Any]:
+        intent = read_json(intent_path)
+        request = intent["request"]
+        envelope = CommandEnvelope.model_validate(request["envelope"])
+        task_id = intent["task_id"]
+        instance_id = intent["instance_id"]
+        instance = self._instance(task_id, instance_id)
+        if request["decision"] == "APPROVED" and intent["advance"] is None:
+            adapter = self.adapters.get(instance["agent_type"])
+            advance_payload = deepcopy(request["payload"])
+            advance_payload["actor"] = envelope.actor_id
+            advance = adapter.request_advance(
+                instance_id,
+                str(request["action"]),
+                advance_payload,
+                self._derived_id("advance", intent["operation_id"], request["approval_id"]),
+            )
+            intent["advance"] = {
+                "accepted": advance.accepted,
+                "operation_id": advance.operation_id,
+                "details": deepcopy(advance.details),
+            }
+            intent["state"] = "ADVANCE_ACCEPTED"
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook("after_adapter_advance")
+        target_status = "RUNNING" if request["decision"] == "APPROVED" else "FAILED"
+        instance = self._instance(task_id, instance_id)
+        if instance["status"] != target_status:
+            if instance["status"] != "WAITING_APPROVAL":
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "The approval no longer owns a waiting Agent instance.",
+                    {"current": instance["status"]},
+                )
+            transition = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                target_status,
+                CommandEnvelope(
+                    idempotency_key=self._derived_id(
+                        "decision", intent["operation_id"], request["approval_id"]
+                    ),
+                    actor_type=envelope.actor_type,
+                    actor_id=envelope.actor_id,
+                    expected_revision=self.store.task.revision(task_id, task_id),
+                ),
+            )
+            instance = next(
+                item
+                for item in transition["plan"]["instances"]
+                if item["instance_id"] == instance_id
+            )
+            if crash_hook:
+                crash_hook("after_approval_instance_transition")
+        resolution = self.approvals.commit_resolution(
+            request["approval_id"], request["decision"], envelope
+        )
+        if crash_hook:
+            crash_hook("after_approval_commit")
+        actor = Actor(envelope.actor_type, envelope.actor_id)
+        self.approvals.handle_approval_notification(
+            request["approval_id"],
+            actor,
+            self._derived_id("handled", intent["operation_id"], request["approval_id"]),
+        )
+        if request["decision"] == "REJECTED":
+            self.approvals.ensure_notification(
+                task_id,
+                kind="INSTANCE_FAILED",
+                owner="human",
+                title="工作流决议已拒绝",
+                message=f"实例 {instance_id} 因审批拒绝已停止。",
+                deep_link=f"instances/{instance_id}",
+                dedupe_key=f"instance-failed:{instance_id}",
+                instance_id=instance_id,
+                approval_id=request["approval_id"],
+            )
+        if crash_hook:
+            crash_hook("after_approval_notification")
+        result = {
+            "approval": resolution["approval"],
+            "approval_revision": resolution["approval_revision"],
+            "instance": deepcopy(instance),
+            "advance": deepcopy(intent["advance"]),
+        }
+        intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
+        atomic_write_json(intent_path, intent)
+        return result
+
+    def _collect_publish_and_complete(
+        self,
+        task_id: str,
+        instance_id: str,
+        adapter,
+        observation,
+    ) -> dict[str, Any]:
+        deliveries = adapter.collect_deliveries(instance_id)
+        if not deliveries:
+            raise HarnessError(
+                "VALIDATION_ERROR", "A completed Image Agent did not expose a delivery."
+            )
+        manifests = []
+        for delivery in deliveries:
+            operation_id = (
+                f"collect-{instance_id}-{delivery['sha256'][:16]}-"
+                f"{hashlib.sha256(delivery['role'].encode()).hexdigest()[:8]}"
+            )
+            manifests.append(
+                self.assets.publish_delivery(
+                    task_id,
+                    instance_id,
+                    source_relative_path=delivery["source_relative_path"],
+                    role=delivery["role"],
+                    description=delivery["description"],
+                    idempotency_key=operation_id,
+                )
+            )
+        if not self._required_deliveries_satisfied(task_id, instance_id):
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Published Image assets do not satisfy the required delivery contract.",
+            )
+        manifest_digest = digest_json(sorted(item["asset_id"] for item in manifests))
+        transition = self.commands.transition_instance(
+            task_id,
+            instance_id,
+            "SUCCEEDED",
+            CommandEnvelope(
+                idempotency_key=f"complete-{instance_id}-{manifest_digest[:20]}",
+                actor_type="adapter",
+                actor_id=f"{self._instance(task_id, instance_id)['agent_type']}_adapter",
+                expected_revision=self.store.task.revision(task_id, task_id),
+            ),
+        )
+        instance = next(
+            item
+            for item in transition["plan"]["instances"]
+            if item["instance_id"] == instance_id
+        )
+        self.approvals.ensure_notification(
+            task_id,
+            kind="INSTANCE_SUCCEEDED",
+            owner="human",
+            title="Image Agent 交付已发布",
+            message=f"实例 {instance_id} 的必需交付已校验并发布。",
+            deep_link=f"tasks/{task_id}?tab=resources",
+            dedupe_key=f"instance-succeeded:{instance_id}",
+            instance_id=instance_id,
+        )
+        if transition["task"]["status"] in {"SUCCEEDED", "PARTIAL"}:
+            self.approvals.ensure_notification(
+                task_id,
+                kind="TASK_SUCCEEDED",
+                owner="human",
+                title="主任务已完成",
+                message=f"任务 {task_id} 的必需阶段均已完成。",
+                deep_link=f"tasks/{task_id}",
+                dedupe_key=f"task-complete:{task_id}:{transition['task']['plan_revision']}",
+            )
+        return {
+            "instance": instance,
+            "manifests": manifests,
+            "transition": transition,
+            "observation": {
+                "step_id": observation.step_id,
+                "details": deepcopy(observation.details),
+            },
+        }
+
+    def _required_deliveries_satisfied(self, task_id: str, instance_id: str) -> bool:
         plan = self._plan(task_id)
         card = next(
             item for item in plan["task_cards"] if item["instance_id"] == instance_id
@@ -312,7 +646,7 @@ class HarnessApplicationService:
             if item["integrity_status"] == "VERIFIED"
             and item["manifest"].get("producer_instance_id") == instance_id
         ]
-        complete = all(
+        return all(
             any(
                 candidate["role"] == expected["role"]
                 and candidate["kind"] == expected["kind"]
@@ -322,12 +656,6 @@ class HarnessApplicationService:
             for expected in card["expected_deliveries"]
             if expected["required"]
         )
-        transition = None
-        if complete:
-            transition = self.commands.transition_instance(
-                task_id, instance_id, "SUCCEEDED", envelope
-            )
-        return {"manifest": manifest, "complete": complete, "transition": transition}
 
     def _resume_save_plan(
         self, intent_path: Path, crash_hook: CrashHook | None

@@ -86,7 +86,7 @@ class FileStateStore:
             self.layout,
             "inbox",
             lambda object_id: Path("inbox") / f"{object_id}.json",
-            self._validate_inbox,
+            lambda value: contracts.validate("inbox-item", value),
             lock_timeout_seconds,
             self.rebuild_inbox_index,
         )
@@ -115,12 +115,6 @@ class FileStateStore:
                 self.retry_budget,
             )
         }
-
-    @staticmethod
-    def _validate_inbox(value: dict[str, Any]) -> None:
-        required = {"inbox_id", "task_id", "kind", "created_at", "sequence", "status"}
-        if not required.issubset(value) or value["status"] not in {"UNREAD", "READ", "HANDLED"}:
-            raise ValueError("invalid inbox snapshot")
 
     @staticmethod
     def _validate_retry_budget(value: dict[str, Any]) -> None:
@@ -424,6 +418,7 @@ class FileStateStore:
                     "inbox_id": payload["inbox_id"],
                     "task_id": payload["task_id"],
                     "kind": payload["kind"],
+                    "owner": payload["owner"],
                     "status": payload["status"],
                     "created_at": payload["created_at"],
                     "sequence": payload["sequence"],

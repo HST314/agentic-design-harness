@@ -9,6 +9,7 @@
 - `delivery.schema.json`
 - `asset-manifest.schema.json`
 - `approval-request.schema.json`
+- `inbox-item.schema.json`
 - `token-usage-event.schema.json`
 - `task-plan.schema.json`（组合对象，用于计划提交和三种拓扑测试）
 - `error-response.schema.json`
