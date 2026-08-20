@@ -224,6 +224,10 @@ def map_advance_payload(action: str, payload: dict[str, Any]) -> dict[str, Any]:
                 "VALIDATION_ERROR", "This Image action requires a legal manual_action."
             )
         result = {"manual_action": manual_action}
+        if manual_action == "accept_current":
+            # The pinned Image workflow continues from a human quality
+            # acceptance directly into final approval in the same async job.
+            result["final_approved"] = True
         if manual_action == "edit_and_execute":
             edited_delta = payload.get("edited_delta")
             if not isinstance(edited_delta, str) or not edited_delta.strip():

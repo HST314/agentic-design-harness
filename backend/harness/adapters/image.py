@@ -311,6 +311,13 @@ class ImageAgentAdapter:
         state = self._state(task_id, instance_id)
         base_url = self._base_url(task_id, instance_id)
         compatibility = self._check_compatibility(base_url)
+        runtime_config = read_json(
+            self.store.layout.initialize_instance(task_id, instance_id)
+            / "runtime-config.json"
+        )
+        offline_mode = runtime_config["config"]["image_runtime_policy"][
+            "offline_mode"
+        ]
         card = read_json(
             self.store.layout.initialize_instance(task_id, instance_id)
             / "runtime"
@@ -328,7 +335,7 @@ class ImageAgentAdapter:
                     {
                         "project_id": instance_id,
                         "task_card": card,
-                        "offline": True,
+                        "offline": offline_mode,
                         "defer_run": True,
                     },
                     expected_statuses=(201,),

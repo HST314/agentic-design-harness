@@ -59,8 +59,8 @@ npm run test:e2e
 ```bash
 make g2-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 
-# G3 人工审批 → 幂等推进 → 受控发布 → 主任务完成门禁
-make g3-e2e
+# G3 人工审批 → 真实 Adapter/进程 → 受控发布 → 主任务完成门禁
+make g3-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
 
 ## 启动空服务
@@ -94,8 +94,10 @@ make serve
 - Master 和人工只能通过领域命令/API 改变控制平面状态；
 - API Key 不进入任务卡、共享目录、事件、日志或响应；
 - 当前前端只承载控制面，专业工作流通过 Adapter 提供的 HTTP 深链打开；
-- G2 门禁继续使用固定 Image Agent 版本验证真实离线启动和观测；G3 门禁覆盖人工
-  审批只推进一次、交付摘要复验、Asset Service 可见性提交及必需资产齐备后完成。
+- G2 门禁继续使用固定 Image Agent 版本验证真实离线启动和观测；G3 门禁同时覆盖
+  脚本化故障回归和真实 Image Adapter/进程全链，验证人工审批只推进一次、拒绝不
+  提交决议、待审批不可交付、交付摘要复验、Asset Service 可见性提交及必需资产
+  齐备后完成。
 
 完整范围、状态语义与 18 条 Phase 1 验收标准见 [RFC v0.2](docs/rfc-v0.2.md)，
 测试追踪见 [Phase 1 验收矩阵](docs/verification/phase1-traceability.md)。

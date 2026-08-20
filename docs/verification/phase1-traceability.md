@@ -57,12 +57,16 @@ G4 configuration/usage/multi-instance or the final Phase 1 E2E packages.
   sequence, FIFO order, separate read/handled transitions, optimistic revision checks,
   command idempotency and restart-safe deduplication.
 - Application recovery: `tests/integration/test_application_service.py` injects a crash after
-  Adapter advance acceptance and proves recovery does not advance twice; completed observations
-  must publish every required asset before the instance or task can become `SUCCEEDED`.
+  Adapter advance acceptance and proves recovery does not advance twice. Adapter rejection keeps
+  the approval pending, and the delivery gate rejects wrong actors and pending approvals before
+  publication; completed observations must publish every required asset before the instance or
+  task can become `SUCCEEDED` and emit terminal notifications.
 - Image boundary: `tests/unit/test_image_adapter.py` verifies capability filtering, strict
   `AdvanceRequest` payload mapping, finalized-envelope digest checks and descriptor-safe staging.
 - API/browser: `tests/integration/test_app.py` covers approval, inbox, routing and safe resource
   endpoints. `frontend/e2e/shell.spec.ts` covers actionable approval UX, handled state,
   resource preview/download discovery, keyboard reachability and mobile overflow.
-- Exit gate: `make g3-e2e` runs `tests/e2e/test_g3_manual_delivery.py`, which proves one human
-  decision advances exactly once, then publishes a verified final image before task success.
+- Exit gate: `make g3-e2e` runs the scripted fault-isolation scenario and
+  `tests/e2e/test_g3_real_image_agent.py`. The latter launches the pinned Image Adapter and real
+  Image process against a deterministic local HTTP provider, crosses every human approval,
+  finalizes the Image delivery, publishes the verified asset and completes the instance/task.
