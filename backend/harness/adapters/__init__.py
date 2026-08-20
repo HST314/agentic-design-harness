@@ -8,6 +8,7 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
+from .image import ImageAgentAdapter
 from .ppt import PptAgentContractAdapter
 from .registry import AdapterRegistry
 
@@ -17,6 +18,7 @@ __all__ = [
     "AdapterRecoveryResult",
     "AdapterRegistry",
     "AgentAdapter",
+    "ImageAgentAdapter",
     "PptAgentContractAdapter",
     "PrepareRequest",
     "ValidationResult",

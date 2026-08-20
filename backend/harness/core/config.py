@@ -22,6 +22,13 @@ class HarnessSettings(BaseModel):
     log_level: str = "INFO"
     lock_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     contracts_root: Path = Path("contracts/v1")
+    image_agent_root: Path = Path("../image_agent_mvp")
+    image_agent_python: Path = Path("/usr/bin/python3")
+    image_agent_dependency_root: Path = Path(".runtime/image-agent-deps")
+    image_agent_revision: str = Field(
+        default="61c5b4f1b66d5d85f62b39b5b338ac2304e94d26",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+    )
 
     @field_validator("log_level")
     @classmethod
@@ -33,7 +40,14 @@ class HarnessSettings(BaseModel):
 
     def resolve_from(self, project_root: Path) -> HarnessSettings:
         updates: dict[str, Any] = {}
-        for name in ("control_root", "workspace_root", "contracts_root"):
+        for name in (
+            "control_root",
+            "workspace_root",
+            "contracts_root",
+            "image_agent_root",
+            "image_agent_python",
+            "image_agent_dependency_root",
+        ):
             value = getattr(self, name)
             updates[name] = value if value.is_absolute() else project_root / value
         return self.model_copy(update=updates)
@@ -47,6 +61,10 @@ _ENV_MAP = {
     "HARNESS_LOG_LEVEL": "log_level",
     "HARNESS_LOCK_TIMEOUT_SECONDS": "lock_timeout_seconds",
     "HARNESS_CONTRACTS_ROOT": "contracts_root",
+    "HARNESS_IMAGE_AGENT_ROOT": "image_agent_root",
+    "HARNESS_IMAGE_AGENT_PYTHON": "image_agent_python",
+    "HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT": "image_agent_dependency_root",
+    "HARNESS_IMAGE_AGENT_REVISION": "image_agent_revision",
 }
 
 

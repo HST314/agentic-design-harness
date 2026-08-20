@@ -121,6 +121,31 @@ class ImageModelConfig(BaseModel):
         return self
 
 
+def offline_image_model_config() -> ImageModelConfig:
+    """Return a complete, role-correct routing table for offline Image runs."""
+
+    roles = {
+        "intake_clarify": "reasoning_llm",
+        "confirmation_build": "reasoning_llm",
+        "initial_candidate_generation": "text_to_image_model",
+        "self_check_inspection": "vision_language_model",
+        "self_check_rework": "text_to_image_model",
+        "human_prompt_rework": "text_to_image_model",
+    }
+    return ImageModelConfig(
+        model_config_id="offline_fake",
+        state_bindings=[
+            ModelBinding(
+                state=state,
+                model_role=role,
+                provider="fake",
+                model=f"offline-{role}",
+            )
+            for state, role in roles.items()
+        ],
+    )
+
+
 class SupervisorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -143,9 +168,7 @@ class GlobalConfigBody(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     image_provider: str = Field(default="fake", pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     image_runtime_policy: ImageRuntimePolicy = Field(default_factory=ImageRuntimePolicy)
-    image_model_config: ImageModelConfig = Field(
-        default_factory=lambda: ImageModelConfig(model_config_id="offline_fake")
-    )
+    image_model_config: ImageModelConfig = Field(default_factory=offline_image_model_config)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
 
     @model_validator(mode="after")

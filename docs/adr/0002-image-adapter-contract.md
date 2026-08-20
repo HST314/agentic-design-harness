@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-20
-- Harness contract: `1.0`
+- Harness contract: `1.1`
 - Image Agent commit: `61c5b4f1b66d5d85f62b39b5b338ac2304e94d26`
 
 ## Decision
@@ -32,12 +32,12 @@ that the mapping table marks as required.
 | no Harness equivalent | Image workflow continuation fields | Omitted on creation; owned by Image Agent after creation. |
 | fixed literal | `status` | `draft` on first creation only. |
 
-Contract `1.0` currently exposes only `aspect_ratio` and `variants` for Image
-parameters, while the lossless mapping also needs `usage_context` and optional
-category data. The Adapter therefore does not run until a compatible contract
-minor adds these declared fields. It must return `SCHEMA_VERSION_UNSUPPORTED`
-or `VALIDATION_ERROR`, not hide the loss with a default. This decision closes
-the mapping ambiguity without weakening the frozen v1.0 contract.
+Contract `1.1` declares `usage_context` and the optional category pair needed by
+the lossless mapping. The G2 Adapter validates the Harness card first, verifies
+every referenced asset against its authoritative manifest, then validates the
+mapped payload against the consumer's pinned `ImageTaskCard.schema.json`. It
+returns `SCHEMA_VERSION_UNSUPPORTED` or `VALIDATION_ERROR` on incompatibility;
+it never hides a missing field with a default.
 
 ### Status and approval mapping
 

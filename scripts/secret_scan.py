@@ -12,7 +12,15 @@ PATTERNS = {
     "provider-key": re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     "authorization": re.compile(r"\b(?:Basic|Bearer)\s+[A-Za-z0-9._~+/-]{16,}={0,2}\b", re.I),
 }
-SKIP_PARTS = {".git", ".test-deps", ".venv", "node_modules", "dist", "__pycache__"}
+SKIP_PARTS = {
+    ".git",
+    ".runtime",
+    ".test-deps",
+    ".venv",
+    "node_modules",
+    "dist",
+    "__pycache__",
+}
 TEXT_SUFFIXES = {
     ".css",
     ".html",
