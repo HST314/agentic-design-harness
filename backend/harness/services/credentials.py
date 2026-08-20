@@ -223,7 +223,10 @@ class CredentialPoolService:
             committed = self._event_for_id(events, "creation_id", creation_id)
             if committed is not None:
                 self._check_event_request(committed, request_sha256, "instance creation")
-                self._materialize_assignment(committed)
+                chain = self._instance_assignment_chain(
+                    events, committed["task_id"], committed["instance_id"]
+                )
+                self._recover_assignment_chain(chain)
                 return self._creation_result(committed)
             if any(
                 item.get("event_type") == "CREDENTIAL_PAIR_ASSIGNED"
@@ -321,7 +324,8 @@ class CredentialPoolService:
             committed = self._event_for_id(events, "idempotency_key", idempotency_key)
             if committed is not None:
                 self._check_event_request(committed, request_sha256, "credential reassignment")
-                self._materialize_assignment(committed)
+                chain = self._instance_assignment_chain(events, task_id, instance_id)
+                self._recover_assignment_chain(chain)
                 return self._assignment_summary(committed)
             current = self.store.instance.get(task_id, instance_id)
             if current is None:
@@ -388,16 +392,110 @@ class CredentialPoolService:
         events = recover_records(self.events_path)
         recovered: list[dict[str, Any]] = []
         with FileLock(self.lock_path, self.store.lock_timeout_seconds):
+            chains: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for event in events:
                 if event.get("event_type") not in {
                     "CREDENTIAL_PAIR_ASSIGNED",
                     "CREDENTIAL_PAIR_REASSIGNED",
                 }:
                     continue
-                self._materialize_assignment(event)
-                recovered.append(self._assignment_summary(event))
+                key = (event["task_id"], event["instance_id"])
+                chains.setdefault(key, []).append(event)
+            for chain in chains.values():
+                recovered.append(self._recover_assignment_chain(chain))
             self._write_state_projection()
         return recovered
+
+    @staticmethod
+    def _instance_assignment_chain(
+        events: list[dict[str, Any]], task_id: str, instance_id: str
+    ) -> list[dict[str, Any]]:
+        return [
+            event
+            for event in events
+            if event.get("event_type")
+            in {"CREDENTIAL_PAIR_ASSIGNED", "CREDENTIAL_PAIR_REASSIGNED"}
+            and event.get("task_id") == task_id
+            and event.get("instance_id") == instance_id
+        ]
+
+    def _recover_assignment_chain(self, chain: list[dict[str, Any]]) -> dict[str, Any]:
+        self._validate_assignment_chain(chain)
+        initial = chain[0]
+        final = chain[-1]
+        task_id = final["task_id"]
+        instance_id = final["instance_id"]
+        current = self.store.instance.get(task_id, instance_id)
+        if current is None:
+            self._materialize_assignment(initial)
+            current = self.store.instance.get(task_id, instance_id)
+        if current is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        committed_pairs = {
+            (event["credential_pair_ref"], event["credential_pair_revision"])
+            for event in chain
+        }
+        current_pair = (
+            current.get("credential_pair_ref"),
+            current.get("credential_pair_revision"),
+        )
+        if current_pair not in committed_pairs:
+            raise HarnessError(
+                "CREDENTIAL_PAIR_INVALID",
+                "An instance snapshot conflicts with its committed credential chain.",
+                {"instance_id": instance_id},
+            )
+        self._materialize_assignment(final)
+        return self._assignment_summary(final)
+
+    def _validate_assignment_chain(self, chain: list[dict[str, Any]]) -> None:
+        if not chain or chain[0]["event_type"] != "CREDENTIAL_PAIR_ASSIGNED" or any(
+            event["event_type"] == "CREDENTIAL_PAIR_ASSIGNED" for event in chain[1:]
+        ):
+            raise HarnessError(
+                "CREDENTIAL_PAIR_INVALID",
+                "The committed credential assignment chain is invalid.",
+            )
+        task_id = chain[0]["task_id"]
+        instance_id = chain[0]["instance_id"]
+        initial = chain[0]["initial_instance"]
+        if (
+            initial.get("task_id") != task_id
+            or initial.get("instance_id") != instance_id
+            or initial.get("credential_pair_ref") != chain[0]["credential_pair_ref"]
+            or initial.get("credential_pair_revision")
+            != chain[0]["credential_pair_revision"]
+        ):
+            raise HarnessError(
+                "CREDENTIAL_PAIR_INVALID",
+                "The committed credential creation event is internally inconsistent.",
+            )
+        event_ids: set[str] = set()
+        for event in chain:
+            if (
+                event["task_id"] != task_id
+                or event["instance_id"] != instance_id
+                or event["event_id"] in event_ids
+            ):
+                raise HarnessError(
+                    "CREDENTIAL_PAIR_INVALID",
+                    "The committed credential assignment chain is invalid.",
+                )
+            event_ids.add(event["event_id"])
+            resolved = self._resolve_pair(
+                event["credential_pair_ref"], event["credential_pair_revision"]
+            )
+            if (
+                event["provider"] != resolved.provider
+                or event["key_id"] != resolved.key_id
+                or event["pair_identity_sha256"] != pair_identity_digest(resolved)
+                or event["pair_integrity_hmac"] != self._pair_integrity_hmac(resolved)
+            ):
+                raise HarnessError(
+                    "CREDENTIAL_PAIR_INVALID",
+                    "A committed credential assignment failed integrity validation.",
+                    {"instance_id": instance_id},
+                )
 
     def _materialize_assignment(self, event: dict[str, Any]) -> None:
         task_id = event["task_id"]
