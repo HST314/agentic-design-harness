@@ -38,8 +38,7 @@ class StateLayout:
             self.workspace_root,
             self.workspace_root / "tasks",
         ):
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(directory, 0o700)
+            self._ensure_directory(directory)
 
     def initialize_task(self, task_id: str) -> tuple[Path, Path]:
         validate_identifier(task_id, "task_id")
@@ -63,8 +62,7 @@ class StateLayout:
             workspace_task / "approvals",
         )
         for directory in (*control_children, *workspace_children):
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(directory, 0o700)
+            self._ensure_directory(directory)
         return control_task, workspace_task
 
     def initialize_instance(self, task_id: str, instance_id: str) -> Path:
@@ -81,6 +79,28 @@ class StateLayout:
             instance_root / "logs",
             instance_root / "runtime",
         ):
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(directory, 0o700)
+            self._ensure_directory(directory)
         return instance_root
+
+    @staticmethod
+    def _ensure_directory(directory: Path) -> None:
+        if directory.is_symlink():
+            raise HarnessError(
+                "PATH_OUTSIDE_TASK_ROOT", "Workspace directories cannot be symlinks."
+            )
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            descriptor = os.open(
+                directory,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError:
+            raise HarnessError(
+                "PATH_OUTSIDE_TASK_ROOT", "Workspace paths must be regular directories."
+            ) from None
+        try:
+            os.fchmod(descriptor, 0o700)
+        finally:
+            os.close(descriptor)

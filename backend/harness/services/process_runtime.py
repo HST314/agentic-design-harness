@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import socket
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -247,16 +248,72 @@ def process_group_exists(process_group_id: int) -> bool:
         return True
 
 
-def tail_lines(path: Path, max_lines: int, max_bytes: int = 1024 * 1024) -> list[str]:
-    if not path.exists():
+def tail_lines(
+    path: Path,
+    max_lines: int,
+    max_bytes: int = 1024 * 1024,
+    *,
+    trusted_root: Path | None = None,
+) -> list[str]:
+    try:
+        descriptor = _open_regular_nofollow(path, trusted_root=trusted_root)
+    except FileNotFoundError:
         return []
-    with path.open("rb") as handle:
+    with os.fdopen(descriptor, "rb") as handle:
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
         handle.seek(max(0, size - max_bytes))
         raw = handle.read(max_bytes)
     lines = raw.decode("utf-8", errors="replace").splitlines()
     return lines[-max_lines:]
+
+
+def _open_regular_nofollow(path: Path, *, trusted_root: Path | None) -> int:
+    if trusted_root is None:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+        )
+    else:
+        try:
+            relative = path.relative_to(trusted_root)
+        except ValueError:
+            raise HarnessError(
+                "PATH_OUTSIDE_TASK_ROOT", "The log path leaves the workspace root."
+            ) from None
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptors: list[int] = []
+        try:
+            current = os.open(trusted_root, directory_flags)
+            descriptors.append(current)
+            for component in relative.parts[:-1]:
+                current = os.open(component, directory_flags, dir_fd=current)
+                descriptors.append(current)
+            descriptor = os.open(
+                relative.parts[-1],
+                os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=current,
+            )
+        except FileNotFoundError:
+            raise
+        except OSError:
+            raise HarnessError(
+                "PATH_OUTSIDE_TASK_ROOT",
+                "Symlinked or invalid log path components are forbidden.",
+            ) from None
+        finally:
+            for opened in reversed(descriptors):
+                os.close(opened)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise HarnessError(
+            "PATH_OUTSIDE_TASK_ROOT", "Only regular no-follow log files may be read."
+        )
+    return descriptor
 
 
 def process_start_identity(pid: int) -> str | None:
