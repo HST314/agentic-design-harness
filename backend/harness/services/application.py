@@ -84,6 +84,8 @@ class HarnessApplicationService:
                     )
                 if intent["state"] == "COMMITTED":
                     return deepcopy(intent["result"])
+                if intent["state"] == "ABORTED":
+                    self._raise_terminal_intent(intent)
             else:
                 self._prevalidate_plan(request)
                 prepared_at = utc_now()
@@ -119,7 +121,7 @@ class HarnessApplicationService:
                 FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
             ):
                 intent = read_json(path)
-                if intent["state"] == "COMMITTED":
+                if intent["state"] in {"COMMITTED", "ABORTED"}:
                     continue
                 try:
                     if intent["kind"] == "SAVE_PLAN_AND_CREATE_INSTANCES":
@@ -135,10 +137,11 @@ class HarnessApplicationService:
                         {"operation_id": operation_id, "status": "RECOVERED", "result": result}
                     )
                 except HarnessError as exc:
+                    state = read_json(path)["state"]
                     results.append(
                         {
                             "operation_id": operation_id,
-                            "status": "PENDING",
+                            "status": "ABORTED" if state == "ABORTED" else "PENDING",
                             "error_code": exc.code,
                         }
                     )
@@ -285,6 +288,14 @@ class HarnessApplicationService:
             instance = deepcopy(raw)
             provider = request["providers"].get(raw["instance_id"])
             if provider is not None:
+                try:
+                    self.commands.validate_task_revision(
+                        request["task_id"], request["envelope"]["expected_revision"]
+                    )
+                except HarnessError as exc:
+                    if exc.code == "REVISION_CONFLICT":
+                        self._abort_stale_save_plan(intent_path, intent, actor, exc)
+                    raise
                 created = self.credentials.create_instance(
                     request["task_id"],
                     intent["creation_instances"][raw["instance_id"]],
@@ -327,6 +338,48 @@ class HarnessApplicationService:
         intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
         atomic_write_json(intent_path, intent)
         return deepcopy(result)
+
+    def _abort_stale_save_plan(
+        self,
+        intent_path: Path,
+        intent: dict[str, Any],
+        actor: Actor,
+        error: HarnessError,
+    ) -> None:
+        intent.update({"state": "COMPENSATING", "compensation_started_at": utc_now()})
+        atomic_write_json(intent_path, intent)
+        compensation = []
+        request = intent["request"]
+        for instance_id in sorted(request["providers"]):
+            creation_id = self._derived_id("creation", intent["operation_id"], instance_id)
+            compensation.append(
+                self.credentials.revoke_instance_creation(
+                    request["task_id"],
+                    creation_id,
+                    revocation_id=self._derived_id(
+                        "revoke", intent["operation_id"], instance_id
+                    ),
+                    actor=actor,
+                )
+            )
+        intent.update(
+            {
+                "state": "ABORTED",
+                "aborted_at": utc_now(),
+                "error": {
+                    "code": error.code,
+                    "message": error.message,
+                    "details": deepcopy(error.details),
+                },
+                "compensation": compensation,
+            }
+        )
+        atomic_write_json(intent_path, intent)
+
+    @staticmethod
+    def _raise_terminal_intent(intent: dict[str, Any]) -> None:
+        error = intent["error"]
+        raise HarnessError(error["code"], error["message"], deepcopy(error["details"]))
 
     def _resume_start(
         self, intent_path: Path, crash_hook: CrashHook | None

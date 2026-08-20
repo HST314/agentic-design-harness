@@ -23,6 +23,7 @@ from harness.services.configuration import ConfigurationService
 from harness.services.credentials import CredentialPoolService
 from harness.services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from harness.services.supervisor import ProcessSupervisor
+from harness.storage.atomic import read_json
 from harness.storage.ndjson import recover_records
 from runtime_helpers import build_service, create_task, envelope, image_plan, ppt_plan
 
@@ -248,6 +249,145 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertIsNone(self.store.instance.get("t_stale_application", "i_image_1"))
         self.assertFalse(self.application._intent_path("stale_application_plan").exists())
         self.assertEqual(self.application.recover(), [])
+
+    def test_revision_advance_after_intent_aborts_before_first_assignment(self) -> None:
+        created = create_task(self.commands, "t_intent_revision_advance")
+        draft = image_plan("t_intent_revision_advance", 2)
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_application_intent":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.application.save_plan_and_create_instances(
+                "t_intent_revision_advance",
+                stages=draft["stages"],
+                instances=draft["instances"],
+                task_cards=draft["task_cards"],
+                providers={"i_image_1": "fake", "i_image_2": "fake"},
+                operation_id="intent_revision_advance",
+                envelope=envelope("intent-revision-advance", created["revision"]),
+                crash_hook=crash,
+            )
+        self.commands.register_input_manifest(
+            "t_intent_revision_advance",
+            "assets/revised-input.json",
+            envelope("advance-after-intent", created["revision"]),
+        )
+
+        recovered = self.application.recover()
+
+        self.assertEqual(
+            recovered,
+            [
+                {
+                    "operation_id": "intent_revision_advance",
+                    "status": "ABORTED",
+                    "error_code": "REVISION_CONFLICT",
+                }
+            ],
+        )
+        intent = read_json(self.application._intent_path("intent_revision_advance"))
+        self.assertEqual(intent["state"], "ABORTED")
+        self.assertEqual(recover_records(self.credentials.events_path), [])
+        self.assertIsNone(
+            self.store.instance.get("t_intent_revision_advance", "i_image_1")
+        )
+        self.assertIsNone(
+            self.store.instance.get("t_intent_revision_advance", "i_image_2")
+        )
+        self.assertEqual(self.application.recover(), [])
+
+    def test_revision_advance_after_partial_assignment_compensates_and_aborts(self) -> None:
+        created = create_task(self.commands, "t_partial_revision_advance")
+        draft = image_plan("t_partial_revision_advance", 2)
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_instance_created:i_image_1":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.application.save_plan_and_create_instances(
+                "t_partial_revision_advance",
+                stages=draft["stages"],
+                instances=draft["instances"],
+                task_cards=draft["task_cards"],
+                providers={"i_image_1": "fake", "i_image_2": "fake"},
+                operation_id="partial_revision_advance",
+                envelope=envelope("partial-revision-advance", created["revision"]),
+                crash_hook=crash,
+            )
+        self.assertIsNotNone(
+            self.store.instance.get("t_partial_revision_advance", "i_image_1")
+        )
+        advanced = self.commands.register_input_manifest(
+            "t_partial_revision_advance",
+            "assets/revised-input.json",
+            envelope("advance-after-partial", created["revision"]),
+        )
+
+        recovered = self.application.recover()
+
+        self.assertEqual(
+            recovered,
+            [
+                {
+                    "operation_id": "partial_revision_advance",
+                    "status": "ABORTED",
+                    "error_code": "REVISION_CONFLICT",
+                }
+            ],
+        )
+        intent = read_json(self.application._intent_path("partial_revision_advance"))
+        self.assertEqual(intent["state"], "ABORTED")
+        events = recover_records(self.credentials.events_path)
+        self.assertEqual(
+            [item["event_type"] for item in events],
+            ["CREDENTIAL_PAIR_ASSIGNED", "CREDENTIAL_INSTANCE_CREATION_REVOKED"],
+        )
+        credential_state = read_json(self.credentials.state_path)
+        self.assertEqual(credential_state["assignments"], {})
+        for instance_id in ("i_image_1", "i_image_2"):
+            self.assertIsNone(
+                self.store.instance.get("t_partial_revision_advance", instance_id)
+            )
+
+        # Credential recovery must retire the compensated snapshot again if the
+        # generic event-first store rebuild recreates it during a later restart.
+        self.store.recover()
+        self.credentials.recover()
+        self.assertIsNone(
+            self.store.instance.get("t_partial_revision_advance", "i_image_1")
+        )
+        self.assertEqual(self.application.recover(), [])
+
+        def crash_retry(checkpoint: str) -> None:
+            if checkpoint == "after_instance_created:i_image_1":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.application.save_plan_and_create_instances(
+                "t_partial_revision_advance",
+                stages=draft["stages"],
+                instances=draft["instances"],
+                task_cards=draft["task_cards"],
+                providers={"i_image_1": "fake", "i_image_2": "fake"},
+                operation_id="partial_revision_retry",
+                envelope=envelope("partial-revision-retry", advanced["revision"]),
+                crash_hook=crash_retry,
+            )
+        self.store.recover()
+        self.credentials.recover()
+        retry_recovery = self.application.recover()
+        self.assertEqual(retry_recovery[0]["status"], "RECOVERED")
+        retry_plan = self.store.plan.get(
+            "t_partial_revision_advance", "t_partial_revision_advance"
+        )
+        self.assertEqual(retry_plan["task"]["status"], "AWAITING_START_CONFIRMATION")
+        self.assertEqual(
+            len(retry_plan["instances"]),
+            2,
+        )
 
     def test_unavailable_ppt_plan_saves_without_consuming_credentials(self) -> None:
         created = create_task(self.commands, "t_ppt_application")

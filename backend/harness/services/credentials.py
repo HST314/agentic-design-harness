@@ -30,6 +30,7 @@ from ..storage.atomic import (
     atomic_write_yaml,
     canonical_json_bytes,
     digest_json,
+    fsync_directory,
     read_json,
 )
 from ..storage.layout import validate_identifier
@@ -37,6 +38,13 @@ from ..storage.locks import FileLock
 from ..storage.ndjson import append_record, recover_records
 from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
+from .credential_events import (
+    active_assignment_chain,
+    creation_assignment_chain,
+    event_for_id,
+    revocation_for_creation,
+    revocation_summary,
+)
 
 
 class CredentialPair(BaseModel):
@@ -220,19 +228,21 @@ class CredentialPoolService:
         request_sha256 = digest_json(request)
         with FileLock(self.lock_path, self.store.lock_timeout_seconds):
             events = recover_records(self.events_path)
-            committed = self._event_for_id(events, "creation_id", creation_id)
+            committed = event_for_id(events, "creation_id", creation_id)
             if committed is not None:
                 self._check_event_request(committed, request_sha256, "instance creation")
-                chain = self._instance_assignment_chain(
-                    events, committed["task_id"], committed["instance_id"]
-                )
+                chain = creation_assignment_chain(events, creation_id)
+                if chain[-1]["event_type"] == "CREDENTIAL_INSTANCE_CREATION_REVOKED":
+                    raise HarnessError(
+                        "INVALID_STATE_TRANSITION",
+                        "The instance creation was revoked by its application workflow.",
+                        {"creation_id": creation_id},
+                    )
                 self._recover_assignment_chain(chain)
                 return self._creation_result(committed)
-            if any(
-                item.get("event_type") == "CREDENTIAL_PAIR_ASSIGNED"
-                and item["task_id"] == task_id
-                and item["instance_id"] == instance_id
-                for item in events
+            active_chain = active_assignment_chain(events, task_id, instance_id)
+            if active_chain and active_chain[-1]["event_type"] != (
+                "CREDENTIAL_INSTANCE_CREATION_REVOKED"
             ):
                 raise HarnessError(
                     "IDEMPOTENCY_CONFLICT",
@@ -296,6 +306,99 @@ class CredentialPoolService:
             atomic_write_json(intent_path, {**read_json(intent_path), "state": "COMMITTED"})
             return self._creation_result(event)
 
+    def revoke_instance_creation(
+        self,
+        task_id: str,
+        creation_id: str,
+        *,
+        revocation_id: str,
+        actor: Actor,
+    ) -> dict[str, Any]:
+        """Compensate an unplanned instance creation without erasing its audit trail."""
+
+        validate_identifier(task_id, "task_id")
+        validate_identifier(creation_id, "creation_id")
+        validate_identifier(revocation_id, "revocation_id")
+        with FileLock(self.lock_path, self.store.lock_timeout_seconds):
+            events = recover_records(self.events_path)
+            assigned = event_for_id(events, "creation_id", creation_id)
+            revoked = revocation_for_creation(events, creation_id)
+            if revoked is not None:
+                if revoked["revocation_id"] != revocation_id or revoked["task_id"] != task_id:
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The creation revocation identity conflicts with its committed event.",
+                        {"creation_id": creation_id},
+                    )
+                chain = creation_assignment_chain(events, creation_id)
+                self._validate_assignment_chain(chain)
+                active_chain = active_assignment_chain(
+                    events, revoked["task_id"], revoked["instance_id"]
+                )
+                if active_chain and active_chain[0]["creation_id"] == creation_id:
+                    return self._recover_assignment_chain(chain)
+                return revocation_summary(chain[0], revoked)
+            intent_path = self._intent_path(creation_id)
+            if assigned is None:
+                if intent_path.exists():
+                    intent = read_json(intent_path)
+                    if intent.get("task_id") != task_id:
+                        raise HarnessError(
+                            "IDEMPOTENCY_CONFLICT",
+                            "The creation intent belongs to another task.",
+                            {"creation_id": creation_id},
+                        )
+                    atomic_write_json(
+                        intent_path,
+                        {
+                            **intent,
+                            "state": "REVOKED",
+                            "revocation_id": revocation_id,
+                            "revoked_at": utc_now(),
+                        },
+                    )
+                return {
+                    "task_id": task_id,
+                    "creation_id": creation_id,
+                    "status": "NOT_CREATED",
+                }
+            if assigned["task_id"] != task_id:
+                raise HarnessError(
+                    "IDEMPOTENCY_CONFLICT",
+                    "The committed instance creation belongs to another task.",
+                    {"creation_id": creation_id},
+                )
+            self._require_unplanned_creation(assigned)
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "event_type": "CREDENTIAL_INSTANCE_CREATION_REVOKED",
+                "revocation_id": revocation_id,
+                "creation_id": creation_id,
+                "assignment_event_id": assigned["event_id"],
+                "task_id": task_id,
+                "instance_id": assigned["instance_id"],
+                "actor": actor.as_dict(),
+                "committed_at": utc_now(),
+            }
+            append_record(self.events_path, event)
+            chain = creation_assignment_chain([*events, event], creation_id)
+            result = self._recover_assignment_chain(chain)
+            self._write_state_projection()
+            creation_intent = read_json(intent_path) if intent_path.exists() else {}
+            atomic_write_json(
+                intent_path,
+                {
+                    **creation_intent,
+                    "creation_id": creation_id,
+                    "task_id": task_id,
+                    "instance_id": assigned["instance_id"],
+                    "state": "REVOKED",
+                    "revocation_id": revocation_id,
+                    "revoked_at": event["committed_at"],
+                },
+            )
+            return result
+
     def reassign_instance(
         self,
         task_id: str,
@@ -321,10 +424,16 @@ class CredentialPoolService:
         request_sha256 = digest_json(request)
         with FileLock(self.lock_path, self.store.lock_timeout_seconds):
             events = recover_records(self.events_path)
-            committed = self._event_for_id(events, "idempotency_key", idempotency_key)
+            committed = event_for_id(events, "idempotency_key", idempotency_key)
             if committed is not None:
                 self._check_event_request(committed, request_sha256, "credential reassignment")
-                chain = self._instance_assignment_chain(events, task_id, instance_id)
+                chain = active_assignment_chain(events, task_id, instance_id)
+                if not chain:
+                    raise HarnessError(
+                        "INVALID_STATE_TRANSITION",
+                        "The credential reassignment belongs to a revoked creation.",
+                        {"instance_id": instance_id},
+                    )
                 self._recover_assignment_chain(chain)
                 return self._assignment_summary(committed)
             current = self.store.instance.get(task_id, instance_id)
@@ -392,32 +501,22 @@ class CredentialPoolService:
         events = recover_records(self.events_path)
         recovered: list[dict[str, Any]] = []
         with FileLock(self.lock_path, self.store.lock_timeout_seconds):
-            chains: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            instance_keys: set[tuple[str, str]] = set()
             for event in events:
                 if event.get("event_type") not in {
                     "CREDENTIAL_PAIR_ASSIGNED",
                     "CREDENTIAL_PAIR_REASSIGNED",
+                    "CREDENTIAL_INSTANCE_CREATION_REVOKED",
                 }:
                     continue
-                key = (event["task_id"], event["instance_id"])
-                chains.setdefault(key, []).append(event)
-            for chain in chains.values():
+                instance_keys.add((event["task_id"], event["instance_id"]))
+            for task_id, instance_id in sorted(instance_keys):
+                chain = active_assignment_chain(events, task_id, instance_id)
+                if not chain:
+                    continue
                 recovered.append(self._recover_assignment_chain(chain))
             self._write_state_projection()
         return recovered
-
-    @staticmethod
-    def _instance_assignment_chain(
-        events: list[dict[str, Any]], task_id: str, instance_id: str
-    ) -> list[dict[str, Any]]:
-        return [
-            event
-            for event in events
-            if event.get("event_type")
-            in {"CREDENTIAL_PAIR_ASSIGNED", "CREDENTIAL_PAIR_REASSIGNED"}
-            and event.get("task_id") == task_id
-            and event.get("instance_id") == instance_id
-        ]
 
     def _recover_assignment_chain(self, chain: list[dict[str, Any]]) -> dict[str, Any]:
         self._validate_assignment_chain(chain)
@@ -425,6 +524,9 @@ class CredentialPoolService:
         final = chain[-1]
         task_id = final["task_id"]
         instance_id = final["instance_id"]
+        if final["event_type"] == "CREDENTIAL_INSTANCE_CREATION_REVOKED":
+            self._retire_revoked_creation(initial)
+            return revocation_summary(initial, final)
         current = self.store.instance.get(task_id, instance_id)
         if current is None:
             self._materialize_assignment(initial)
@@ -434,6 +536,7 @@ class CredentialPoolService:
         committed_pairs = {
             (event["credential_pair_ref"], event["credential_pair_revision"])
             for event in chain
+            if event["event_type"] != "CREDENTIAL_INSTANCE_CREATION_REVOKED"
         }
         current_pair = (
             current.get("credential_pair_ref"),
@@ -449,8 +552,21 @@ class CredentialPoolService:
         return self._assignment_summary(final)
 
     def _validate_assignment_chain(self, chain: list[dict[str, Any]]) -> None:
-        if not chain or chain[0]["event_type"] != "CREDENTIAL_PAIR_ASSIGNED" or any(
-            event["event_type"] == "CREDENTIAL_PAIR_ASSIGNED" for event in chain[1:]
+        if not chain or chain[0]["event_type"] != "CREDENTIAL_PAIR_ASSIGNED":
+            raise HarnessError(
+                "CREDENTIAL_PAIR_INVALID",
+                "The committed credential assignment chain is invalid.",
+            )
+        revocations = [
+            event
+            for event in chain
+            if event["event_type"] == "CREDENTIAL_INSTANCE_CREATION_REVOKED"
+        ]
+        assignment_events = chain[:-1] if revocations else chain
+        if (
+            any(event["event_type"] == "CREDENTIAL_PAIR_ASSIGNED" for event in chain[1:])
+            or len(revocations) > 1
+            or (revocations and chain[-1] != revocations[0])
         ):
             raise HarnessError(
                 "CREDENTIAL_PAIR_INVALID",
@@ -471,7 +587,7 @@ class CredentialPoolService:
                 "The committed credential creation event is internally inconsistent.",
             )
         event_ids: set[str] = set()
-        for event in chain:
+        for event in assignment_events:
             if (
                 event["task_id"] != task_id
                 or event["instance_id"] != instance_id
@@ -496,6 +612,52 @@ class CredentialPoolService:
                     "A committed credential assignment failed integrity validation.",
                     {"instance_id": instance_id},
                 )
+        if revocations:
+            revoked = revocations[0]
+            if (
+                revoked["task_id"] != task_id
+                or revoked["instance_id"] != instance_id
+                or revoked["creation_id"] != chain[0]["creation_id"]
+                or revoked["assignment_event_id"] != chain[0]["event_id"]
+                or revoked["event_id"] in event_ids
+            ):
+                raise HarnessError(
+                    "CREDENTIAL_PAIR_INVALID",
+                    "The committed creation revocation is internally inconsistent.",
+                )
+
+    def _require_unplanned_creation(self, assigned: dict[str, Any]) -> None:
+        plan = self.store.plan.get(assigned["task_id"], assigned["task_id"])
+        if plan is not None and any(
+            item["instance_id"] == assigned["instance_id"] for item in plan["instances"]
+        ):
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A planned instance creation cannot be revoked.",
+                {"instance_id": assigned["instance_id"]},
+            )
+
+    def _retire_revoked_creation(self, assigned: dict[str, Any]) -> None:
+        self._require_unplanned_creation(assigned)
+        task_id = assigned["task_id"]
+        instance_id = assigned["instance_id"]
+        current = self.store.instance.get(task_id, instance_id)
+        if current is not None and (
+            current.get("credential_pair_ref") != assigned["credential_pair_ref"]
+            or current.get("credential_pair_revision")
+            != assigned["credential_pair_revision"]
+        ):
+            raise HarnessError(
+                "CREDENTIAL_PAIR_INVALID",
+                "The revoked creation conflicts with the current instance snapshot.",
+                {"instance_id": instance_id},
+            )
+        instance_path = self.store.instance.path(task_id, instance_id)
+        instance_path.unlink(missing_ok=True)
+        fsync_directory(instance_path.parent)
+        assignment_path = self._assignment_path(task_id, instance_id)
+        assignment_path.unlink(missing_ok=True)
+        fsync_directory(assignment_path.parent)
 
     def _materialize_assignment(self, event: dict[str, Any]) -> None:
         task_id = event["task_id"]
@@ -699,6 +861,9 @@ class CredentialPoolService:
             }:
                 key = f"{event['task_id']}:{event['instance_id']}"
                 assignments[key] = self._assignment_summary(event)
+            elif event.get("event_type") == "CREDENTIAL_INSTANCE_CREATION_REVOKED":
+                key = f"{event['task_id']}:{event['instance_id']}"
+                assignments.pop(key, None)
         atomic_write_json(
             self.state_path,
             {
@@ -742,21 +907,6 @@ class CredentialPoolService:
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         digest = hashlib.sha256(creation_id.encode()).hexdigest()
         return self.intent_root / f"{digest}.json"
-
-    @staticmethod
-    def _event_for_id(
-        events: list[dict[str, Any]], field_name: str, value: str
-    ) -> dict[str, Any] | None:
-        return next(
-            (
-                item
-                for item in events
-                if item.get(field_name) == value
-                and item.get("event_type")
-                in {"CREDENTIAL_PAIR_ASSIGNED", "CREDENTIAL_PAIR_REASSIGNED"}
-            ),
-            None,
-        )
 
     @staticmethod
     def _check_event_request(event: dict[str, Any], digest: str, operation: str) -> None:
