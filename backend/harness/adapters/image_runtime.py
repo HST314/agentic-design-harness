@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
 import uuid
+from collections.abc import Collection
 from pathlib import Path
 
 from ..core.errors import HarnessError
-from ..storage.atomic import atomic_write_json, fsync_directory, read_json
+from ..storage.atomic import atomic_write_json, digest_json, fsync_directory, read_json
 
 IMAGE_ENTRYPOINT = "_harness_image_server.py"
 IMAGE_WEB_REQUIREMENTS = "_harness-image-web.in"
@@ -20,6 +22,7 @@ _IGNORED_NAMES = frozenset(
         ".git",
         ".mypy_cache",
         ".pytest_cache",
+        ".requirements-installed",
         ".ruff_cache",
         "__pycache__",
         "build",
@@ -31,6 +34,9 @@ _IGNORED_NAMES = frozenset(
     }
 )
 _IGNORED_SUFFIXES = (".egg-info", ".pyc", ".pyo")
+_DEPENDENCY_IGNORED_ROOT_NAMES = frozenset({"bin"})
+_DEPENDENCY_IGNORED_NAMES = frozenset({"RECORD"})
+_SHA256_LENGTH = 64
 _SERVER_SOURCE = """\
 from __future__ import annotations
 
@@ -67,13 +73,18 @@ class ImageRuntimeBuilder:
         *,
         revision: str,
         package_version: str,
+        source_content_sha256: str,
+        dependency_content_sha256: str,
     ) -> None:
         self.source_root = source_root
         self.dependency_root = dependency_root
         self.revision = revision
         self.package_version = package_version
+        self.source_content_sha256 = source_content_sha256
+        self.dependency_content_sha256 = dependency_content_sha256
 
     def prepare(self, runtime_root: Path) -> Path:
+        self._validate_attestation()
         artifact_root = runtime_root / "image-agent-artifact"
         if artifact_root.exists():
             marker = read_json(artifact_root / _MARKER)
@@ -82,14 +93,23 @@ class ImageRuntimeBuilder:
                     "IDEMPOTENCY_CONFLICT",
                     "The existing Image runtime artifact has another revision.",
                 )
+            self._verify_artifact_content(artifact_root)
             return artifact_root
         temporary = runtime_root / f".image-agent-artifact-{uuid.uuid4().hex}"
         try:
             temporary.mkdir(mode=0o700)
             self._copy_tree(self.source_root, temporary)
+            actual_source_sha256 = content_tree_sha256(temporary)
+            self._require_content_digest(
+                "source", actual_source_sha256, self.source_content_sha256
+            )
             dependencies = temporary / "_dependencies"
             dependencies.mkdir(mode=0o700)
             self._copy_tree(self.dependency_root, dependencies)
+            actual_dependency_sha256 = dependency_tree_sha256(dependencies)
+            self._require_content_digest(
+                "dependency", actual_dependency_sha256, self.dependency_content_sha256
+            )
             (temporary / IMAGE_ENTRYPOINT).write_text(_SERVER_SOURCE, encoding="utf-8")
             (temporary / IMAGE_WEB_REQUIREMENTS).write_text(
                 _WEB_REQUIREMENTS_SOURCE, encoding="utf-8"
@@ -104,6 +124,48 @@ class ImageRuntimeBuilder:
                 shutil.rmtree(temporary)
             raise
         return artifact_root
+
+    def _verify_artifact_content(self, artifact_root: Path) -> None:
+        actual_source_sha256 = content_tree_sha256(
+            artifact_root,
+            ignored_root_names={
+                "_dependencies",
+                IMAGE_ENTRYPOINT,
+                IMAGE_WEB_REQUIREMENTS,
+                _MARKER,
+            },
+        )
+        actual_dependency_sha256 = dependency_tree_sha256(
+            artifact_root / "_dependencies"
+        )
+        self._require_content_digest(
+            "source", actual_source_sha256, self.source_content_sha256
+        )
+        self._require_content_digest(
+            "dependency", actual_dependency_sha256, self.dependency_content_sha256
+        )
+
+    def _validate_attestation(self) -> None:
+        for label, value in (
+            ("source", self.source_content_sha256),
+            ("dependency", self.dependency_content_sha256),
+        ):
+            if len(value) != _SHA256_LENGTH or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise HarnessError(
+                    "PROCESS_START_FAILED",
+                    f"The pinned Image Agent {label} digest is invalid.",
+                )
+
+    @staticmethod
+    def _require_content_digest(label: str, actual: str, expected: str) -> None:
+        if actual != expected:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                f"The Image Agent {label} content does not match its pinned revision.",
+                {"expected_sha256": expected, "actual_sha256": actual},
+            )
 
     def _copy_tree(
         self, source: Path, destination: Path, relative: Path = Path()
@@ -156,8 +218,101 @@ class ImageRuntimeBuilder:
 
     def _marker(self) -> dict[str, str]:
         return {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "source_revision": self.revision,
             "package_version": self.package_version,
+            "source_content_sha256": self.source_content_sha256,
+            "dependency_content_sha256": self.dependency_content_sha256,
             "entrypoint": IMAGE_ENTRYPOINT,
         }
+
+
+def content_tree_sha256(
+    root: Path,
+    *,
+    ignored_names: Collection[str] = (),
+    ignored_root_names: Collection[str] = (),
+) -> str:
+    """Hash every runtime-relevant regular file by relative path and content."""
+
+    manifest: list[dict[str, str | int]] = []
+    _append_content_manifest(
+        root,
+        Path(),
+        manifest,
+        frozenset(ignored_names),
+        frozenset(ignored_root_names),
+    )
+    return digest_json(manifest)
+
+
+def dependency_tree_sha256(root: Path) -> str:
+    """Hash importable dependency content, excluding install-location metadata."""
+
+    return content_tree_sha256(
+        root,
+        ignored_names=_DEPENDENCY_IGNORED_NAMES,
+        ignored_root_names=_DEPENDENCY_IGNORED_ROOT_NAMES,
+    )
+
+
+def _append_content_manifest(
+    root: Path,
+    relative: Path,
+    manifest: list[dict[str, str | int]],
+    ignored_names: frozenset[str],
+    ignored_root_names: frozenset[str],
+) -> None:
+    current = root / relative
+    try:
+        entries = sorted(os.scandir(current), key=lambda item: item.name)
+    except OSError:
+        raise HarnessError(
+            "PROCESS_START_FAILED", "The Image Agent content tree cannot be inspected."
+        ) from None
+    for entry in entries:
+        ignored_at_root = not relative.parts and entry.name in ignored_root_names
+        if (
+            entry.name in ignored_names
+            or ignored_at_root
+            or ImageRuntimeBuilder._ignored(entry.name, relative)
+        ):
+            continue
+        path = Path(entry.path)
+        item_relative = relative / entry.name
+        if entry.is_symlink():
+            raise HarnessError(
+                "PROCESS_START_FAILED", "The Image Agent source contains a symbolic link."
+            )
+        if entry.is_dir(follow_symlinks=False):
+            _append_content_manifest(
+                root,
+                item_relative,
+                manifest,
+                ignored_names,
+                ignored_root_names,
+            )
+            continue
+        try:
+            item_stat = entry.stat(follow_symlinks=False)
+            if not stat.S_ISREG(item_stat.st_mode):
+                raise HarnessError(
+                    "PROCESS_START_FAILED",
+                    "The Image Agent source contains a special file.",
+                )
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+        except OSError:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The Image Agent content tree cannot be inspected.",
+            ) from None
+        manifest.append(
+            {
+                "path": item_relative.as_posix(),
+                "size_bytes": item_stat.st_size,
+                "sha256": digest.hexdigest(),
+            }
+        )
