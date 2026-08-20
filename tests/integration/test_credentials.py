@@ -203,6 +203,49 @@ class CredentialPoolTests(unittest.TestCase):
         )
         self.assertEqual(replay, reassigned)
 
+    def test_recovery_folds_a_complete_reassignment_chain(self) -> None:
+        self._create(1)
+        self.pool.reassign_instance(
+            "t_credentials",
+            "i_credential_1",
+            credential_pair_id="cred_test_02",
+            credential_pair_revision=1,
+            idempotency_key="reassign-recover-two",
+            actor=self.actor,
+        )
+        self.pool.reassign_instance(
+            "t_credentials",
+            "i_credential_1",
+            credential_pair_id="cred_test_03",
+            credential_pair_revision=1,
+            idempotency_key="reassign-recover-three",
+            actor=self.actor,
+        )
+
+        self.store.close()
+        self.store, self.commands = build_service(self.root)
+        self.pool = CredentialPoolService(self.store)
+        recovered = self.pool.recover()
+
+        self.assertEqual(len(recovered), 1)
+        resolved = self.pool.resolve_for_instance("t_credentials", "i_credential_1")
+        self.assertEqual(resolved.credential_pair_id, "cred_test_03")
+        self.assertEqual(resolved.base_url, "https://provider-3.invalid/v1")
+
+        replayed_creation = self._create(1)
+        self.assertEqual(replayed_creation["credential"]["credential_pair_id"], "cred_test_01")
+        replayed_old_reassignment = self.pool.reassign_instance(
+            "t_credentials",
+            "i_credential_1",
+            credential_pair_id="cred_test_02",
+            credential_pair_revision=1,
+            idempotency_key="reassign-recover-two",
+            actor=self.actor,
+        )
+        self.assertEqual(replayed_old_reassignment["credential_pair_id"], "cred_test_02")
+        still_final = self.pool.resolve_for_instance("t_credentials", "i_credential_1")
+        self.assertEqual(still_final.credential_pair_id, "cred_test_03")
+
     def test_old_revision_remains_resolvable_and_secrets_do_not_escape(self) -> None:
         self._create(1)
         revised = deepcopy(self.pairs)

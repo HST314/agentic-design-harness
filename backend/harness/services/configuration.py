@@ -264,7 +264,7 @@ class ConfigurationService:
                         "IDEMPOTENCY_CONFLICT",
                         "The config idempotency key was reused for a different request.",
                     )
-                return deepcopy(existing_event["snapshot"])
+                return self._effective_instance_snapshot(existing_event["snapshot"])
             raise HarnessError(
                 "INVALID_STATE_TRANSITION", "An archived instance is read-only."
             )
@@ -282,7 +282,7 @@ class ConfigurationService:
                 self._materialize_instance_config(
                     existing_event["snapshot"], self._instance(task_id, instance_id)
                 )
-                return deepcopy(existing_event["snapshot"])
+                return self._effective_instance_snapshot(existing_event["snapshot"])
             instance = self._instance(task_id, instance_id)
             if instance["status"] == "ARCHIVED":
                 raise HarnessError(
@@ -520,19 +520,11 @@ class ConfigurationService:
     def _materialize_instance_config(
         self, snapshot: dict[str, Any], instance: dict[str, Any]
     ) -> dict[str, Any]:
-        snapshot = deepcopy(snapshot)
-        applied = self._config_applied_event(
-            snapshot["task_id"],
-            snapshot["instance_id"],
-            snapshot["config_revision"],
-        )
-        if applied is not None:
-            snapshot.update(
-                {"restart_required": False, "applied_at": applied["applied_at"]}
-            )
+        snapshot = self._effective_instance_snapshot(snapshot)
         current = self._read_instance_config(snapshot["task_id"], snapshot["instance_id"])
         if current is not None and current["config_revision"] > snapshot["config_revision"]:
             return current
+
         instance_root = self.store.layout.initialize_instance(
             snapshot["task_id"], snapshot["instance_id"]
         )
@@ -573,6 +565,19 @@ class ConfigurationService:
             ),
         )
         return deepcopy(snapshot)
+
+    def _effective_instance_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        snapshot = deepcopy(snapshot)
+        applied = self._config_applied_event(
+            snapshot["task_id"],
+            snapshot["instance_id"],
+            snapshot["config_revision"],
+        )
+        if applied is not None:
+            snapshot.update(
+                {"restart_required": False, "applied_at": applied["applied_at"]}
+            )
+        return snapshot
 
     @staticmethod
     def _instance_snapshot(

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
 from urllib.request import urlopen
@@ -241,6 +242,35 @@ class ProcessSupervisorTests(unittest.TestCase):
             (instance_root / "logs" / "stdout.log").read_bytes(),
         )
         self.assertEqual(launch["state"], "RUNNING")
+
+    def test_log_summary_rejects_symlinked_log_components(self) -> None:
+        instance_root = self.store.layout.initialize_instance(
+            "t_process", "i_image_1"
+        )
+        outside = self.root / "outside-logs"
+        outside.mkdir()
+        (outside / "stdout.log").write_text("HOST_LOG_EXPOSED\n", encoding="utf-8")
+        (instance_root / "logs").rmdir()
+        (instance_root / "logs").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(HarnessError) as captured:
+            self.supervisor.log_summary("t_process", "i_image_1")
+
+        self.assertEqual(captured.exception.code, "PATH_OUTSIDE_TASK_ROOT")
+        with self.assertRaises(HarnessError) as launch:
+            self._start(1)
+        self.assertEqual(launch.exception.code, "PATH_OUTSIDE_TASK_ROOT")
+        self.assertEqual(
+            (outside / "stdout.log").read_text(encoding="utf-8"),
+            "HOST_LOG_EXPOSED\n",
+        )
+
+    def test_three_instances_start_concurrently_without_revision_conflicts(self) -> None:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            launches = list(executor.map(self._start, range(1, 4)))
+
+        self.assertEqual({item["state"] for item in launches}, {"RUNNING"})
+        self.assertEqual(len({item["port"] for item in launches}), 3)
 
     def test_harness_reconcile_keeps_same_process_and_restart_keeps_credentials(self) -> None:
         launch = self._start(1)
