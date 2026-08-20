@@ -247,6 +247,11 @@ class ImageAdapterTests(unittest.TestCase):
                 {"manual_action": "edit_and_execute", "edited_delta": "Increase contrast."},
             ),
             (
+                "review_calibration",
+                {"manual_action": "accept_current", "actor": "reviewer"},
+                {"manual_action": "accept_current", "final_approved": True},
+            ),
+            (
                 "submit_human_tune",
                 {"human_prompt": "Move the title upward."},
                 {"human_prompt": "Move the title upward."},
