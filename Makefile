@@ -6,7 +6,7 @@ IMAGE_AGENT_ROOT ?= ../image_agent_mvp
 IMAGE_AGENT_DEPS ?= .runtime/image-agent-deps
 IMAGE_AGENT_ENV_STAMP := $(IMAGE_AGENT_DEPS)/.requirements-installed
 
-.PHONY: test test-env lint compile secret-scan boundary-check check serve frontend-check image-agent-env g2-e2e
+.PHONY: test test-env lint compile secret-scan boundary-check check serve frontend-check image-agent-env g2-e2e g3-e2e
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -46,6 +46,10 @@ g2-e2e: test-env image-agent-env
 	HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT="$(abspath $(IMAGE_AGENT_DEPS))" \
 	PYTHONPATH="$(PYTHONPATH_VALUE):tests" \
 	$(PYTHON) -m unittest tests.e2e.test_g2_image_agent -v
+
+g3-e2e: test-env
+	PYTHONPATH="$(PYTHONPATH_VALUE):tests" \
+	$(PYTHON) -m unittest tests.e2e.test_g3_manual_delivery -v
 
 test-env: $(TEST_ENV_STAMP)
 

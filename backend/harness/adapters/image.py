@@ -22,6 +22,7 @@ from ..services.configuration import ConfigurationService
 from ..services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from ..storage.atomic import atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
+from ..storage.paths import normalized_relative_path
 from ..storage.store import FileStateStore
 from .base import (
     AdapterCommandResult,
@@ -30,10 +31,22 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
+from .image_delivery import stage_final_delivery
 from .image_runtime import (
     IMAGE_ENTRYPOINT,
     IMAGE_WEB_REQUIREMENTS,
     ImageRuntimeBuilder,
+)
+from .image_workflow import (
+    HARNESS_CAPABILITIES,
+    KNOWN_CAPABILITIES,
+    RUNNING_PHASES,
+    WAITING_PHASES,
+    approval_context,
+    map_advance_payload,
+)
+from .image_workflow import (
+    normalized_capabilities as normalize_workflow_capabilities,
 )
 
 SUPPORTED_IMAGE_AGENT_REVISION = "61c5b4f1b66d5d85f62b39b5b338ac2304e94d26"
@@ -57,80 +70,13 @@ _JOB_STATES = frozenset(
 )
 _ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
 _FAILED_JOB_STATES = frozenset({"failed", "cancelled", "interrupted"})
-_WAITING_PHASES = frozenset(
-    {
-        "waiting_category_approval",
-        "waiting_clarification",
-        "waiting_clarification_review",
-        "waiting_human_approval",
-        "waiting_human_tune",
-        "waiting_master_selection",
-        "waiting_skill_approval",
-        "waiting_taskbook_revision",
-        "terminated_without_delivery",
-    }
-)
-_RUNNING_PHASES = frozenset(
-    {
-        "additional_rounds_approved",
-        "calibration_completed",
-        "candidate_generation_completed",
-        "category_approved",
-        "completed",
-        "master_selected",
-        "offline_rehearsal_completed",
-        "ready_for_category_match",
-        "ready_for_clarification",
-        "ready_for_final_approval",
-        "ready_for_quality_inspection",
-        "ready_for_style_direction",
-        "ready_for_taskbook",
-        "ready_to_draft",
-        "round_checkpointed",
-        "skill_approved_pending_render",
-        "task_approved",
-    }
-)
-_KNOWN_CAPABILITIES = frozenset(
-    {
-        "abandon",
-        "adjust_clarification_budget",
-        "answer_clarification",
-        "answer_taskbook_revision",
-        "apply_clarification_safe_defaults",
-        "apply_taskbook_scope_boundaries",
-        "approve_category_constraint",
-        "approve_skill_invocations",
-        "branch",
-        "build_taskbook",
-        "choose_master",
-        "continue_clarification_after_budget_change",
-        "edit_rework",
-        "edit_taskbook",
-        "enter_human_tune",
-        "inspect",
-        "open_final_approval",
-        "prepare_style_direction",
-        "regenerate_taskbook",
-        "render_candidates",
-        "resume_quality_inspection",
-        "retry",
-        "retry_category_constraint",
-        "retry_skill_invocations",
-        "review_calibration",
-        "select_master",
-        "start_category_match",
-        "start_clarification",
-        "start_quality_inspection",
-        "submit_human_tune",
-    }
-)
 _REQUIRED_ROUTES = frozenset(
     {
         "/api/health",
         "/api/jobs/{job_id}",
         "/api/projects",
         "/api/projects/{project_id}",
+        "/api/projects/{project_id}/delivery/finalize",
         "/api/projects/{project_id}/jobs",
         "/api/projects/{project_id}/timeline",
     }
@@ -140,6 +86,7 @@ _REQUIRED_ROUTE_METHODS = {
     "/api/jobs/{job_id}": "get",
     "/api/projects": "post",
     "/api/projects/{project_id}": "get",
+    "/api/projects/{project_id}/delivery/finalize": "post",
     "/api/projects/{project_id}/jobs": "post",
     "/api/projects/{project_id}/timeline": "get",
 }
@@ -199,6 +146,13 @@ class ImageAgentAdapter:
             errors.append("Image category_id and category_version must be supplied together.")
         if not card.get("input_assets"):
             errors.append("Image Agent requires at least one verified source asset.")
+        required_images = [
+            item
+            for item in card.get("expected_deliveries", [])
+            if item.get("required") and item.get("kind") == "image"
+        ]
+        if len(required_images) != 1:
+            errors.append("Image Agent requires exactly one required final image delivery.")
         return ValidationResult(valid=not errors, errors=tuple(errors))
 
     def prepare(self, request: PrepareRequest) -> ProcessSpec:
@@ -437,12 +391,34 @@ class ImageAgentAdapter:
         payload: dict[str, Any],
         operation_id: str,
     ) -> AdapterCommandResult:
-        if action not in _KNOWN_CAPABILITIES:
+        if action not in HARNESS_CAPABILITIES:
             raise HarnessError("VALIDATION_ERROR", "Unknown Image Agent capability.")
-        raise HarnessError(
-            "ADAPTER_UNAVAILABLE",
-            "Image approval advancement is scheduled for the G3 gate.",
-            {"instance_id": instance_id, "capability": action},
+        task_id = self._task_id_for_instance(instance_id)
+        observation = self.get_status(instance_id)
+        if observation.status != "WAITING_APPROVAL" or action not in observation.capabilities:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "The Image action is not available at the current workflow step.",
+                {"instance_id": instance_id, "capability": action},
+            )
+        request_payload = map_advance_payload(action, payload)
+        request_payload["idempotency_key"] = operation_id
+        base_url = self._base_url(task_id, instance_id)
+        job = self._request(
+            base_url,
+            "POST",
+            f"/api/projects/{instance_id}/jobs",
+            request_payload,
+            expected_statuses=(200, 202),
+        )
+        self._require_job(job)
+        state = self._state(task_id, instance_id)
+        state.update({"operation_id": operation_id, "job_id": job["job_id"]})
+        self._write_state(task_id, instance_id, state)
+        return AdapterCommandResult(
+            accepted=True,
+            operation_id=operation_id,
+            details={"job_id": job["job_id"], "job_status": job["status"]},
         )
 
     def apply_config(
@@ -459,7 +435,83 @@ class ImageAgentAdapter:
         )
 
     def collect_deliveries(self, instance_id: str) -> list[dict[str, Any]]:
-        return []
+        task_id = self._task_id_for_instance(instance_id)
+        base_url = self._base_url(task_id, instance_id)
+        view = self._request(base_url, "GET", f"/api/projects/{instance_id}")
+        snapshot = None if view is None else view.get("snapshot")
+        if not isinstance(snapshot, dict) or snapshot.get("completed") is not True:
+            return []
+        envelope = snapshot.get("delivery_envelope")
+        if not isinstance(envelope, dict):
+            self._protocol_error("Image Agent completed without a delivery envelope.")
+        final_image = envelope.get("final_image")
+        if (
+            not isinstance(final_image, dict)
+            or not isinstance(final_image.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", final_image["sha256"]) is None
+        ):
+            self._protocol_error("Image Agent returned an invalid delivery envelope.")
+        marker = self._request(
+            base_url,
+            "POST",
+            f"/api/projects/{instance_id}/delivery/finalize",
+        )
+        files = None if marker is None else marker.get("files")
+        if (
+            not isinstance(marker, dict)
+            or marker.get("finalized") is not True
+            or marker.get("asset_sha256") != final_image["sha256"]
+            or not isinstance(files, dict)
+            or not isinstance(files.get("image"), str)
+        ):
+            self._protocol_error("Image Agent returned an invalid finalized delivery marker.")
+        relative = normalized_relative_path(files["image"])
+        if len(relative.parts) != 2 or relative.parts[0] != "delivery":
+            self._protocol_error("Image Agent delivery path escaped its delivery directory.")
+        instance_root = self.store.layout.initialize_instance(task_id, instance_id)
+        project_root = instance_root / "work" / instance_id
+        output_name = relative.name
+        output = instance_root / "outputs" / output_name
+        stage_final_delivery(
+            project_root,
+            relative,
+            output,
+            expected_sha256=final_image["sha256"],
+        )
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            raise HarnessError("VALIDATION_ERROR", "The Image instance has no task plan.")
+        card = next(
+            (item for item in plan["task_cards"] if item["instance_id"] == instance_id),
+            None,
+        )
+        if card is None:
+            raise HarnessError("VALIDATION_ERROR", "The Image instance has no task card.")
+        expected = [
+            item
+            for item in card["expected_deliveries"]
+            if item["required"] and item["kind"] == "image"
+        ]
+        if len(expected) != 1:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "The Image delivery cannot be mapped to one required final image role.",
+            )
+        note = envelope.get("design_note")
+        description = "Image Agent verified final artwork."
+        if isinstance(note, dict) and isinstance(note.get("task_fit"), str):
+            description = note["task_fit"][:4000] or description
+        return [
+            {
+                "source_relative_path": (
+                    f"instances/{instance_id}/outputs/{output_name}"
+                ),
+                "kind": "image",
+                "role": expected[0]["role"],
+                "description": description,
+                "sha256": final_image["sha256"],
+            }
+        ]
 
     def collect_usage(self, instance_id: str, cursor: str | None) -> list[dict[str, Any]]:
         return []
@@ -504,7 +556,7 @@ class ImageAgentAdapter:
                 details, "Image project manifest is malformed."
             )
         if any(
-            not isinstance(item, str) or item not in _KNOWN_CAPABILITIES
+            not isinstance(item, str) or item not in KNOWN_CAPABILITIES
             for item in capabilities
         ) or len(capabilities) != len(set(capabilities)):
             return self._compatibility_failure(
@@ -520,7 +572,7 @@ class ImageAgentAdapter:
         phase = snapshot.get("phase")
         if snapshot and (
             not isinstance(phase, str)
-            or phase not in _WAITING_PHASES | _RUNNING_PHASES
+            or phase not in WAITING_PHASES | RUNNING_PHASES
         ):
             return self._compatibility_failure(
                 details, "Image Agent returned an unknown phase."
@@ -530,7 +582,27 @@ class ImageAgentAdapter:
                 details, "An empty Image snapshot published capabilities."
             )
         if snapshot:
-            details.update({"phase": phase, "completed": snapshot.get("completed", False)})
+            state_name = snapshot.get("state")
+            if state_name is not None and not isinstance(state_name, str):
+                return self._compatibility_failure(
+                    details, "Image Agent returned a malformed workflow state."
+                )
+            normalized_capabilities = normalize_workflow_capabilities(
+                snapshot, capabilities
+            )
+            normalized_capabilities = tuple(
+                item for item in normalized_capabilities if item in HARNESS_CAPABILITIES
+            )
+            details.update(
+                {
+                    "phase": phase,
+                    "state": state_name,
+                    "completed": snapshot.get("completed", False),
+                    "approval_context": approval_context(snapshot),
+                }
+            )
+        else:
+            normalized_capabilities = tuple(capabilities)
         if job_status == "succeeded" and not snapshot:
             return self._compatibility_failure(
                 details,
@@ -546,8 +618,15 @@ class ImageAgentAdapter:
             return AdapterObservation(status="FAILED", details=details)
         if not snapshot:
             return AdapterObservation(status="RUNNING", details=details)
-        if phase in _WAITING_PHASES:
-            if snapshot.get("waiting") is not True or not capabilities:
+        if snapshot.get("completed") is True:
+            return AdapterObservation(
+                status="RUNNING",
+                step_id=phase,
+                capabilities=(),
+                details=details,
+            )
+        if phase in WAITING_PHASES:
+            if snapshot.get("waiting") is not True or not normalized_capabilities:
                 return self._compatibility_failure(
                     details,
                     "A waiting Image phase did not publish its waiting flag and capability.",
@@ -555,17 +634,28 @@ class ImageAgentAdapter:
             return AdapterObservation(
                 status="WAITING_APPROVAL",
                 step_id=phase,
-                capabilities=tuple(capabilities),
+                capabilities=normalized_capabilities,
                 details=details,
             )
         if snapshot.get("waiting") is True:
             return self._compatibility_failure(
                 details, "A running Image phase unexpectedly published a waiting flag."
             )
+        if phase in {"candidate_generation_completed", "calibration_completed"}:
+            if not normalized_capabilities:
+                return self._compatibility_failure(
+                    details, "An Image decision phase did not publish a legal action."
+                )
+            return AdapterObservation(
+                status="WAITING_APPROVAL",
+                step_id=phase,
+                capabilities=normalized_capabilities,
+                details=details,
+            )
         return AdapterObservation(
             status="RUNNING",
             step_id=phase,
-            capabilities=tuple(capabilities),
+            capabilities=normalized_capabilities,
             details=details,
         )
 

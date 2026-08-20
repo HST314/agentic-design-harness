@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 from harness.adapters import PrepareRequest
 from harness.adapters.image import ImageAgentAdapter
+from harness.adapters.image_delivery import stage_final_delivery
+from harness.adapters.image_workflow import map_advance_payload
 from harness.core.errors import HarnessError
 from harness.services.assets import AssetService
 from harness.services.configuration import ConfigurationService
@@ -224,6 +226,94 @@ class ImageAdapterTests(unittest.TestCase):
         ):
             self.adapter._check_compatibility("http://127.0.0.1:1")
         self.assertEqual(rejected.exception.code, "VALIDATION_ERROR")
+
+    def test_harness_actions_map_to_strict_image_advance_requests(self) -> None:
+        cases = (
+            ("approve_taskbook", {"actor": "reviewer"}, {"task_approved": True}),
+            ("approve_final", {"actor": "reviewer"}, {"final_approved": True}),
+            (
+                "select_master",
+                {"selected_id": "candidate_one", "actor": "reviewer"},
+                {"selected_id": "candidate_one"},
+            ),
+            (
+                "answer_clarification",
+                {"clarification_answers": {"q_one": "blue"}},
+                {"clarification_answers": {"q_one": "blue"}},
+            ),
+            (
+                "review_calibration",
+                {"manual_action": "edit_and_execute", "edited_delta": "Increase contrast."},
+                {"manual_action": "edit_and_execute", "edited_delta": "Increase contrast."},
+            ),
+            (
+                "submit_human_tune",
+                {"human_prompt": "Move the title upward."},
+                {"human_prompt": "Move the title upward."},
+            ),
+        )
+        for action, payload, expected in cases:
+            with self.subTest(action=action):
+                mapped = map_advance_payload(action, payload)
+                for key, value in expected.items():
+                    self.assertEqual(mapped[key], value)
+
+        with self.assertRaises(HarnessError) as unsupported:
+            map_advance_payload("branch", {"actor": "reviewer"})
+        self.assertEqual(unsupported.exception.code, "ADAPTER_UNAVAILABLE")
+        with self.assertRaises(HarnessError) as extra:
+            map_advance_payload(
+                "approve_final", {"actor": "reviewer", "selected_id": "unexpected"}
+            )
+        self.assertEqual(extra.exception.code, "VALIDATION_ERROR")
+
+    def test_waiting_projection_exposes_only_actions_supported_by_advance_request(self) -> None:
+        observation = self.adapter._observation(
+            {
+                "manifest": {"failed_step": None},
+                "snapshot": {
+                    "phase": "waiting_human_approval",
+                    "state": "self_check_iteration",
+                    "waiting": True,
+                },
+                "capabilities": ["review_calibration", "enter_human_tune"],
+            },
+            None,
+            8,
+            None,
+        )
+        self.assertEqual(observation.status, "WAITING_APPROVAL")
+        self.assertEqual(observation.capabilities, ("review_calibration",))
+
+    def test_final_delivery_staging_rejects_symlink_and_digest_mismatch(self) -> None:
+        project = self.root / "project"
+        delivery = project / "delivery"
+        delivery.mkdir(parents=True)
+        source = delivery / "final.png"
+        content = b"\x89PNG\r\n\x1a\nfinal"
+        source.write_bytes(content)
+        destination = self.root / "outputs" / "final.png"
+
+        with self.assertRaises(HarnessError) as digest_mismatch:
+            stage_final_delivery(
+                project,
+                Path("delivery/final.png"),
+                destination,
+                expected_sha256="0" * 64,
+            )
+        self.assertEqual(digest_mismatch.exception.code, "ASSET_CORRUPTED")
+        self.assertFalse(destination.exists())
+
+        source.unlink()
+        source.symlink_to(self.root / "outside.png")
+        with self.assertRaises(HarnessError) as symlink:
+            stage_final_delivery(
+                project,
+                Path("delivery/final.png"),
+                destination,
+                expected_sha256="0" * 64,
+            )
+        self.assertEqual(symlink.exception.code, "ASSET_VALIDATION_FAILED")
 
     @staticmethod
     def _card(input_assets: list[dict[str, str]]) -> dict:

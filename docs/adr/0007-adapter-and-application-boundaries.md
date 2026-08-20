@@ -22,3 +22,10 @@ durable intent before side effects, validates before allocation, serializes oper
 task, derives stable child idempotency identities and can finish after a crash. It also owns
 confirm/start, cancel/archive and publish/complete ordering so API and Master consumers cannot
 recreate unsafe call sequences.
+
+G3 extends that same application boundary with a durable `RESOLVE_APPROVAL` intent. The
+approval owner and capabilities are frozen at creation; external advance acceptance is saved
+before the control-plane transition and is not repeated during recovery. Inbox read/handled
+state is reduced independently from approval status. Completed Image observations are kept
+`RUNNING` until Adapter delivery discovery and Asset Service publication satisfy every required
+delivery declared by the instance task card.

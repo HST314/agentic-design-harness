@@ -1,4 +1,4 @@
-"""G2 versioned HTTP use cases for tasks and one runnable Image instance."""
+"""Versioned HTTP use cases through the G3 approval and delivery loop."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import Response, StreamingResponse
 
 from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
@@ -41,6 +43,32 @@ class SavePlanRequest(StrictRequest):
 
 
 class StartTaskRequest(StrictRequest):
+    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
+class ResolveApprovalRequest(StrictRequest):
+    decision: Literal["APPROVED", "REJECTED"]
+    action: str | None = Field(default=None, min_length=1, max_length=128)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
+class InboxStatusRequest(StrictRequest):
+    status: Literal["READ", "HANDLED"]
+    envelope: CommandEnvelope
+
+
+class ApprovalModeRequest(StrictRequest):
+    approval_mode: Literal["human", "master"]
+    envelope: CommandEnvelope
+
+
+class PublishDeliveryRequest(StrictRequest):
+    source_relative_path: str = Field(min_length=1, max_length=1024)
+    role: str = Field(min_length=1, max_length=128)
+    description: str = Field(default="", max_length=4000)
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     envelope: CommandEnvelope
 
@@ -123,9 +151,43 @@ def build_v1_router(container: Container) -> APIRouter:
                 result = container.application.observe_instance(task_id, instance_id)
             else:
                 result = {"instance": instance, "observation": None, "transition": None}
-            return {"schema_version": "1.0", "task_id": task_id, **result}
+            pending = container.approvals.list_approvals(
+                instance_id=instance_id, status="PENDING"
+            )
+            return {
+                "schema_version": "1.0",
+                "task_id": task_id,
+                "task_revision": container.store.task.revision(task_id, task_id),
+                "pending_approval": pending[0] if pending else None,
+                **result,
+            }
 
         return await run_in_threadpool(read_instance)
+
+    @router.get("/instances/{instance_id}/approvals", tags=["approvals"])
+    async def list_instance_approvals(instance_id: str) -> dict[str, Any]:
+        def read_approvals() -> dict[str, Any]:
+            task_id = _task_for_instance(container, instance_id)
+            return {
+                "schema_version": "1.0",
+                "task_id": task_id,
+                "items": container.approvals.list_approvals(instance_id=instance_id),
+            }
+
+        return await run_in_threadpool(read_approvals)
+
+    @router.put("/instances/{instance_id}/approval-mode", tags=["approvals"])
+    async def update_approval_mode(
+        instance_id: str, body: ApprovalModeRequest
+    ) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        return await run_in_threadpool(
+            container.commands.set_approval_mode,
+            task_id,
+            instance_id,
+            body.approval_mode,
+            body.envelope,
+        )
 
     @router.get("/instances/{instance_id}/ui-link", tags=["instances"])
     async def get_instance_ui_link(instance_id: str) -> dict[str, Any]:
@@ -146,6 +208,108 @@ def build_v1_router(container: Container) -> APIRouter:
     @router.get("/adapters", tags=["instances"])
     async def list_adapters() -> dict[str, Any]:
         return {"schema_version": "1.0", "items": container.adapters.describe()}
+
+    @router.get("/approvals/{approval_id}", tags=["approvals"])
+    async def get_approval(approval_id: str) -> dict[str, Any]:
+        result = await run_in_threadpool(container.approvals.get_approval, approval_id)
+        return {"schema_version": "1.0", **result}
+
+    @router.post("/approvals/{approval_id}/resolve", tags=["approvals"])
+    async def resolve_approval(
+        approval_id: str, body: ResolveApprovalRequest
+    ) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.application.resolve_approval,
+            approval_id,
+            decision=body.decision,
+            action=body.action,
+            payload=body.payload,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
+
+    @router.get("/inbox", tags=["inbox"])
+    async def list_inbox(
+        owner: Literal["human", "master"] = Query(default="human"),
+        status: Literal["UNREAD", "READ", "HANDLED"] | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> dict[str, Any]:
+        items = await run_in_threadpool(
+            container.approvals.list_inbox,
+            owner=owner,
+            status=status,
+            limit=limit,
+        )
+        return {"schema_version": "1.0", "items": items}
+
+    @router.post("/inbox/{inbox_id}/status", tags=["inbox"])
+    async def update_inbox_status(
+        inbox_id: str, body: InboxStatusRequest
+    ) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.approvals.update_inbox_status,
+            inbox_id,
+            body.status,
+            body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
+
+    @router.get("/tasks/{task_id}/files", tags=["assets"])
+    async def list_task_files(
+        task_id: str,
+        group: Literal["inputs", "shared", "instances", "all"] = Query(default="all"),
+    ) -> dict[str, Any]:
+        files = await run_in_threadpool(container.assets.list_files, task_id, group)
+        assets = await run_in_threadpool(container.assets.list_assets, task_id)
+        return {"schema_version": "1.0", "items": files, "assets": assets}
+
+    @router.get("/tasks/{task_id}/files/preview", tags=["assets"])
+    async def preview_task_file(task_id: str, path: str = Query(min_length=1)) -> Response:
+        preview = await run_in_threadpool(container.assets.preview, task_id, path)
+        content = preview["content"]
+        return Response(
+            content=content.encode("utf-8") if isinstance(content, str) else content,
+            media_type=preview["mime_type"],
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+            },
+        )
+
+    @router.get("/tasks/{task_id}/files/download", tags=["assets"])
+    async def download_task_file(
+        task_id: str, path: str = Query(min_length=1)
+    ) -> StreamingResponse:
+        download = await run_in_threadpool(container.assets.download, task_id, path)
+        headers = {
+            **download["headers"],
+            "Content-Length": str(download["size_bytes"]),
+            "X-Content-SHA256": download["sha256"],
+        }
+        return StreamingResponse(
+            download["stream"],
+            media_type=download["mime_type"],
+            headers=headers,
+            background=BackgroundTask(download["stream"].close),
+        )
+
+    @router.post("/instances/{instance_id}/deliveries", tags=["assets"])
+    async def publish_instance_delivery(
+        instance_id: str, body: PublishDeliveryRequest
+    ) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        result = await run_in_threadpool(
+            container.application.publish_delivery_and_complete,
+            task_id,
+            instance_id,
+            source_relative_path=body.source_relative_path,
+            role=body.role,
+            description=body.description,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
 
     return router
 

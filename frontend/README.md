@@ -1,7 +1,8 @@
 # Harness web shell
 
-TypeScript/Vite control-plane shell for task navigation, inbox and settings.
-Professional Agent workflow pages remain adapter-provided deep links.
+TypeScript/Vite control-plane shell for task navigation, FIFO approval inbox,
+approval routing and verified resource browsing. Professional Agent workflow
+pages remain adapter-provided deep links.
 
 ```bash
 npm ci
@@ -10,4 +11,5 @@ npm run build
 ```
 
 Browser tests live in `e2e/` and run against the Vite preview server with
-`npm run test:e2e` after the Playwright Chromium runtime is installed.
+`npm run test:e2e` after the Playwright Chromium runtime is installed. A CI or
+sandbox may set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to a compatible executable.
