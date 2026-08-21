@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -120,6 +121,7 @@ def build_container(settings: HarnessSettings) -> Container:
         credentials,
         supervisor,
         adapters,
+        configuration,
     )
     return Container(
         settings=settings,
@@ -219,7 +221,22 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Agentic Design Harness API",
+        description=(
+            "Versioned Phase 1 control-plane API. Mutations require a command envelope "
+            "with actor, idempotency key and expected revision; Agent secrets are never returned."
+        ),
         version=__version__,
+        openapi_tags=[
+            {"name": "tasks", "description": "Main-task planning and lifecycle."},
+            {"name": "instances", "description": "Isolated Agent process lifecycle."},
+            {"name": "assets", "description": "Controlled import, preview and delivery."},
+            {"name": "approvals", "description": "Frozen-owner workflow decisions."},
+            {"name": "inbox", "description": "FIFO notifications and handling state."},
+            {"name": "usage", "description": "Token, cost and retry-budget accounting."},
+            {"name": "configuration", "description": "Redacted configuration boundaries."},
+            {"name": "audit", "description": "Read-only public audit projection."},
+        ],
+        servers=[{"url": "http://127.0.0.1:18080", "description": "Local control plane"}],
         lifespan=lifespan,
     )
     app.state.container = container
@@ -249,6 +266,31 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
             {"error_count": len(exc.errors())},
         )
         return await handle_harness_error(_, error)
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+        trace_id = f"trace_{uuid.uuid4().hex}"
+        logger.exception(
+            "unhandled_request_error",
+            extra={"fields": {"trace_id": trace_id, "error_type": type(exc).__name__}},
+        )
+        return await handle_harness_error(
+            _,
+            HarnessError(
+                "INTERNAL_ERROR",
+                "The control plane could not complete the request.",
+                trace_id=trace_id,
+            ),
+        )
+
+    @app.middleware("http")
+    async def add_control_plane_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        if request.url.path.startswith("/api/"):
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
 
     @app.get("/healthz", tags=["foundation"])
     async def health() -> dict[str, str]:

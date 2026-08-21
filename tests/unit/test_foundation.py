@@ -6,10 +6,12 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 from harness.core.config import HarnessSettings, load_settings
 from harness.core.logging import JsonFormatter, redact
+from harness.runtime import validate_runtime_platform
 from harness.storage.atomic import atomic_write_json, atomic_write_yaml
 
 
@@ -59,3 +61,10 @@ class FoundationTests(unittest.TestCase):
     def test_settings_reject_invalid_log_level(self) -> None:
         with self.assertRaises(ValueError):
             HarnessSettings(log_level="verbose")
+
+    def test_runtime_preflight_accepts_linux_and_fails_closed_elsewhere(self) -> None:
+        validate_runtime_platform()
+        with patch("harness.runtime.sys.platform", "darwin"), self.assertRaisesRegex(
+            RuntimeError, "Linux /proc semantics"
+        ):
+            validate_runtime_platform()

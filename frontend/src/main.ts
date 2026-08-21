@@ -2,15 +2,25 @@ import "./styles.css";
 import {
   ApiClient,
   type AgentInstance,
+  type Approval,
   type ApprovalDetailResponse,
   type AssetManifest,
+  type AuditEvent,
   type InboxItem,
   type InstanceDetailResponse,
   type RetryBudget,
   type TaskFile,
+  type TaskDetailResponse,
   type UsageSummary,
 } from "./api/client";
-import { currentRoute, navigate, routePath, type Route, type RouteName } from "./router";
+import {
+  currentRoute,
+  navigate,
+  routePath,
+  type Route,
+  type RouteName,
+  type TaskSection,
+} from "./router";
 
 function requireAppRoot(): HTMLDivElement {
   const element = document.querySelector<HTMLDivElement>("#app");
@@ -42,6 +52,11 @@ const pageCopy: Record<
     eyebrow: "任务编排",
     title: "任务详情",
     description: "查看阶段进度和当前任务下的专业 Agent 实例。",
+  },
+  taskSection: {
+    eyebrow: "任务视图",
+    title: "任务详情",
+    description: "按资源、审批、Token 与审计事件查看可追溯证据。",
   },
   instance: {
     eyebrow: "运行实例",
@@ -100,7 +115,9 @@ function render(): void {
   window.clearTimeout(pollTimer);
   const route = currentRoute();
   const copy = pageCopy[route.name];
-  const selectedNavigation = route.name === "task" || route.name === "instance" ? "tasks" : route.name;
+  const selectedNavigation = ["task", "taskSection", "instance"].includes(route.name)
+    ? "tasks"
+    : route.name;
   root.innerHTML = `
     <a class="skip-link" href="#main-content">跳到主要内容</a>
     <div class="shell">
@@ -144,7 +161,9 @@ async function renderRoute(route: Route, version: number): Promise<void> {
   try {
     if (route.name === "tasks") await renderTasks(version);
     else if (route.name === "task") await renderTask(route.taskId, version);
-    else if (route.name === "instance") await renderInstance(route.instanceId, version);
+    else if (route.name === "taskSection") {
+      await renderTaskSection(route.taskId, route.section, version);
+    } else if (route.name === "instance") await renderInstance(route.instanceId, version);
     else if (route.name === "inbox") await renderInbox(version);
     else await renderSettings(version);
   } catch (error) {
@@ -158,13 +177,16 @@ async function renderTasks(version: number): Promise<void> {
   if (version !== renderVersion) return;
   const content = pageContent();
   content.innerHTML = response.items.length
-    ? `<div class="page-heading"><div><p class="eyebrow">任务面板</p><h2>当前主任务</h2><p>选择任务查看阶段和实例；运行状态来自持久化控制面。</p></div><span class="count-pill">${response.items.length} 项</span></div>
+    ? `<div class="page-heading"><div><p class="eyebrow">任务面板</p><h2>当前主任务</h2><p>目标、阶段、实例、Token 与最新通知均来自持久化控制面。</p></div><span class="count-pill">${response.items.length} 项</span></div>
        <div class="task-grid">${response.items
          .map(
            (task) => `<article class="task-card">
              <div class="card-topline">${statusBadge(task.status)}<time datetime="${escapeHtml(task.updated_at)}">${formatDate(task.updated_at)}</time></div>
              <h3>${escapeHtml(task.title)}</h3>
-             <p class="identifier">${escapeHtml(task.task_id)}</p>
+             <p>${escapeHtml(task.goal ?? "尚未提供任务目标。")}</p>
+             <dl class="task-card__metrics">${detailItem("启动", task.start_policy === "auto" ? "自动" : "人工确认")}${detailItem("阶段 / 实例", `${task.stage_count ?? 0} / ${task.instance_count ?? 0}`)}${detailItem("Token", task.usage_completeness === "NOT_REPORTED" ? "未上报" : formatNumber(task.total_tokens ?? 0))}</dl>
+             ${task.has_unavailable_ppt ? '<div class="capability-inline"><span class="status-dot status-dot--muted" aria-hidden="true"></span>PPT 未接入</div>' : ""}
+             ${task.latest_notification ? `<p class="task-card__notice"><strong>${escapeHtml(task.latest_notification.title)}</strong><span>${escapeHtml(task.latest_notification.message)}</span></p>` : ""}
              <a class="card-link" href="${routePath({ name: "task", taskId: task.task_id })}" data-task="${escapeHtml(task.task_id)}">查看任务<span>${icon("arrow")}</span></a>
            </article>`,
          )
@@ -174,29 +196,30 @@ async function renderTasks(version: number): Promise<void> {
 }
 
 async function renderTask(taskId: string, version: number): Promise<void> {
-  const [response, resources, usage, retryBudget] = await Promise.all([
+  const [response, decisions] = await Promise.all([
     api.task(taskId),
-    api.taskFiles(taskId),
-    api.taskUsage(taskId),
-    api.retryBudget(taskId),
+    api.taskEvents(taskId, "master"),
   ]);
   if (version !== renderVersion) return;
   const plan = response.plan;
-  pageContent().innerHTML = `
-    ${breadcrumb([{ label: "主任务", route: { name: "tasks" } }, { label: response.task.title }])}
-    <div class="detail-hero">
-      <div><div class="hero-status">${statusBadge(response.task.status)}<span class="identifier">${escapeHtml(response.task.task_id)}</span></div><h2>${escapeHtml(response.task.title)}</h2><p>${escapeHtml(response.task.goal)}</p></div>
-      <dl class="hero-meta"><div><dt>启动策略</dt><dd>${response.task.start_policy === "manual" ? "人工确认" : "自动启动"}</dd></div><div><dt>任务修订</dt><dd>r${response.task_revision}</dd></div><div><dt>Master</dt><dd>${escapeHtml(response.task.master_owner)}</dd></div></dl>
-    </div>
+  const body = `
+    <section class="task-actions" aria-label="任务操作">
+      <div><p class="eyebrow">任务控制</p><h2>计划与运行边界</h2><p>所有命令都携带当前修订与幂等键；冲突时不会覆盖新状态。</p></div>
+      <div class="hero-actions">
+        ${response.task.status === "AWAITING_START_CONFIRMATION" ? '<button class="button button--primary" type="button" data-task-action="confirm">确认并启动</button>' : ""}
+        ${!["SUCCEEDED", "PARTIAL", "CANCELLED"].includes(response.task.status) ? '<button class="button button--danger" type="button" data-task-action="cancel">取消任务</button>' : ""}
+      </div><p class="form-feedback" role="status" aria-live="polite"></p>
+    </section>
     <div class="section-heading"><div><p class="eyebrow">执行计划</p><h2>阶段与实例</h2></div></div>
     ${
       plan
-        ? `<div class="stage-list">${plan.stages
+        ? `<div class="stage-list">${[...plan.stages]
             .sort((left, right) => left.position - right.position)
             .map(
               (stage) => `<section class="stage-card">
                 <div class="stage-index" aria-hidden="true">${stage.position}</div>
-                <div class="stage-body"><div class="stage-title"><div><p class="eyebrow">${escapeHtml(stage.type)} 阶段</p><h3>${escapeHtml(stage.stage_id)}</h3></div>${statusBadge(stage.status)}</div>
+                <div class="stage-body"><div class="stage-title"><div><p class="eyebrow">${escapeHtml(stage.type)} 阶段</p><h3>${escapeHtml(stage.stage_id)}</h3><small>${stage.depends_on?.length ? `依赖 ${stage.depends_on.map(escapeHtml).join("、")}` : "无前置依赖"}</small></div>${statusBadge(stage.status)}</div>
+                ${stage.type === "ppt" ? '<div class="alert alert--warning"><strong>PPT Agent 尚未接入</strong><span>必需节点在激活后会保持能力不可用，不会伪装成成功。</span></div>' : ""}
                 <div class="instance-list">${stage.instance_ids
                   .map((id) => instanceRow(plan.instances.find((item) => item.instance_id === id), id))
                   .join("")}</div></div>
@@ -205,9 +228,113 @@ async function renderTask(taskId: string, version: number): Promise<void> {
             .join("")}</div>`
         : emptyState("layers", "尚未保存执行计划", "保存计划并创建实例后，可在此查看纵向执行链。", false)
     }
-    ${renderUsagePanel(usage, retryBudget.budget)}
-    ${renderResources(taskId, resources.items, resources.assets)}`;
+    ${renderDecisionTimeline(decisions.items)}
+    ${renderNotificationSummary(response.recent_notifications ?? [])}`;
+  pageContent().innerHTML = renderTaskShell(response, "overview", body);
+  wireTaskActions(response);
   wireNavigation();
+}
+
+async function renderTaskSection(
+  taskId: string,
+  section: TaskSection,
+  version: number,
+): Promise<void> {
+  const response = await api.task(taskId);
+  let body = "";
+  if (section === "resources") {
+    const resources = await api.taskFiles(taskId);
+    body = renderResources(taskId, resources.items, resources.assets);
+  } else if (section === "approvals") {
+    const approvals = await api.taskApprovals(taskId);
+    body = renderTaskApprovals(approvals.items);
+  } else if (section === "usage") {
+    const [usage, retryBudget] = await Promise.all([
+      api.taskUsage(taskId),
+      api.retryBudget(taskId),
+    ]);
+    body = renderUsagePanel(usage, retryBudget.budget);
+  } else {
+    const events = await api.taskEvents(taskId);
+    body = renderAuditEvents(events.items);
+  }
+  if (version !== renderVersion) return;
+  pageContent().innerHTML = renderTaskShell(response, section, body);
+  wireNavigation();
+  wireResourcePreviews(taskId);
+}
+
+function renderTaskShell(
+  response: TaskDetailResponse,
+  active: "overview" | TaskSection,
+  body: string,
+): string {
+  return `${breadcrumb([{ label: "主任务", route: { name: "tasks" } }, { label: response.task.title }])}
+    <div class="detail-hero">
+      <div><div class="hero-status">${statusBadge(response.task.status)}<span class="identifier">${escapeHtml(response.task.task_id)}</span></div><h2>${escapeHtml(response.task.title)}</h2><p>${escapeHtml(response.task.goal)}</p></div>
+      <dl class="hero-meta"><div><dt>启动策略</dt><dd>${response.task.start_policy === "manual" ? "人工确认" : "自动启动"}</dd></div><div><dt>任务修订</dt><dd>r${response.task_revision}</dd></div><div><dt>Master</dt><dd>${escapeHtml(response.task.master_owner)}</dd></div></dl>
+    </div>${taskTabs(response.task.task_id, active)}${body}`;
+}
+
+function taskTabs(taskId: string, active: "overview" | TaskSection): string {
+  const tabs: Array<{ key: "overview" | TaskSection; label: string }> = [
+    { key: "overview", label: "概览" },
+    { key: "resources", label: "资源" },
+    { key: "approvals", label: "审批" },
+    { key: "usage", label: "Token" },
+    { key: "events", label: "事件" },
+  ];
+  return `<nav class="task-tabs" aria-label="任务详情页签">${tabs.map((tab) => {
+    const route: Route = tab.key === "overview"
+      ? { name: "task", taskId }
+      : { name: "taskSection", taskId, section: tab.key };
+    return `<a href="${routePath(route)}" data-task-section="${tab.key}" data-task-id="${escapeHtml(taskId)}" ${tab.key === active ? 'aria-current="page"' : ""}>${tab.label}</a>`;
+  }).join("")}</nav>`;
+}
+
+function renderDecisionTimeline(events: AuditEvent[]): string {
+  return `<section class="timeline-section" aria-labelledby="decisions-title"><div class="section-heading"><div><p class="eyebrow">Master 决策</p><h2 id="decisions-title">最近编排记录</h2><p>这里只展示已提交的 Master 命令，不把读取轮询记作决策。</p></div></div>${events.length ? `<ol class="timeline-list">${events.slice(0, 5).map((event) => `<li><span class="timeline-dot" aria-hidden="true"></span><div><strong>${escapeHtml(commandLabel(event.command))}</strong><p>${escapeHtml(event.actor.actor_id)} · ${escapeHtml(event.object_type)} r${event.revision}</p><time datetime="${escapeHtml(event.occurred_at)}">${formatDate(event.occurred_at)}</time></div></li>`).join("")}</ol>` : '<p class="resource-empty">尚无 Master 决策记录。</p>'}</section>`;
+}
+
+function renderNotificationSummary(items: InboxItem[]): string {
+  return `<section class="timeline-section" aria-labelledby="notifications-title"><div class="section-heading"><div><p class="eyebrow">站内通知</p><h2 id="notifications-title">最新运行提醒</h2></div></div>${items.length ? `<div class="notification-summary">${items.map((item) => `<article>${inboxStatusBadge(item.status)}<div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.message)}</p></div><time datetime="${escapeHtml(item.created_at)}">${formatDate(item.created_at)}</time></article>`).join("")}</div>` : '<p class="resource-empty">当前任务还没有通知。</p>'}</section>`;
+}
+
+function renderTaskApprovals(items: Approval[]): string {
+  return `<section class="approval-history" aria-labelledby="approval-history-title"><div class="section-heading"><div><p class="eyebrow">冻结处理人</p><h2 id="approval-history-title">审批记录</h2><p>按创建时间展示待处理与历史决议；已有审批不会因路由切换而迁移。</p></div><span class="count-pill">${items.length} 项</span></div>${items.length ? `<div class="approval-table" role="region" aria-label="任务审批记录" tabindex="0"><table><thead><tr><th scope="col">步骤</th><th scope="col">处理人</th><th scope="col">状态</th><th scope="col">实例</th><th scope="col">时间</th></tr></thead><tbody>${items.map((item) => `<tr><th scope="row">${escapeHtml(actionLabel(item.step_id))}</th><td>${item.owner === "human" ? "人工" : "Master"}</td><td>${statusBadge(item.status)}</td><td><a href="${routePath({ name: "instance", instanceId: item.instance_id })}" data-instance="${escapeHtml(item.instance_id)}">${escapeHtml(item.instance_id)}</a></td><td>${formatDate(item.created_at)}</td></tr>`).join("")}</tbody></table></div>` : '<p class="resource-empty">当前任务没有审批记录。</p>'}</section>`;
+}
+
+function renderAuditEvents(items: AuditEvent[]): string {
+  return `<section class="event-section" aria-labelledby="events-title"><div class="section-heading"><div><p class="eyebrow">只读审计</p><h2 id="events-title">任务事件</h2><p>事件投影不暴露命令载荷、幂等键、文件路径或凭据内容。</p></div><span class="count-pill">${items.length} 条</span></div>${items.length ? `<div class="event-table" role="region" aria-label="任务审计事件" tabindex="0"><table><thead><tr><th scope="col">时间</th><th scope="col">Actor</th><th scope="col">命令</th><th scope="col">对象</th><th scope="col">修订</th><th scope="col">结果</th></tr></thead><tbody>${items.map((item) => `<tr><td>${formatDate(item.occurred_at)}</td><td>${escapeHtml(item.actor.actor_type)} / ${escapeHtml(item.actor.actor_id)}</td><th scope="row">${escapeHtml(commandLabel(item.command))}</th><td>${escapeHtml(item.object_type)} · ${escapeHtml(item.object_id)}</td><td>r${item.revision}</td><td><span class="badge badge--success"><span aria-hidden="true"></span>已提交</span></td></tr>`).join("")}</tbody></table></div>` : '<p class="resource-empty">当前任务没有可展示的提交事件。</p>'}</section>`;
+}
+
+function wireTaskActions(response: TaskDetailResponse): void {
+  root.querySelectorAll<HTMLButtonElement>("[data-task-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (button.disabled) return;
+      const action = button.dataset.taskAction;
+      if (action === "cancel" && !window.confirm("确认取消该任务及其仍可取消的实例？工作区和审计记录会保留。")) return;
+      const feedback = root.querySelector<HTMLElement>(".task-actions .form-feedback");
+      setButtonBusy(button, action === "confirm" ? "正在启动" : "正在取消");
+      try {
+        const body = {
+          operation_id: operationId(`task_${action}`),
+          envelope: commandEnvelope("human", "human_operator", response.task_revision),
+        };
+        if (action === "confirm") await api.confirmTaskStart(response.task.task_id, body);
+        else await api.cancelTask(response.task.task_id, body);
+        if (feedback) feedback.textContent = "命令已提交，正在刷新任务状态。";
+        await renderTask(response.task.task_id, renderVersion);
+      } catch (error) {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        if (feedback) {
+          feedback.classList.add("form-feedback--error");
+          feedback.textContent = error instanceof Error ? error.message : "任务命令提交失败。";
+        }
+      }
+    });
+  });
 }
 
 async function renderInstance(instanceId: string, version: number): Promise<void> {
@@ -222,8 +349,12 @@ async function renderInstance(instanceId: string, version: number): Promise<void
   wireNavigation();
   if (["STARTING", "RUNNING"].includes(response.instance.status)) {
     pollTimer = window.setTimeout(
-      () => void renderRoute({ name: "instance", instanceId }, version),
-      1500,
+      () => {
+        if (!root.querySelector("[data-instance-config]:focus-within")) {
+          void renderRoute({ name: "instance", instanceId }, version);
+        }
+      },
+      5000,
     );
   }
 }
@@ -234,6 +365,11 @@ function renderInstanceContent(
 ): void {
   const { instance, observation } = response;
   const process = instance.process;
+  const instanceConfig = response.config ?? {
+    config_revision: instance.config_revision,
+    restart_required: false,
+    config: {},
+  };
   const safeUiUrl = instance.ui_url?.match(/^https?:\/\//) ? instance.ui_url : null;
   pageContent().innerHTML = `
     ${breadcrumb([
@@ -250,6 +386,10 @@ function renderInstanceContent(
             ? `<a class="button button--primary" href="${escapeHtml(safeUiUrl)}" target="_blank" rel="noopener noreferrer">${icon("external")}打开工作台</a>`
             : '<span class="button button--disabled" aria-disabled="true">工作台尚未就绪</span>'
         }
+        ${instance.status === "READY" ? '<button class="button button--primary" type="button" data-instance-action="start">启动实例</button>' : ""}
+        ${["RUNNING", "WAITING_APPROVAL", "FAILED_TO_START", "FAILED", "CRASHED"].includes(instance.status) ? '<button class="button button--secondary" type="button" data-instance-action="restart">重启实例</button>' : ""}
+        ${["UNAVAILABLE", "READY", "STARTING", "RUNNING", "WAITING_APPROVAL"].includes(instance.status) ? '<button class="button button--danger" type="button" data-instance-action="cancel">取消实例</button>' : ""}
+        ${["UNAVAILABLE", "FAILED_TO_START", "SUCCEEDED", "FAILED", "CRASHED", "CANCELLED", "SUPERSEDED"].includes(instance.status) ? '<button class="button button--secondary" type="button" data-instance-action="archive">归档实例</button>' : ""}
       </div>
     </div>
     <div class="detail-grid">
@@ -265,7 +405,20 @@ function renderInstanceContent(
         ${detailItem("审批模式", instance.approval_mode === "human" ? "人工" : "Master")}
         ${detailItem("能力数量", observation?.capabilities.length.toString() ?? "0")}
       </dl></section>
+      <section class="info-card"><p class="eyebrow">脱敏凭据</p><h3>${escapeHtml(response.credential?.credential_pair_id ?? instance.credential_pair_ref ?? "未分配")}</h3><dl class="detail-list">
+        ${detailItem("Provider", response.credential?.provider ?? "未公开")}
+        ${detailItem("Key ID", response.credential?.key_id ?? "未公开")}
+        ${detailItem("Key 尾号", response.credential?.key_tail ?? "••••")}
+        ${detailItem("凭据修订", `r${response.credential?.revision ?? instance.credential_pair_revision ?? 1}`)}
+      </dl></section>
     </div>
+    <section class="settings-card instance-config-card" aria-labelledby="instance-config-title">
+      <div><p class="eyebrow">实例局部配置</p><h3 id="instance-config-title">有效参数 r${instanceConfig.config_revision}</h3><p>${instanceConfig.restart_required ? "该变更需要受控重启后生效。" : "保存后由 Adapter 尝试热应用；无法热应用时会明确标记需重启。"}</p></div>
+      <form data-instance-config data-config-revision="${instanceConfig.config_revision}">
+        <div class="field"><label for="instance-config-json">配置 JSON</label><textarea id="instance-config-json" name="config" rows="10" spellcheck="false">${escapeHtml(JSON.stringify(instanceConfig.config, null, 2))}</textarea></div>
+        <div class="form-actions"><button class="button button--primary" type="submit">保存实例配置</button></div><p class="form-feedback" role="status" aria-live="polite"></p>
+      </form>
+    </section>
     ${renderUsagePanel(usage)}
     ${
       observation?.details.compatibility_error
@@ -286,6 +439,20 @@ function renderInstanceContent(
         ? `<section class="pending-card"><div><p class="eyebrow">待处理审批</p><h3>${escapeHtml(actionLabel(response.pending_approval.step_id))}</h3><p class="identifier">${escapeHtml(response.pending_approval.approval_id)}</p></div><a class="button button--primary" href="/inbox?approval_id=${encodeURIComponent(response.pending_approval.approval_id)}" data-inbox-link>前往收件箱${icon("arrow")}</a></section>`
         : ""
     }`;
+  wireInstanceOperations(response);
+  root.querySelector<HTMLFormElement>("[data-instance-config]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget as HTMLFormElement;
+    await submitJsonForm(form, async (value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("实例配置必须是 JSON 对象。");
+      await api.updateInstanceConfig(instance.instance_id, {
+        patch: value,
+        operation_id: operationId("instance_config"),
+        envelope: commandEnvelope("human", "human_operator", Number(form.dataset.configRevision)),
+      });
+      await renderInstance(instance.instance_id, renderVersion);
+    }, "config");
+  });
   root.querySelector<HTMLButtonElement>("[data-refresh]")?.addEventListener("click", (event) => {
     const button = event.currentTarget as HTMLButtonElement;
     if (button.disabled) return;
@@ -320,6 +487,36 @@ function renderInstanceContent(
     const approvalId = response.pending_approval?.approval_id;
     window.history.pushState({}, "", `/inbox?approval_id=${encodeURIComponent(approvalId ?? "")}`);
     window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+}
+
+function wireInstanceOperations(response: InstanceDetailResponse): void {
+  root.querySelectorAll<HTMLButtonElement>("[data-instance-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.instanceAction as
+        | "start"
+        | "restart"
+        | "cancel"
+        | "archive"
+        | undefined;
+      if (!action || button.disabled) return;
+      if (["cancel", "archive"].includes(action)) {
+        const verb = action === "cancel" ? "取消" : "归档";
+        if (!window.confirm(`确认${verb}该实例？工作区和审计记录会保留。`)) return;
+      }
+      setButtonBusy(button, "正在提交");
+      try {
+        await api.instanceOperation(response.instance.instance_id, action, {
+          operation_id: operationId(`instance_${action}`),
+          envelope: commandEnvelope("human", "human_operator", response.task_revision),
+        });
+        await renderInstance(response.instance.instance_id, renderVersion);
+      } catch (error) {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        showInlineError(button, error);
+      }
+    });
   });
 }
 
@@ -448,13 +645,43 @@ function wireInboxActions(): void {
 function renderResources(taskId: string, files: TaskFile[], assets: AssetManifest[]): string {
   const manifests = new Map(assets.map((entry) => [entry.manifest.relative_path, entry]));
   const deliverables = files.filter((file) => !file.relative_path.includes("/manifests/"));
-  return `<section class="resources-section" aria-labelledby="resources-title"><div class="section-heading"><div><p class="eyebrow">受控资源</p><h2 id="resources-title">任务文件</h2><p>这里只展示已提交并通过实时完整性校验的输入和交付物。</p></div><span class="count-pill">${deliverables.length} 个文件</span></div>
-    ${deliverables.length ? `<div class="resource-grid">${deliverables.map((file) => {
-      const asset = manifests.get(file.relative_path);
-      const imagePreview = file.previewable && file.mime_type.startsWith("image/");
-      return `<article class="resource-card">${imagePreview ? `<img src="${escapeHtml(api.previewUrl(taskId, file.relative_path))}" alt="${escapeHtml(file.filename)} 预览" loading="lazy">` : `<div class="resource-file-icon" aria-hidden="true">${icon("image")}</div>`}<div class="resource-card__body"><p class="eyebrow">${escapeHtml(asset?.manifest.role ?? file.mime_type)}</p><h3 title="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}</h3><p>${escapeHtml(asset?.manifest.description || formatBytes(file.size_bytes))}</p><dl class="resource-meta">${detailItem("来源实例", asset?.manifest.producer_instance_id ?? "用户输入")}${detailItem("完整性", asset?.integrity_status ?? "VERIFIED")}</dl><a class="button button--secondary" href="${escapeHtml(api.downloadUrl(taskId, file.relative_path))}" download>${icon("download")}下载文件</a></div></article>`;
-    }).join("")}</div>` : `<div class="resource-empty">当前没有已提交的任务资源。</div>`}
-  </section>`;
+  const groups = [
+    { key: "inputs", label: "任务输入", files: deliverables.filter((file) => file.relative_path.startsWith("inputs/")) },
+    { key: "shared", label: "公共交付", files: deliverables.filter((file) => file.relative_path.startsWith("resources/shared/")) },
+    { key: "instances", label: "实例输出", files: deliverables.filter((file) => file.relative_path.startsWith("instances/")) },
+  ];
+  return `<section class="resources-section" aria-labelledby="resources-title"><div class="section-heading"><div><p class="eyebrow">受控资源</p><h2 id="resources-title">任务文件</h2><p>只展示已提交且实时完整性校验通过的文件；未发布候选不会混入公共交付。</p></div><span class="count-pill">${deliverables.length} 个文件</span></div>${groups.map((group) => `<section class="resource-group" aria-labelledby="resource-group-${group.key}"><div class="resource-group__heading"><h3 id="resource-group-${group.key}">${group.label}</h3><span>${group.files.length}</span></div>${group.files.length ? `<div class="resource-grid">${group.files.map((file) => resourceCard(taskId, file, manifests.get(file.relative_path))).join("")}</div>` : '<p class="resource-empty">该分组暂无已提交文件。</p>'}</section>`).join("")}</section>`;
+}
+
+function resourceCard(
+  taskId: string,
+  file: TaskFile,
+  asset: AssetManifest | undefined,
+): string {
+  const imagePreview = file.previewable && file.mime_type.startsWith("image/");
+  const textPreview = file.previewable && !imagePreview;
+  return `<article class="resource-card">${imagePreview ? `<img src="${escapeHtml(api.previewUrl(taskId, file.relative_path))}" alt="${escapeHtml(file.filename)} 预览" loading="lazy" width="480" height="320">` : `<div class="resource-file-icon" aria-hidden="true">${icon("image")}</div>`}<div class="resource-card__body"><p class="eyebrow">${escapeHtml(asset?.manifest.role ?? file.mime_type)}</p><h3 title="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}</h3><p>${escapeHtml(asset?.manifest.description || formatBytes(file.size_bytes))}</p><dl class="resource-meta">${detailItem("来源实例", asset?.manifest.producer_instance_id ?? "用户输入")}${detailItem("完整性", asset?.integrity_status ?? "VERIFIED")}${detailItem("SHA-256", file.sha256.slice(0, 12) + "…")}</dl><div class="resource-actions">${textPreview ? `<button class="button button--secondary" type="button" data-preview-path="${escapeHtml(file.relative_path)}">安全预览</button>` : ""}<a class="button button--secondary" href="${escapeHtml(api.downloadUrl(taskId, file.relative_path))}" download>${icon("download")}下载文件</a></div>${textPreview ? '<pre class="resource-text-preview" tabindex="0" hidden></pre>' : ""}</div></article>`;
+}
+
+function wireResourcePreviews(taskId: string): void {
+  root.querySelectorAll<HTMLButtonElement>("[data-preview-path]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (button.disabled || !button.dataset.previewPath) return;
+      const output = button.closest(".resource-card")?.querySelector<HTMLPreElement>(".resource-text-preview");
+      if (!output) return;
+      setButtonBusy(button, "正在读取");
+      try {
+        output.textContent = await api.previewText(taskId, button.dataset.previewPath);
+        output.hidden = false;
+        output.focus();
+        button.textContent = "已安全预览";
+      } catch (error) {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        showInlineError(button, error);
+      }
+    });
+  });
 }
 
 async function renderSettings(version: number): Promise<void> {
@@ -501,6 +728,12 @@ function renderUsagePanel(usage: UsageSummary, budget?: RetryBudget): string {
     : 0;
   const progress = maximum > 0 ? Math.min(100, Math.round((consumed / maximum) * 100)) : 0;
   const boundedProgressValue = maximum > 0 ? Math.min(consumed, maximum) : 0;
+  const peakTokens = Math.max(1, ...usage.time_buckets.map((item) => item.tokens.total_tokens));
+  const modelTotal = Math.max(1, usage.models.reduce((sum, item) => sum + item.tokens.total_tokens, 0));
+  const instanceTotal = Math.max(
+    1,
+    usage.instances.reduce((sum, item) => sum + item.tokens.total_tokens, 0),
+  );
   return `<section class="usage-section" aria-labelledby="usage-title-${escapeHtml(usage.instance_id ?? usage.task_id)}">
     <div class="section-heading"><div><p class="eyebrow">Token 与费用</p><h2 id="usage-title-${escapeHtml(usage.instance_id ?? usage.task_id)}">用量观测</h2><p>${usage.completeness === "NOT_REPORTED" ? "当前 Agent 尚未上报用量；这里不会把缺失数据显示成 0 用量。" : "原始事件可重建，汇总按实例、模型与时间保持可追溯。"}</p></div>${usageCompletenessBadge(usage.completeness)}</div>
     <div class="metric-grid">
@@ -509,6 +742,7 @@ function renderUsagePanel(usage: UsageSummary, budget?: RetryBudget): string {
       ${metricCard("已知费用", usage.cost.completeness === "UNKNOWN" ? "费用未知" : formatMicros(usage.cost.known_micros), `${usage.cost.unpriced_event_count} 条未定价`)}
       ${metricCard("模型", formatNumber(usage.models.length), usage.models[0]?.model ?? "尚无记录")}
     </div>
+    ${usage.time_buckets.length || usage.models.length || usage.instances.length ? `<div class="usage-visual-grid">${usage.time_buckets.length ? `<figure class="usage-chart"><figcaption><strong>按小时 Token</strong><span>柱高表示相对用量，数值标签可被辅助技术读取。</span></figcaption><div class="usage-bars" role="img" aria-label="${escapeHtml(usage.time_buckets.map((item) => `${formatDate(item.hour)} ${formatNumber(item.tokens.total_tokens)} Token`).join("；"))}">${usage.time_buckets.slice(-12).map((item) => `<div><span style="height:${Math.max(8, Math.round((item.tokens.total_tokens / peakTokens) * 100))}%"></span><small>${new Date(item.hour).getHours().toString().padStart(2, "0")}:00</small><b>${formatNumber(item.tokens.total_tokens)}</b></div>`).join("")}</div></figure>` : ""}${usage.models.length ? `<figure class="model-share"><figcaption><strong>模型占比</strong><span>同时使用文字和长度表达，避免只依赖颜色。</span></figcaption><div>${usage.models.map((item) => { const share = Math.round((item.tokens.total_tokens / modelTotal) * 100); return `<article><p><span>${escapeHtml(item.model)}</span><strong>${share}%</strong></p><div role="progressbar" aria-label="${escapeHtml(item.model)} Token 占比" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${share}"><span style="width:${share}%"></span></div></article>`; }).join("")}</div></figure>` : ""}${usage.instances.length ? `<figure class="instance-share"><figcaption><strong>实例占比</strong><span>每个实例均显示精确百分比和可读进度。</span></figcaption><div>${usage.instances.map((item) => { const share = Math.round((item.tokens.total_tokens / instanceTotal) * 100); return `<article><p><span>${escapeHtml(item.instance_id)}</span><strong>${share}%</strong></p><div role="progressbar" aria-label="${escapeHtml(item.instance_id)} Token 占比" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${share}"><span style="width:${share}%"></span></div></article>`; }).join("")}</div></figure>` : ""}</div>` : ""}
     ${budget ? `<div class="budget-card"><div><p class="eyebrow">自动重试预算</p><h3>${budget.retry_budget_ledger.frozen ? "预算已冻结" : `已用与预留 ${formatNumber(consumed)} / ${formatNumber(maximum)}`}</h3><p>${budget.retry_budget_ledger.frozen ? escapeHtml(budget.retry_budget_ledger.frozen_reason ?? "实际用量超过预留") : `每组最多 ${budget.retry_policy.max_auto_retries_per_retry_group} 次；费用上限${budget.retry_policy.max_auto_retry_cost_micros === null ? "未配置" : formatMicros(budget.retry_policy.max_auto_retry_cost_micros)}。`}</p></div>${maximum > 0 ? `<div class="budget-progress" role="progressbar" aria-label="自动重试 Token 预算" aria-valuemin="0" aria-valuemax="${maximum}" aria-valuenow="${boundedProgressValue}"><span style="width:${progress}%"></span></div>` : '<p class="budget-zero">自动重试 Token 额度为 0；重试将进入人工预算确认。</p>'}</div>` : ""}
     ${usage.instances.length ? `<div class="usage-table" role="region" aria-label="实例 Token 汇总" tabindex="0"><table><thead><tr><th scope="col">实例</th><th scope="col">完整性</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">总计</th><th scope="col">费用</th></tr></thead><tbody>${usage.instances.map((item) => `<tr><th scope="row">${escapeHtml(item.instance_id)}</th><td>${usageCompletenessBadge(item.completeness)}</td><td>${formatNumber(item.tokens.input_tokens)}</td><td>${formatNumber(item.tokens.output_tokens)}</td><td>${formatNumber(item.tokens.total_tokens)}</td><td>${item.cost.completeness === "UNKNOWN" ? "未知" : formatMicros(item.cost.known_micros)}</td></tr>`).join("")}</tbody></table></div>` : ""}
     ${usage.events.length ? `<details class="usage-events"><summary>查看最近调用（${usage.events.length}）</summary><div>${usage.events.slice(-20).reverse().map((event) => `<article><span>${escapeHtml(event.model)}</span><strong>${formatNumber(event.total_tokens)} Token</strong><small>${escapeHtml(event.request_id)} · ${formatDate(event.occurred_at)}</small></article>`).join("")}</div></details>` : ""}
@@ -637,6 +871,21 @@ function actionLabel(action: string): string {
   return labels[action] ?? action;
 }
 
+function commandLabel(command: string): string {
+  const labels: Record<string, string> = {
+    create_task: "创建任务",
+    save_plan: "保存执行计划",
+    confirm_start: "确认启动",
+    cancel_task: "取消任务",
+    transition_instance: "更新实例状态",
+    set_approval_mode: "切换审批路由",
+    update_instance_config: "更新实例配置",
+    save_global_config: "保存全局配置",
+    commit_resolution: "提交审批决议",
+  };
+  return labels[command] ?? command.replaceAll("_", " ");
+}
+
 function operationId(prefix: string): string {
   const suffix = typeof crypto.randomUUID === "function"
     ? crypto.randomUUID().replaceAll("-", "")
@@ -722,6 +971,18 @@ function wireNavigation(): void {
       event.preventDefault();
       if (link.dataset.instance) {
         navigate({ name: "instance", instanceId: link.dataset.instance });
+      }
+    });
+  });
+  root.querySelectorAll<HTMLElement>("[data-task-section]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      const taskId = link.dataset.taskId;
+      const section = link.dataset.taskSection;
+      if (!taskId) return;
+      if (section === "overview") navigate({ name: "task", taskId });
+      else if (["resources", "approvals", "usage", "events"].includes(section ?? "")) {
+        navigate({ name: "taskSection", taskId, section: section as TaskSection });
       }
     });
   });

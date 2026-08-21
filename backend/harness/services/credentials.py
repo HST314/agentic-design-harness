@@ -7,10 +7,11 @@ import hmac
 import os
 import secrets
 import uuid
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
 import yaml
@@ -133,7 +134,7 @@ class CredentialPoolService:
         self.intent_root = store.layout.control_root / "config" / "creation-intents"
         self.lock_path = store.layout.control_root / "locks" / "credential-pool.lock"
 
-    def configure_pool(self, pairs: list[dict[str, Any] | CredentialPair]) -> dict[str, Any]:
+    def configure_pool(self, pairs: Sequence[dict[str, Any] | CredentialPair]) -> dict[str, Any]:
         try:
             validated = [
                 item if isinstance(item, CredentialPair) else CredentialPair.model_validate(item)
@@ -936,7 +937,7 @@ class CredentialPoolService:
         }
 
     @staticmethod
-    def _invalid(message: str) -> None:
+    def _invalid(message: str) -> NoReturn:
         raise HarnessError("CREDENTIAL_PAIR_INVALID", message)
 
 

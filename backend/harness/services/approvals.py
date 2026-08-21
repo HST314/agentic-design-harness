@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from copy import deepcopy
-from typing import Any
+from typing import Any, Literal, cast
 
 from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
@@ -347,7 +347,7 @@ class ApprovalInboxService:
         *,
         owner: str,
         status: str | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[dict[str, Any]]:
         if owner not in {"human", "master"} or status not in {
             None,
@@ -356,7 +356,7 @@ class ApprovalInboxService:
             "HANDLED",
         }:
             raise HarnessError("VALIDATION_ERROR", "The inbox filter is invalid.")
-        if limit < 1 or limit > 200:
+        if limit is not None and (limit < 1 or limit > 200):
             raise HarnessError("VALIDATION_ERROR", "The inbox limit is invalid.")
         values: list[dict[str, Any]] = []
         task_root = self.store.layout.control_root / "tasks"
@@ -375,7 +375,7 @@ class ApprovalInboxService:
                     }
                 )
         values.sort(key=lambda item: (item["created_at"], item["sequence"], item["inbox_id"]))
-        return values[:limit]
+        return values if limit is None else values[:limit]
 
     def commit_resolution(
         self,
@@ -526,7 +526,9 @@ class ApprovalInboxService:
             "HANDLED",
             CommandEnvelope(
                 idempotency_key=idempotency_key,
-                actor_type=actor.actor_type,
+                actor_type=cast(
+                    Literal["human", "master", "system", "adapter"], actor.actor_type
+                ),
                 actor_id=actor.actor_id,
                 expected_revision=item["store_revision"],
             ),
