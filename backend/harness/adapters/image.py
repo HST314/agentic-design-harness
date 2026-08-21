@@ -37,6 +37,7 @@ from .image_runtime import (
     IMAGE_WEB_REQUIREMENTS,
     ImageRuntimeBuilder,
 )
+from .image_usage import map_usage_page, usage_cursor
 from .image_workflow import (
     HARNESS_CAPABILITIES,
     KNOWN_CAPABILITIES,
@@ -49,13 +50,13 @@ from .image_workflow import (
     normalized_capabilities as normalize_workflow_capabilities,
 )
 
-SUPPORTED_IMAGE_AGENT_REVISION = "61c5b4f1b66d5d85f62b39b5b338ac2304e94d26"
-SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION = "1.7.8"
+SUPPORTED_IMAGE_AGENT_REVISION = "2339550ab15ad05e0dde7f48e1386a5a1a0eb663"
+SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION = "1.8.1"
 SUPPORTED_IMAGE_API_MAJOR = "1"
 _SUPPORTED_IMAGE_RUNTIME_ATTESTATIONS = {
     SUPPORTED_IMAGE_AGENT_REVISION: {
         "source_content_sha256": (
-            "f50108651d00454916d2f58aae583cf60d6ac65ded3881ec6bbb5323bf8dc047"
+            "c039156ae9c125e470cd38f436d9f9b0ff53e6f0bcec52805ddf3e80361c29a2"
         ),
         "dependency_content_sha256": (
             "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb"
@@ -80,6 +81,7 @@ _REQUIRED_ROUTES = frozenset(
         "/api/projects/{project_id}/jobs",
         "/api/projects/{project_id}/policy",
         "/api/projects/{project_id}/timeline",
+        "/api/projects/{project_id}/usage",
         "/api/settings/models",
     }
 )
@@ -93,6 +95,7 @@ _REQUIRED_ROUTE_METHODS = (
     ("/api/projects/{project_id}/jobs", "post"),
     ("/api/projects/{project_id}/policy", "post"),
     ("/api/projects/{project_id}/timeline", "get"),
+    ("/api/projects/{project_id}/usage", "get"),
     ("/api/settings/models", "get"),
     ("/api/settings/models", "post"),
 )
@@ -663,11 +666,34 @@ class ImageAgentAdapter:
         ]
 
     def collect_usage(self, instance_id: str, cursor: str | None) -> list[dict[str, Any]]:
-        # The pinned Image Agent does not expose provider usage yet. Returning
-        # an empty observation is deliberate: UsageService persists
-        # NOT_REPORTED instead of manufacturing a zero-Token event.
-        self._task_id_for_instance(instance_id)
-        return []
+        task_id = self._task_id_for_instance(instance_id)
+        previous = usage_cursor(cursor)
+        instance = self.store.instance.get(task_id, instance_id)
+        if instance is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        base_url = self._base_url(task_id, instance_id)
+        events: list[dict[str, Any]] = []
+        while True:
+            page = self._request(
+                base_url,
+                "GET",
+                f"/api/projects/{instance_id}/usage?"
+                f"{urlencode({'after': previous, 'limit': 500})}",
+            )
+            if page is None:
+                self._protocol_error("Image Agent returned an empty usage response.")
+            mapped, previous, has_more = map_usage_page(
+                page,
+                previous=previous,
+                task_id=task_id,
+                instance_id=instance_id,
+                credential_pair_ref=instance.get("credential_pair_ref"),
+            )
+            events.extend(mapped)
+            if len(events) > 10_000:
+                self._protocol_error("Image Agent returned too many usage observations.")
+            if not has_more:
+                return events
 
     def get_ui_url(self, instance_id: str) -> str | None:
         task_id = self._task_id_for_instance(instance_id)

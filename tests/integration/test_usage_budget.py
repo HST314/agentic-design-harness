@@ -138,6 +138,49 @@ class UsageAndBudgetTests(unittest.TestCase):
         )
         self.assertEqual(collected["cursor"], "provider_page_token_42")
 
+    def test_usage_v1_1_preserves_non_token_image_billing_units(self) -> None:
+        event = {
+            "schema_version": "1.1",
+            "event_id": "usage_image_unit",
+            "task_id": "t_g4",
+            "instance_id": "i_image_1",
+            "agent_type": "image",
+            "request_id": "request_image_unit",
+            "provider_request_id": None,
+            "provider": "ark",
+            "model": "seedream",
+            "call_type": "text_to_image_model",
+            "usage_basis": "image_units",
+            "credential_pair_ref": "cred_test_01",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "billing_units": [
+                {
+                    "unit": "image",
+                    "quantity": 1,
+                    "attributes": {
+                        "resolution": "2560x1440",
+                        "model_tier": "seedream",
+                    },
+                }
+            ],
+            "raw_usage": {},
+            "occurred_at": "2026-08-21T02:00:00Z",
+        }
+        ingested = self.usage.ingest(
+            "t_g4", "i_image_1", [event], source="adapter", collection_complete=True
+        )
+        summary = self.usage.summary("t_g4")
+
+        self.assertEqual(ingested["accepted"], 1)
+        self.assertEqual(summary["completeness"], "COMPLETE")
+        self.assertEqual(summary["tokens"]["total_tokens"], 0)
+        self.assertEqual(summary["events"][0]["billing_units"][0]["unit"], "image")
+        self.assertEqual(summary["cost"]["completeness"], "UNKNOWN")
+
     def test_parallel_retry_reservations_cannot_cross_count_or_token_limits(self) -> None:
         policy = {
             "max_auto_retries_per_retry_group": 2,

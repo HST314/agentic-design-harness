@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-20
 - Harness contract: `1.1`
-- Image Agent commit: `61c5b4f1b66d5d85f62b39b5b338ac2304e94d26`
+- Image Agent commit: `2339550ab15ad05e0dde7f48e1386a5a1a0eb663`
 
 ## Decision
 
@@ -77,11 +77,12 @@ boundary.
 
 ### Token boundary
 
-Provider usage is accepted only from a backward-compatible Image observation
-hook/API that returns the provider request id, model and raw token counters. The
-Adapter maps those facts to `TokenUsageEvent`. Missing usage is `unreported`,
-never numeric zero or an estimate. Until the hook exists, automatic retry that
-requires a token upper bound is denied and routed to human approval.
+Provider usage is accepted only from the pinned Image usage observation API,
+which returns a stable cursor, provider/local request ids, model, call type and
+bounded raw accounting facts. The Adapter maps text/VLM counters and explicit
+image billing units (count, resolution and model tier) to `TokenUsageEvent 1.1`.
+Missing usage remains `unreported`, never numeric zero or an estimate; image
+calls carry zero text tokens only together with a non-token `image_units` basis.
 
 ### Credentials and Provider mapping
 
