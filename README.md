@@ -79,9 +79,41 @@ make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 需显式访问外部 Provider 时，使用独立测试凭据设置
 `HARNESS_REAL_PROVIDER_BASE_URL`、`HARNESS_REAL_PROVIDER_API_KEY`、
 `HARNESS_REAL_PROVIDER_TEXT_MODEL`、`HARNESS_REAL_PROVIDER_IMAGE_MODEL` 与
-`HARNESS_REAL_PROVIDER_VLM_MODEL`，再运行
-`make real-provider-smoke IMAGE_AGENT_ROOT=../image_agent_mvp`。该入口默认不会运行，
-执行时使用一次性 Harness 数据目录且关闭 Playwright trace，避免持久化请求凭据。
+`HARNESS_REAL_PROVIDER_VLM_MODEL`。也可将这些键写入只供本机使用的 dotenv 文件；
+兼容已有的 `MODEL_BASE_URL` / `MODEL_API_KEY` 别名，CRLF 行尾由入口安全处理，
+不需要也不应使用 Shell `source`：
+
+```bash
+# 只做凭据字段、Playwright 版本、Chromium revision、可执行权限和动态库预检
+make real-provider-preflight \
+  REAL_PROVIDER_ENV_FILE=/secure/provider.env
+
+# 运行真实门禁；退出码保持 Playwright 原始结果
+make real-provider-smoke \
+  IMAGE_AGENT_ROOT=../image_agent_mvp \
+  REAL_PROVIDER_ENV_FILE=/secure/provider.env
+```
+
+可通过 `PLAYWRIGHT_BROWSERS_PATH` 指向已安装且 revision 匹配的 Playwright 浏览器
+缓存，或通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指向匹配的 Chromium 可执行文件。
+预检找不到运行时时会给出固定安装命令。成功门禁默认原子写出
+`build/real-provider-evidence.json`，只保留版本、动作序列、终态、三类用量聚合、
+交付 MIME/SHA-256/完整性及 `requestfailed`、`console.error`、`pageerror` 计数；
+真实 Key、Provider URL、请求正文和模型响应正文不会写入。构建和 Playwright 日志写入
+`build/real-provider-smoke.log`，入口直接传播子进程失败码，不依赖 `tee`。
+正式真实门禁要求 Harness 与 Image Agent 均处于已提交、无未跟踪修改的状态，证据会
+同时绑定两个 commit 和 clean-worktree 结果；开发中的脏工作树可先运行不带证据路径的
+底层脚本或确定性 `frontend-integration`，但不能发布正式真实证据。
+
+如需另行使用管道采集日志，必须启用 `pipefail`：
+
+```bash
+set -o pipefail
+make real-provider-smoke IMAGE_AGENT_ROOT=../image_agent_mvp | tee smoke.log
+```
+
+该入口默认不会由常规门禁触发；执行时使用一次性 Harness 数据目录并关闭
+Playwright trace，避免持久化请求凭据。
 
 ## 启动空服务
 

@@ -14,3 +14,6 @@ npm run build
 Browser tests live in `e2e/` and run against the Vite preview server with
 `npm run test:e2e` after the Playwright Chromium runtime is installed. A CI or
 sandbox may set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to a compatible executable.
+
+`npm run preview` intentionally supplies no host or port. Local Playwright uses
+`npm run preview:local`; the production-stack runner supplies its random host/port exactly once.
