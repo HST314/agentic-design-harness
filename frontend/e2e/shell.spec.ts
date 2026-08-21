@@ -446,6 +446,51 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test("production shell loads its favicon without browser errors", async ({ page }) => {
+  const failedRequests: string[] = [];
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  const httpErrorResponses: string[] = [];
+  page.on("requestfailed", (request) => failedRequests.push(request.url()));
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("response", (response) => {
+    if (response.status() >= 400) httpErrorResponses.push(response.url());
+  });
+
+  await page.goto("/tasks");
+  await expect(page.locator('link[rel~="icon"]')).toHaveAttribute("href", "/favicon.svg");
+  const favicon = await page.evaluate(async () => {
+    const link = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
+    if (!link) return null;
+    const response = await fetch(link.href);
+    return {
+      path: new URL(link.href).pathname,
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+    };
+  });
+  expect(favicon).toEqual({
+    path: "/favicon.svg",
+    status: 200,
+    contentType: expect.stringContaining("image/svg+xml"),
+  });
+  await expect(page.getByRole("heading", { name: "主任务", exact: true })).toBeVisible();
+  expect({
+    failed_requests: failedRequests.length,
+    console_errors: consoleErrors.length,
+    page_errors: pageErrors.length,
+    http_error_responses: httpErrorResponses.length,
+  }).toEqual({
+    failed_requests: 0,
+    console_errors: 0,
+    page_errors: 0,
+    http_error_responses: 0,
+  });
+});
+
 test("shell navigation is keyboard reachable and deep-linkable", async ({ page }) => {
   await page.goto("/tasks");
   await expect(page.getByRole("heading", { name: "主任务", exact: true })).toBeVisible();

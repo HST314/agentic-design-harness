@@ -28,6 +28,7 @@ const knownInstanceStatuses = new Set([
 const activeInstanceStatuses = new Set(["CREATED", "READY", "STARTING", "RUNNING"]);
 
 type GatePhase =
+  | "assert_favicon"
   | "seed_workflow"
   | "wait_for_boundary"
   | "read_approval"
@@ -334,6 +335,29 @@ function localErrorRoute(status: number, method: string, rawUrl: string): string
   }
 }
 
+async function assertFaviconLoads(page: Page, deadlineMs: number): Promise<void> {
+  await page.goto("/", {
+    waitUntil: "domcontentloaded",
+    timeout: remainingWorkflowBudget(deadlineMs),
+  });
+  await expect(page.locator('link[rel~="icon"]')).toHaveAttribute("href", "/favicon.svg");
+  const favicon = await page.evaluate(async () => {
+    const link = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
+    if (!link) return null;
+    const response = await fetch(link.href);
+    return {
+      path: new URL(link.href).pathname,
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+    };
+  });
+  expect(favicon).toEqual({
+    path: "/favicon.svg",
+    status: 200,
+    contentType: expect.stringContaining("image/svg+xml"),
+  });
+}
+
 function usageCallEvidence(
   usage: Record<string, any>,
   callType: keyof UsageCounts,
@@ -419,6 +443,11 @@ async function persistRedactedEvidence(
         integrity_status: deliveryStatus,
       },
       browser_error_counts: browserErrors,
+      favicon: {
+        path: "/favicon.svg",
+        status: 200,
+        content_type: "image/svg+xml",
+      },
     },
     secrets: {
       credential_value_recorded: false,
@@ -585,6 +614,9 @@ test("production build completes a real backend workflow without browser API moc
   });
 
   try {
+    phase = "assert_favicon";
+    await assertFaviconLoads(page, workflowDeadlineMs);
+    phase = "seed_workflow";
     await seedRealWorkflow(request, workflowDeadlineMs);
 
     let completed: Record<string, any> | undefined;
