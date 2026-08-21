@@ -11,7 +11,13 @@ from harness.services.approvals import ApprovalInboxService
 from harness.services.retry_budget import RetryBudgetService
 from harness.services.usage import UsageService
 from harness.storage.repository import Actor
-from runtime_helpers import build_service, create_task, envelope, image_plan
+from runtime_helpers import (
+    build_service,
+    create_task,
+    envelope,
+    image_plan,
+    register_model_call_attempt,
+)
 
 
 class EmptyUsageAdapter:
@@ -31,6 +37,9 @@ class UsageAndBudgetTests(unittest.TestCase):
             "t_g4",
             **image_plan("t_g4"),
             envelope=envelope("save-g4", 1),
+        )
+        register_model_call_attempt(
+            self.store, "t_g4", "i_image_1", "attempt_initial"
         )
         self.approvals = ApprovalInboxService(self.store)
         self.usage = UsageService(self.store)
@@ -152,7 +161,6 @@ class UsageAndBudgetTests(unittest.TestCase):
                     "t_g4",
                     "i_image_1",
                     attempt_id=f"attempt_retry_{index}",
-                    retry_group_id="retry_group_visual",
                     retry_of_attempt_id="attempt_initial",
                     idempotency_key=f"reserve-retry-{index}",
                     actor=Actor("master", "master_default"),
@@ -197,7 +205,6 @@ class UsageAndBudgetTests(unittest.TestCase):
                 "t_g4",
                 "i_image_1",
                 attempt_id="attempt_cost_retry",
-                retry_group_id="retry_group_cost",
                 retry_of_attempt_id="attempt_initial",
                 idempotency_key="reserve-cost-retry",
                 actor=Actor("master", "master_default"),
@@ -292,7 +299,6 @@ class UsageAndBudgetTests(unittest.TestCase):
                 "t_g4",
                 "i_image_1",
                 attempt_id="attempt_recovery_retry",
-                retry_group_id="retry_group_recovery",
                 retry_of_attempt_id="attempt_initial",
                 idempotency_key="reserve-recovery-retry",
                 actor=Actor("master", "master_default"),
@@ -362,6 +368,12 @@ class UsageAndBudgetTests(unittest.TestCase):
             **image_plan("t_g4_replacement", count=2),
             envelope=envelope("save-g4-replacement", 1),
         )
+        register_model_call_attempt(
+            self.store,
+            "t_g4_replacement",
+            "i_image_1",
+            "attempt_original",
+        )
         self.budgets.configure(
             "t_g4_replacement",
             {
@@ -377,7 +389,6 @@ class UsageAndBudgetTests(unittest.TestCase):
         )
         request = {
             "attempt_id": "attempt_replacement_1",
-            "retry_group_id": "retry_group_shared",
             "retry_of_attempt_id": "attempt_original",
             "idempotency_key": "reserve-replacement-1",
             "actor": Actor("master", "master_default"),
@@ -386,29 +397,20 @@ class UsageAndBudgetTests(unittest.TestCase):
         replay = self.budgets.request_retry("t_g4_replacement", "i_image_1", **request)
         self.assertEqual(first, replay)
 
-        with self.assertRaises(HarnessError) as escaped:
-            self.budgets.request_retry(
-                "t_g4_replacement",
-                "i_image_2",
-                attempt_id="attempt_replacement_2",
-                retry_group_id="retry_group_escape",
-                retry_of_attempt_id="attempt_replacement_1",
-                idempotency_key="reserve-replacement-escape",
-                actor=Actor("master", "master_default"),
-            )
-        self.assertEqual(escaped.exception.code, "VALIDATION_ERROR")
-
         replacement = self.budgets.request_retry(
             "t_g4_replacement",
             "i_image_2",
             attempt_id="attempt_replacement_2",
-            retry_group_id="retry_group_shared",
             retry_of_attempt_id="attempt_replacement_1",
             idempotency_key="reserve-replacement-2",
             actor=Actor("master", "master_default"),
         )
         self.assertTrue(replacement["allowed"])
-        self.assertEqual(replacement["attempt"]["retry_group_id"], "retry_group_shared")
+        self.assertEqual(
+            replacement["attempt"]["retry_group_id"],
+            first["attempt"]["retry_group_id"],
+        )
+        self.assertEqual(replacement["attempt"]["root_attempt_id"], "attempt_original")
         self.budgets.settle(
             "t_g4_replacement",
             "attempt_replacement_1",
@@ -427,3 +429,75 @@ class UsageAndBudgetTests(unittest.TestCase):
                 actor=Actor("adapter", "image_adapter"),
             )
         self.assertEqual(reused_key.exception.code, "IDEMPOTENCY_CONFLICT")
+
+    def test_unregistered_and_cross_owner_roots_cannot_mint_retry_groups(self) -> None:
+        create_task(self.commands, "t_g4_scope")
+        self.commands.save_plan(
+            "t_g4_scope",
+            **image_plan("t_g4_scope", count=2),
+            envelope=envelope("save-g4-scope", 1),
+        )
+        create_task(self.commands, "t_g4_other")
+        self.commands.save_plan(
+            "t_g4_other",
+            **image_plan("t_g4_other"),
+            envelope=envelope("save-g4-other", 1),
+        )
+        register_model_call_attempt(
+            self.store,
+            "t_g4_scope",
+            "i_image_2",
+            "attempt_other_instance_root",
+        )
+        register_model_call_attempt(
+            self.store,
+            "t_g4_other",
+            "i_image_1",
+            "attempt_other_task_root",
+        )
+        register_model_call_attempt(
+            self.store,
+            "t_g4_scope",
+            "i_image_1",
+            "attempt_registered_collision",
+        )
+        register_model_call_attempt(
+            self.store,
+            "t_g4_scope",
+            "i_image_1",
+            "attempt_scope_root",
+        )
+
+        rejected_roots = (
+            "attempt_fabricated_root_one",
+            "attempt_fabricated_root_two",
+            "attempt_other_instance_root",
+            "attempt_other_task_root",
+        )
+        for index, root_attempt_id in enumerate(rejected_roots, start=1):
+            with self.subTest(root_attempt_id=root_attempt_id):
+                with self.assertRaises(HarnessError) as rejected:
+                    self.budgets.request_retry(
+                        "t_g4_scope",
+                        "i_image_1",
+                        attempt_id=f"attempt_adversarial_retry_{index}",
+                        retry_of_attempt_id=root_attempt_id,
+                        idempotency_key=f"reserve-adversarial-retry-{index}",
+                        actor=Actor("master", "master_default"),
+                        reservation_tokens=100,
+                    )
+                self.assertEqual(rejected.exception.code, "VALIDATION_ERROR")
+
+        self.assertEqual(self.budgets.get("t_g4_scope")["attempts"], [])
+
+        with self.assertRaises(HarnessError) as collision:
+            self.budgets.request_retry(
+                "t_g4_scope",
+                "i_image_1",
+                attempt_id="attempt_registered_collision",
+                retry_of_attempt_id="attempt_scope_root",
+                idempotency_key="reserve-registered-id-collision",
+                actor=Actor("master", "master_default"),
+                reservation_tokens=100,
+            )
+        self.assertEqual(collision.exception.code, "IDEMPOTENCY_CONFLICT")
