@@ -534,6 +534,107 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         ]
         self.assertEqual(len(assignments), 2)
 
+    def test_task_cancel_replays_every_child_and_commit_crash_window(self) -> None:
+        checkpoints = [
+            *(f"before_instance_cancel:i_image_{index}" for index in range(1, 4)),
+            *(f"after_instance_cancel_effect:i_image_{index}" for index in range(1, 4)),
+            "before_task_cancel_commit",
+            "after_task_cancel_commit",
+        ]
+        for index, checkpoint in enumerate(checkpoints, 1):
+            with self.subTest(checkpoint=checkpoint):
+                task_id = f"t_cancel_crash_{index}"
+                revision = self._running_image_task(task_id, 3)
+                command = envelope(f"cancel-crash-{index}", revision)
+
+                def crash(current: str, target: str = checkpoint) -> None:
+                    if current == target:
+                        raise SimulatedCrash(current)
+
+                with self.assertRaises(SimulatedCrash):
+                    self.application.cancel_task(
+                        task_id,
+                        operation_id=f"cancel_crash_{index}",
+                        envelope=command,
+                        crash_hook=crash,
+                    )
+
+                # The exact original request must resume even though completed
+                # child cancellations have advanced the aggregate revision.
+                result = self.application.cancel_task(
+                    task_id,
+                    operation_id=f"cancel_crash_{index}",
+                    envelope=command,
+                )
+                replay = self.application.cancel_task(
+                    task_id,
+                    operation_id=f"cancel_crash_{index}",
+                    envelope=command,
+                )
+                self.assertEqual(replay, result)
+                self.assertEqual(result["task"]["status"], "CANCELLED")
+                self.assertEqual(
+                    [item["status"] for item in result["plan"]["instances"]],
+                    ["CANCELLED", "CANCELLED", "CANCELLED"],
+                )
+                intent = read_json(
+                    self.application._intent_path(f"cancel_crash_{index}")
+                )
+                self.assertEqual(intent["state"], "COMMITTED")
+                self.assertEqual(
+                    [item["initial_status"] for item in intent["target_instances"]],
+                    ["RUNNING", "RUNNING", "RUNNING"],
+                )
+                self.assertEqual(
+                    {
+                        item["state"]
+                        for item in intent["instance_progress"].values()
+                    },
+                    {"CANCELLED"},
+                )
+
+    def test_startup_recovery_resumes_a_partial_task_cancel(self) -> None:
+        task_id = "t_cancel_startup_recovery"
+        revision = self._running_image_task(task_id, 3)
+        command = envelope("cancel-startup-recovery", revision)
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_instance_cancel_effect:i_image_2":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.application.cancel_task(
+                task_id,
+                operation_id="cancel_startup_recovery",
+                envelope=command,
+                crash_hook=crash,
+            )
+        partial = self.store.plan.get(task_id, task_id)
+        self.assertEqual(
+            [item["status"] for item in partial["instances"]],
+            ["CANCELLED", "CANCELLED", "RUNNING"],
+        )
+
+        recovered = self.application.recover()
+
+        recovery = next(
+            item
+            for item in recovered
+            if item["operation_id"] == "cancel_startup_recovery"
+        )
+        self.assertEqual(recovery["status"], "RECOVERED")
+        self.assertEqual(recovery["result"]["task"]["status"], "CANCELLED")
+        self.assertEqual(
+            [item["status"] for item in recovery["result"]["plan"]["instances"]],
+            ["CANCELLED", "CANCELLED", "CANCELLED"],
+        )
+        replay = self.application.cancel_task(
+            task_id,
+            operation_id="cancel_startup_recovery",
+            envelope=command,
+        )
+        self.assertEqual(replay, recovery["result"])
+
     def test_delivery_completion_requires_live_kind_and_mime_matches(self) -> None:
         created = create_task(self.commands, "t_delivery_application", "auto")
         draft = image_plan("t_delivery_application")
@@ -1002,6 +1103,38 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             details={"job_id": f"job_{task_id}"},
         )
         return self.application.observe_instance(task_id, "i_image_1")
+
+    def _running_image_task(self, task_id: str, count: int) -> int:
+        created = create_task(self.commands, task_id, "auto")
+        draft = image_plan(task_id, count)
+        saved = self.commands.save_plan(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            envelope=envelope(f"save-{task_id}", created["revision"]),
+        )
+        revision = saved["task_revision"]
+        for instance in draft["instances"]:
+            instance_id = instance["instance_id"]
+            starting = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "STARTING",
+                envelope(f"start-{task_id}-{instance_id}", revision, "adapter"),
+            )
+            running = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "RUNNING",
+                envelope(
+                    f"run-{task_id}-{instance_id}",
+                    starting["task_revision"],
+                    "adapter",
+                ),
+            )
+            revision = running["task_revision"]
+        return revision
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import stat
 import tempfile
 import time
@@ -12,7 +13,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
+from harness.services.process_runtime import process_start_identity
 from harness.storage.repository import utc_now
+
+from tests.e2e import test_g3_real_image_agent as g3_fixtures
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_AGENT_ROOT = os.getenv("HARNESS_IMAGE_AGENT_ROOT")
@@ -28,19 +32,98 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
     task_id = "t_g4_multi_image"
     instance_ids = ("i_g4_image_1", "i_g4_image_2", "i_g4_image_3")
 
-    def test_three_processes_config_usage_cancel_and_recovery(self) -> None:
+    def test_three_real_processes_complete_and_publish_verified_deliveries(self) -> None:
+        with (
+            g3_fixtures.deterministic_provider() as (provider_url, _provider),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
+            runtime = Path(temporary)
+            app = create_app(self._settings(runtime))
+            app.state.container.configuration.initialize(
+                g3_fixtures.RealImageAdapterG3Tests._online_config()
+            )
+            try:
+                with TestClient(app) as client:
+                    container = app.state.container
+                    container.credentials.configure_pool(
+                        self._credential_pairs(provider_url=provider_url)
+                    )
+                    self._create_task(client, self.task_id, "create-g4-complete")
+                    inputs = self._import_brief(container, self.task_id)
+                    saved = client.put(
+                        f"/api/v1/tasks/{self.task_id}/plan",
+                        json=self._plan_request(
+                            self.task_id,
+                            self.instance_ids,
+                            inputs,
+                            provider="ark",
+                        ),
+                    )
+                    self.assertEqual(saved.status_code, 200, saved.text)
+                    self.assertEqual(len(saved.json()["plan"]["task_cards"]), 3)
+                    started = client.post(
+                        f"/api/v1/tasks/{self.task_id}/confirm-start",
+                        json={
+                            "operation_id": "start_g4_complete",
+                            "envelope": self._envelope(
+                                "start-g4-complete", saved.json()["task_revision"]
+                            ),
+                        },
+                    )
+                    self.assertEqual(started.status_code, 200, started.text)
+                    self.assertEqual(len(started.json()["launches"]), 3)
+                    boundaries = {
+                        instance_id: self._wait_for_boundary(client, instance_id)
+                        for instance_id in self.instance_ids
+                    }
+                    processes = [
+                        detail["instance"]["process"] for detail in boundaries.values()
+                    ]
+                    self.assertEqual(len({item["pid"] for item in processes}), 3)
+                    self.assertEqual(len({item["port"] for item in processes}), 3)
+
+                    self._complete_all_instances(client)
+
+                    task = client.get(f"/api/v1/tasks/{self.task_id}").json()["task"]
+                    self.assertEqual(task["status"], "SUCCEEDED")
+                    final_instances = [
+                        client.get(f"/api/v1/instances/{instance_id}").json()[
+                            "instance"
+                        ]
+                        for instance_id in self.instance_ids
+                    ]
+                    self.assertEqual(
+                        [item["status"] for item in final_instances],
+                        ["SUCCEEDED", "SUCCEEDED", "SUCCEEDED"],
+                    )
+                    resources = client.get(
+                        f"/api/v1/tasks/{self.task_id}/files?group=shared"
+                    ).json()["assets"]
+                    published = [
+                        item
+                        for item in resources
+                        if item["manifest"].get("producer_instance_id")
+                        in self.instance_ids
+                    ]
+                    self.assertEqual(len(published), 3)
+                    self.assertTrue(
+                        all(item["integrity_status"] == "VERIFIED" for item in published)
+                    )
+                    self.assertEqual(
+                        {item["manifest"]["producer_instance_id"] for item in published},
+                        set(self.instance_ids),
+                    )
+            finally:
+                self._cleanup_instances(app, self.task_id, self.instance_ids)
+                self._make_tree_removable(runtime)
+
+    def test_process_loss_cancel_peer_and_control_plane_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)
-            settings = HarnessSettings(
-                control_root=runtime / "control-data",
-                workspace_root=runtime / "workspace",
-                contracts_root=ROOT / "contracts" / "v1",
-                image_agent_root=Path(str(IMAGE_AGENT_ROOT)),
-                image_agent_python=Path(str(IMAGE_AGENT_PYTHON)),
-                image_agent_dependency_root=Path(str(IMAGE_AGENT_DEPENDENCY_ROOT)),
-            )
+            settings = self._settings(runtime)
             first_app = create_app(settings)
             recovered_job_ids: dict[str, str] = {}
+            victim_process: dict[str, object] | None = None
             try:
                 with TestClient(first_app) as client:
                     container = first_app.state.container
@@ -159,10 +242,24 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                         [item["completeness"] for item in usage["instances"]],
                         ["NOT_REPORTED", "NOT_REPORTED", "NOT_REPORTED"],
                     )
+                    # Freeze the launch record as RUNNING, then kill the real
+                    # process group while monitoring is stopped. The next
+                    # control-plane process must be the component that detects it.
+                    victim_process = details[self.instance_ids[0]]["instance"][
+                        "process"
+                    ]
+                    container.supervisor.close()
+                    os.killpg(int(victim_process["pid"]), signal.SIGKILL)
+                    self._wait_for_process_loss(int(victim_process["pid"]))
 
                 recovered_app = create_app(settings)
                 with TestClient(recovered_app) as recovered_client:
-                    for instance_id in self.instance_ids:
+                    victim = recovered_client.get(
+                        f"/api/v1/instances/{self.instance_ids[0]}"
+                    ).json()
+                    self.assertEqual(victim["instance"]["status"], "FAILED")
+                    self.assertEqual(victim["instance"]["process"]["state"], "EXITED")
+                    for instance_id in self.instance_ids[1:]:
                         detail = recovered_client.get(
                             f"/api/v1/instances/{instance_id}"
                         ).json()
@@ -185,34 +282,33 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                     )
                     self.assertEqual(cancelled.status_code, 200, cancelled.text)
                     self.assertEqual(cancelled.json()["instance"]["status"], "CANCELLED")
-                    for instance_id in (self.instance_ids[0], self.instance_ids[2]):
-                        survivor = recovered_client.get(
-                            f"/api/v1/instances/{instance_id}"
-                        ).json()
-                        self.assertEqual(survivor["instance"]["status"], "WAITING_APPROVAL")
+                    survivor = recovered_client.get(
+                        f"/api/v1/instances/{self.instance_ids[2]}"
+                    ).json()
+                    self.assertEqual(survivor["instance"]["status"], "WAITING_APPROVAL")
+                    self.assertEqual(
+                        survivor["observation"]["details"]["job_id"],
+                        recovered_job_ids[self.instance_ids[2]],
+                    )
             finally:
                 active_app = locals().get("recovered_app", first_app)
-                for instance_id in self.instance_ids:
-                    if active_app.state.container.store.instance.get(
-                        self.task_id, instance_id
-                    ) is not None:
-                        with suppress(Exception):
-                            active_app.state.container.application.cancel_instance(
-                                self.task_id, instance_id
-                            )
+                self._cleanup_instances(active_app, self.task_id, self.instance_ids)
                 self._make_tree_removable(runtime)
 
     @staticmethod
-    def _credential_pairs() -> list[dict[str, object]]:
+    def _credential_pairs(
+        *, provider_url: str | None = None
+    ) -> list[dict[str, object]]:
+        provider = "ark" if provider_url is not None else "fake"
         return [
             {
                 "credential_pair_id": f"cred_g4_{index}",
-                "provider": "fake",
+                "provider": provider,
                 "key_id": f"key_g4_{index}",
-                "base_url": f"https://offline-{index}.invalid/v1",
+                "base_url": provider_url or f"https://offline-{index}.invalid/v1",
                 "api_key": f"synthetic-offline-g4-{index}",
-                "api_key_env": "FAKE_API_KEY",
-                "base_url_env": "FAKE_BASE_URL",
+                "api_key_env": "ARK_API_KEY" if provider_url else "FAKE_API_KEY",
+                "base_url_env": "ARK_BASE_URL" if provider_url else "FAKE_BASE_URL",
                 "revision": 1,
                 "enabled": True,
             }
@@ -255,6 +351,8 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
         task_id: str,
         instance_ids: tuple[str, ...],
         inputs: list[dict[str, str]],
+        *,
+        provider: str = "fake",
     ) -> dict[str, object]:
         return {
             "stages": [
@@ -312,7 +410,7 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                 }
                 for instance_id in instance_ids
             ],
-            "providers": {instance_id: "fake" for instance_id in instance_ids},
+            "providers": {instance_id: provider for instance_id in instance_ids},
             "operation_id": f"save_{task_id}_plan",
             "envelope": RealMultiImageAgentG4Tests._envelope(
                 f"save-{task_id}-plan", 1
@@ -332,6 +430,107 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                 return detail
             time.sleep(0.1)
         raise AssertionError(f"{instance_id} did not reach a workflow boundary: {detail}")
+
+    def _complete_all_instances(self, client: TestClient) -> None:
+        pending = set(self.instance_ids)
+        steps = {instance_id: 0 for instance_id in self.instance_ids}
+        deadline = time.monotonic() + 180
+        priority = (
+            "approve_taskbook",
+            "approve_category_constraint",
+            "approve_skill_invocations",
+            "select_master",
+            "review_calibration",
+            "approve_final",
+            "start_category_match",
+            "start_clarification",
+            "build_taskbook",
+            "prepare_style_direction",
+            "render_candidates",
+            "choose_master",
+            "start_quality_inspection",
+            "open_final_approval",
+        )
+        while pending and time.monotonic() < deadline:
+            for instance_id in tuple(sorted(pending)):
+                detail = client.get(f"/api/v1/instances/{instance_id}").json()
+                status = detail["instance"]["status"]
+                self.assertNotEqual(status, "FAILED", detail)
+                if status == "SUCCEEDED":
+                    pending.remove(instance_id)
+                    continue
+                if status != "WAITING_APPROVAL":
+                    continue
+                approval = detail["pending_approval"]
+                approval_details = client.get(
+                    f"/api/v1/approvals/{approval['approval_id']}"
+                ).json()
+                actions = approval_details["payload"]["available_actions"]
+                action = next((item for item in priority if item in actions), None)
+                self.assertIsNotNone(action, approval_details)
+                payload: dict[str, object] = {}
+                if action == "select_master":
+                    candidate = approval_details["payload"]["context"]["candidates"][0]
+                    payload["selected_id"] = candidate.get("id") or candidate[
+                        "candidate_id"
+                    ]
+                elif action == "review_calibration":
+                    payload["manual_action"] = "accept_current"
+                steps[instance_id] += 1
+                response = client.post(
+                    f"/api/v1/approvals/{approval['approval_id']}/resolve",
+                    json={
+                        "decision": "APPROVED",
+                        "action": action,
+                        "payload": payload,
+                        "operation_id": (
+                            f"resolve_{instance_id}_{steps[instance_id]}"
+                        ),
+                        "envelope": self._envelope(
+                            f"resolve-{instance_id}-{steps[instance_id]}",
+                            approval["store_revision"],
+                        ),
+                    },
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()["advance"]["accepted"])
+            time.sleep(0.05)
+        self.assertEqual(pending, set(), f"instances did not complete: {sorted(pending)}")
+
+    @staticmethod
+    def _settings(runtime: Path) -> HarnessSettings:
+        return HarnessSettings(
+            control_root=runtime / "control-data",
+            workspace_root=runtime / "workspace",
+            contracts_root=ROOT / "contracts" / "v1",
+            image_agent_root=Path(str(IMAGE_AGENT_ROOT)),
+            image_agent_python=Path(str(IMAGE_AGENT_PYTHON)),
+            image_agent_dependency_root=Path(str(IMAGE_AGENT_DEPENDENCY_ROOT)),
+        )
+
+    @staticmethod
+    def _wait_for_process_loss(pid: int) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and process_start_identity(pid) is not None:
+            time.sleep(0.02)
+        if process_start_identity(pid) is not None:
+            raise AssertionError(f"process {pid} did not exit after SIGKILL")
+
+    @staticmethod
+    def _cleanup_instances(app, task_id: str, instance_ids: tuple[str, ...]) -> None:
+        for instance_id in instance_ids:
+            instance = app.state.container.store.instance.get(task_id, instance_id)
+            if instance is None or instance["status"] == "ARCHIVED":
+                continue
+            with suppress(Exception):
+                if instance["status"] == "SUCCEEDED":
+                    app.state.container.application.archive_instance(
+                        task_id, instance_id
+                    )
+                else:
+                    app.state.container.application.cancel_instance(
+                        task_id, instance_id
+                    )
 
     @staticmethod
     def _envelope(key: str, revision: int) -> dict[str, object]:

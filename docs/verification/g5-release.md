@@ -6,7 +6,9 @@ G5 的唯一完整入口是：
 make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
 
-它依次执行全量 Python/契约/故障测试、Ruff、编译、secret scan、Agent import 边界、前端类型检查与构建、Pyright、Python/npm 依赖漏洞审计、G3 人工审批交付闭环、G4 三真实离线进程闭环、Playwright 六页产品验收，并在最后生成 `build/phase1-evidence.json`。
+它依次执行全量 Python/契约/故障测试、Ruff、编译、secret scan、Agent import 边界、前端类型检查与构建、Pyright、Python/npm 依赖漏洞审计、G3 人工审批交付闭环、G4 三真实进程完整交付与进程丢失恢复、Playwright 产品验收，并在最后生成 `build/phase1-evidence.json`。
+
+候选提交必须先提交且 worktree 保持干净。门禁把四阶段命令、退出码、起止时间、输出摘要和完整日志分别写入 `build/g5-gate-result.json` 与 `build/g5-gate.log`；证据生成器只接受当前 `HEAD` 上全部阶段退出码为 0 且日志摘要匹配的结果。单独执行 `make evidence` 不会制造验收结论。
 
 ## A–G 场景
 
@@ -20,4 +22,4 @@ make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 | F：进程丢失、独立取消、Harness 恢复且不重放 | `tests/e2e/test_g4_multi_image_agent.py`；`tests/crash/test_state_store_recovery.py` |
 | G：PPT-only / Image→PPT 的 required / optional 分支 | `tests/integration/test_domain_commands.py`；`tests/test_contracts.py` |
 
-18 条逐项声明、命令和证据文件在 `phase1-evidence-manifest.json`。生成器要求恰好包含 1–18，并将证据文件 SHA-256 和当前 commit 写入输出，避免“口头验收”或证据与提交错配。
+18 条逐项声明、命令和证据文件在 `phase1-evidence-manifest.json`。生成器要求恰好包含 1–18，并将证据文件 SHA-256、当前 commit、真实门禁结果与日志 SHA-256 写入输出，避免“口头验收”或源码存在即视为通过。

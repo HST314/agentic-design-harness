@@ -84,9 +84,10 @@ claims a real PPT delivery.
   config and secret-redacted key-pool boundaries.
 - Browser: `frontend/e2e/shell.spec.ts` covers Token/cost/budget visibility, explicit
   completeness, redacted credentials, cleared secret input, keyboard access and mobile overflow.
-- Exit gate: `make g4-e2e` launches three pinned real Image processes offline, proves isolated
-  PIDs/ports/directories, `1→2→3→1` credential allocation, local-to-global config overwrite,
-  explicit unreported usage, restart recovery with unchanged job IDs, and independent cancel.
+- Exit gate: `make g4-e2e` launches three pinned real Image processes, proves isolated
+  PIDs/ports/directories, completes three approval-to-verified-delivery workflows and reaches task
+  `SUCCEEDED`. A separate regression freezes monitoring, sends `SIGKILL` to one process group,
+  restarts the control plane, cancels a peer and proves the third job survives without replay.
 
 ## G5 gate evidence
 
@@ -99,5 +100,6 @@ claims a real PPT delivery.
 - Operations: `docs/operations.md` specifies installation, backup, restore, log redaction,
   upgrade/rollback and single-machine limits. `docs/master-api-guide.md` freezes the Master-facing
   command, revision, pagination, error and secret-handling conventions.
-- Evidence: `make evidence` validates exactly RFC items 1–18 and produces a commit-bound file hash
-  index from `docs/verification/phase1-evidence-manifest.json`.
+- Evidence: `make g5-e2e` records all four gate exit codes and log digests before generating the
+  RFC 1–18 file-hash index. `make evidence` alone rejects missing, failed, dirty or cross-commit
+  gate results instead of treating source-file existence as acceptance.

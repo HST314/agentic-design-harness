@@ -143,6 +143,8 @@ class HarnessApplicationService:
                         result = self._resume_start(path, None)
                     elif intent["kind"] in {"START_INSTANCE", "RESTART_INSTANCE"}:
                         result = self._resume_instance_operation(path)
+                    elif intent["kind"] == "CANCEL_TASK":
+                        result = self._resume_cancel_task(path, None)
                     elif intent["kind"] == "RESOLVE_APPROVAL":
                         result = self._resume_approval(path, None)
                     else:
@@ -294,48 +296,142 @@ class HarnessApplicationService:
         *,
         operation_id: str,
         envelope: CommandEnvelope,
+        crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
-        """Stop every cancellable child before committing the task cancellation."""
+        """Durably stop every frozen child before committing task cancellation."""
 
         validate_identifier(operation_id, "operation_id")
         if envelope.actor_type not in {"human", "master"}:
             raise HarnessError(
                 "VALIDATION_ERROR", "Only a human or Master may cancel a task."
             )
-        request = {"task_id": task_id}
-        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds):
+        command_request = {"task_id": task_id}
+        request = {
+            "task_id": task_id,
+            "envelope": envelope.model_dump(mode="json"),
+        }
+        request_sha256 = digest_json(request)
+        intent_path = self._intent_path(operation_id)
+        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
+            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        ):
+            if intent_path.exists():
+                intent = read_json(intent_path)
+                if (
+                    intent.get("kind") != "CANCEL_TASK"
+                    or intent.get("request_sha256") != request_sha256
+                ):
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The application operation id was reused for another request.",
+                        {"operation_id": operation_id},
+                    )
+                if intent["state"] == "COMMITTED":
+                    return deepcopy(intent["result"])
+                if intent["state"] == "ABORTED":
+                    self._raise_terminal_intent(intent)
+                return self._resume_cancel_task(intent_path, crash_hook)
             replayed = self.store.idempotency.lookup(
                 task_id,
                 envelope.idempotency_key,
                 "cancel_task",
-                request,
+                command_request,
             )
             if replayed is not None:
                 return replayed
             self.commands.validate_task_revision(task_id, envelope.expected_revision)
             plan = self.store.plan.get(task_id, task_id)
-            if plan is not None:
-                transitions = self.commands.machine.catalog["agent_instance"]["transitions"]
-                for instance in plan["instances"]:
-                    if "CANCELLED" not in transitions[instance["status"]]:
-                        continue
-                    self.cancel_instance(
-                        task_id,
-                        instance["instance_id"],
-                        operation_id=self._derived_id(
-                            "cancel", operation_id, instance["instance_id"]
-                        ),
-                    )
-            current_revision = self.store.task.revision(task_id, task_id)
-            return self.commands.cancel_task(
-                task_id,
-                CommandEnvelope(
-                    idempotency_key=envelope.idempotency_key,
-                    actor_type=envelope.actor_type,
-                    actor_id=envelope.actor_id,
-                    expected_revision=current_revision,
-                ),
+            transitions = self.commands.machine.catalog["agent_instance"]["transitions"]
+            targets = [
+                {
+                    "instance_id": instance["instance_id"],
+                    "initial_status": instance["status"],
+                }
+                for instance in ([] if plan is None else plan["instances"])
+                if "CANCELLED" in transitions[instance["status"]]
+            ]
+            intent = {
+                "schema_version": "1.0",
+                "kind": "CANCEL_TASK",
+                "operation_id": operation_id,
+                "request_sha256": request_sha256,
+                "request": request,
+                "target_instances": targets,
+                "instance_progress": {
+                    item["instance_id"]: {"state": "PENDING"} for item in targets
+                },
+                "state": "PREPARED",
+                "prepared_at": utc_now(),
+                "result": None,
+            }
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook("after_cancel_task_intent")
+            return self._resume_cancel_task(intent_path, crash_hook)
+
+    def _resume_cancel_task(
+        self, intent_path: Path, crash_hook: CrashHook | None
+    ) -> dict[str, Any]:
+        intent = read_json(intent_path)
+        request = intent["request"]
+        envelope = CommandEnvelope.model_validate(request["envelope"])
+        task_id = request["task_id"]
+        operation_id = intent["operation_id"]
+        transitions = self.commands.machine.catalog["agent_instance"]["transitions"]
+        for target in intent["target_instances"]:
+            instance_id = target["instance_id"]
+            progress = intent["instance_progress"][instance_id]
+            if progress["state"] == "CANCELLED":
+                continue
+            progress.update(
+                {
+                    "state": "CANCELLING",
+                    "started_at": progress.get("started_at") or utc_now(),
+                }
             )
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook(f"before_instance_cancel:{instance_id}")
+            instance = self._instance(task_id, instance_id)
+            if instance["status"] != "CANCELLED":
+                if "CANCELLED" not in transitions[instance["status"]]:
+                    raise HarnessError(
+                        "INVALID_STATE_TRANSITION",
+                        "A frozen task-cancellation target can no longer be cancelled.",
+                        {"instance_id": instance_id, "current": instance["status"]},
+                    )
+                self._cancel_instance(
+                    task_id,
+                    instance_id,
+                    operation_id=self._derived_id(
+                        "cancel", operation_id, instance_id
+                    ),
+                )
+            if crash_hook:
+                crash_hook(f"after_instance_cancel_effect:{instance_id}")
+            progress.update({"state": "CANCELLED", "completed_at": utc_now()})
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook(f"after_instance_cancel:{instance_id}")
+        if crash_hook:
+            crash_hook("before_task_cancel_commit")
+        current_revision = self.store.task.revision(task_id, task_id)
+        result = self.commands.cancel_task(
+            task_id,
+            CommandEnvelope(
+                idempotency_key=envelope.idempotency_key,
+                actor_type=envelope.actor_type,
+                actor_id=envelope.actor_id,
+                expected_revision=current_revision,
+            ),
+        )
+        if crash_hook:
+            crash_hook("after_task_cancel_commit")
+        intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
+        atomic_write_json(intent_path, intent)
+        if crash_hook:
+            crash_hook("after_cancel_task_intent_commit")
+        return deepcopy(result)
 
     def start_instance(
         self,
