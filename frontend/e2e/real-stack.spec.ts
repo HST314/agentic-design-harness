@@ -87,7 +87,10 @@ async function seedRealWorkflow(request: APIRequestContext, deadlineMs: number):
   config.image_runtime_policy = {
     ...config.image_runtime_policy,
     offline_mode: false,
-    category_constraint: { release: "off" },
+    // The approved generic category contributes a blocking asset-rules unknown.
+    // That makes clarification a deterministic protocol requirement even when a
+    // real model decides the prose brief is otherwise complete.
+    category_constraint: { release: "auto" },
     style_direction: { release: "off" },
     skill_invocation: { release: "off" },
     self_check: {
@@ -189,7 +192,12 @@ async function seedRealWorkflow(request: APIRequestContext, deadlineMs: number):
         required: true,
         accepted_mime_types: ["image/png"],
       }],
-      parameters: { variants: 1, usage_context: "P1 no-mock browser acceptance" },
+      parameters: {
+        variants: 1,
+        usage_context: "P1 no-mock browser acceptance",
+        category_id: "generic_visual_delivery",
+        category_version: "1.0",
+      },
       created_at: new Date().toISOString(),
     }],
     providers: { [instanceId]: "ark" },
