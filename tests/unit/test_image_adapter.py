@@ -9,13 +9,14 @@ from unittest.mock import patch
 
 from harness.adapters import PrepareRequest
 from harness.adapters.image import ImageAgentAdapter
-from harness.adapters.image_delivery import stage_final_delivery
+from harness.adapters.image_delivery import normalize_image_delivery, stage_final_delivery
 from harness.adapters.image_workflow import map_advance_payload
 from harness.core.errors import HarnessError
 from harness.services.assets import AssetService
 from harness.services.configuration import ConfigurationService
 from harness.storage.atomic import digest_json
 from harness.storage.repository import utc_now
+from PIL import Image
 from runtime_helpers import build_service, create_task
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -73,6 +74,17 @@ class ImageAdapterTests(unittest.TestCase):
             {
                 "harness_instructions": ["Use the registered brief as the only copy source."],
                 "harness_parameters": {"aspect_ratio": "16:9", "variants": 2},
+                "harness_output_contract": {
+                    "expected_deliveries": [
+                        {
+                            "kind": "image",
+                            "role": "final_artwork",
+                            "required": True,
+                            "accepted_mime_types": ["image/png"],
+                        }
+                    ],
+                    "aspect_ratio": "16:9",
+                },
             },
         )
         self.assertEqual(
@@ -460,6 +472,52 @@ class ImageAdapterTests(unittest.TestCase):
                 expected_sha256="0" * 64,
             )
         self.assertEqual(symlink.exception.code, "ASSET_VALIDATION_FAILED")
+
+    def test_jpeg_delivery_is_deterministically_derived_as_png(self) -> None:
+        source = self.root / "outputs" / "provider-final.jpg"
+        source.parent.mkdir()
+        Image.new("RGB", (32, 18), color=(10, 40, 90)).save(source, format="JPEG", quality=90)
+
+        first = normalize_image_delivery(
+            source,
+            accepted_mime_types=("image/png",),
+        )
+        second = normalize_image_delivery(
+            source,
+            accepted_mime_types=("image/png",),
+        )
+
+        self.assertEqual(first["mime_type"], "image/png")
+        self.assertEqual(first["sha256"], second["sha256"])
+        self.assertEqual(first["path"], second["path"])
+        self.assertEqual(first["derivation"]["source_mime_type"], "image/jpeg")
+        self.assertEqual(first["derivation"]["derived_sha256"], first["sha256"])
+        self.assertTrue(first["path"].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_jpeg_dimensions_are_bounded_before_pixel_decode(self) -> None:
+        source = self.root / "outputs" / "oversized.jpg"
+        source.parent.mkdir()
+        source.write_bytes(b"\xff\xd8\xffsynthetic")
+
+        class OversizedImage:
+            size = (8_000, 8_000)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def load(self):
+                raise AssertionError("pixel decode must not run")
+
+        with patch(
+            "harness.adapters.image_delivery.Image.open",
+            return_value=OversizedImage(),
+        ), self.assertRaises(HarnessError) as rejected:
+            normalize_image_delivery(source, accepted_mime_types=("image/png",))
+
+        self.assertEqual(rejected.exception.code, "ASSET_VALIDATION_FAILED")
 
     @staticmethod
     def _card(input_assets: list[dict[str, str]]) -> dict:

@@ -43,6 +43,13 @@ export interface AgentInstance {
   credential_pair_revision: number;
   ui_url: string | null;
   process: { pid: number; port: number; state: string; started_at: string } | null;
+  delivery_rejection?: {
+    code: string;
+    message: string;
+    details: Record<string, unknown>;
+    rejected_at: string;
+    retryable: boolean;
+  } | null;
 }
 
 export interface TaskPlan {
@@ -392,6 +399,17 @@ export class ApiClient {
     return this.send(
       "POST",
       `/api/v1/instances/${encodeURIComponent(instanceId)}/${operation}`,
+      body,
+    );
+  }
+
+  retryDelivery(
+    instanceId: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.send(
+      "POST",
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/deliveries/retry`,
       body,
     );
   }

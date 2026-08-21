@@ -29,6 +29,7 @@ that the mapping table marks as required.
 | input asset manifest | `source_refs[*]` | `ref_id=asset_id`, `ref_type=kind`, description excerpt, final-file SHA-256. |
 | `parameters.category_id/version` | `category_ref` | Both fields mapped directly when present. |
 | remaining public `parameters` | `known_facts.harness_parameters` | Only schema-declared public fields; credentials and paths are forbidden. |
+| `expected_deliveries` + `parameters.aspect_ratio` | `known_facts.harness_output_contract` | Preserve the required role/kind/MIME set and aspect ratio before any paid call. |
 | no Harness equivalent | Image workflow continuation fields | Omitted on creation; owned by Image Agent after creation. |
 | fixed literal | `status` | `draft` on first creation only. |
 
@@ -65,9 +66,14 @@ phases/capabilities and unsupported payload fields fail closed.
 An Image `artifact://` reference is process-local. Completion discovery accepts only the
 Agent's finalized delivery marker and envelope, opens the delivery through descriptor-safe
 non-following reads, verifies its SHA-256 and stages it into the instance output boundary.
-Asset Service then validates ownership/content, copies and re-hashes the public file, commits
-its manifest and `ASSET_PUBLISHED`, and only then may the application mark the required
-delivery complete. No Agent-local path crosses the Harness contract boundary.
+When the pinned Provider returns JPEG for an explicit PNG-only contract, the Adapter creates
+a deterministic RGB PNG in the private output boundary and records source/derived hashes and
+conversion parameters. Asset Service validates the complete required set before publication,
+prepares every manifest under one visibility batch, and exposes that batch only after the
+instance is durably `SUCCEEDED`. A rejected set stays private and is projected as `FAILED`
+with structured `delivery_rejection`; the dedicated retry command reuses the finalized Agent
+output and does not replay paid model steps. No Agent-local path crosses the Harness contract
+boundary.
 
 ### Token boundary
 

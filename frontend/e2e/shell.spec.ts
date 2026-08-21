@@ -596,6 +596,69 @@ test("instance lifecycle controls submit guarded start, restart, cancel and arch
   });
 });
 
+test("rejected delivery offers isolated revalidation without an Agent restart", async ({ page }) => {
+  let retried = false;
+  let retryBody: Record<string, unknown> | null = null;
+  await page.route("**/api/v1/instances/i_ui", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        task_id: "t_ui",
+        task_revision: retried ? 12 : 11,
+        pending_approval: null,
+        credential: null,
+        config: { config_revision: 1, restart_required: false, config: {} },
+        instance: {
+          instance_id: "i_ui",
+          task_id: "t_ui",
+          agent_type: "image",
+          status: retried ? "SUCCEEDED" : "FAILED",
+          required: true,
+          approval_mode: "human",
+          config_revision: 1,
+          credential_pair_ref: "cred_ui",
+          credential_pair_revision: 1,
+          ui_url: null,
+          process: null,
+          delivery_rejection: retried
+            ? null
+            : {
+                code: "VALIDATION_ERROR",
+                message: "交付 MIME 与 TaskCard 不一致",
+                details: {},
+                rejected_at: "2026-08-20T12:10:00Z",
+                retryable: true,
+              },
+        },
+        observation: null,
+      }),
+    });
+  });
+  await page.route("**/api/v1/instances/i_ui/deliveries/retry", async (route) => {
+    retryBody = route.request().postDataJSON() as Record<string, unknown>;
+    retried = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        result: { instance: { status: "SUCCEEDED" } },
+      }),
+    });
+  });
+
+  await page.goto("/instances/i_ui");
+  await expect(page.getByRole("alert")).toContainText("交付 MIME 与 TaskCard 不一致");
+  await expect(page.getByRole("button", { name: "重启实例" })).toHaveCount(0);
+  await page.getByRole("button", { name: "重新校验交付" }).click();
+
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(retryBody).not.toBeNull();
+  expect((retryBody?.envelope as Record<string, unknown>).expected_revision).toBe(11);
+});
+
 test("resources provide an explicit safe preview and a browser download", async ({ page, context }) => {
   const previewedPaths: string[] = [];
   const downloadedPaths: string[] = [];

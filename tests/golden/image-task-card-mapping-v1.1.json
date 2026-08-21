@@ -59,7 +59,18 @@
     },
     "known_facts": {
       "harness_instructions": ["Use the registered brief as the only copy source."],
-      "harness_parameters": {"aspect_ratio": "16:9", "variants": 2}
+      "harness_parameters": {"aspect_ratio": "16:9", "variants": 2},
+      "harness_output_contract": {
+        "expected_deliveries": [
+          {
+            "kind": "image",
+            "role": "final_artwork",
+            "required": true,
+            "accepted_mime_types": ["image/png"]
+          }
+        ],
+        "aspect_ratio": "16:9"
+      }
     },
     "unknowns": {},
     "asset_inputs": [

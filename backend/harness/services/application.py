@@ -25,6 +25,11 @@ from .credentials import CredentialPoolService
 from .supervisor import ProcessSupervisor
 
 CrashHook = Callable[[str], None]
+_DELIVERY_REJECTION_CODES = {
+    "ASSET_CORRUPTED",
+    "ASSET_VALIDATION_FAILED",
+    "VALIDATION_ERROR",
+}
 
 
 class HarnessApplicationService:
@@ -103,9 +108,7 @@ class HarnessApplicationService:
                     "request_sha256": request_sha256,
                     "request": request,
                     "creation_instances": {
-                        item["instance_id"]: self._creation_summary(
-                            task_id, item, prepared_at
-                        )
+                        item["instance_id"]: self._creation_summary(task_id, item, prepared_at)
                         for item in request["instances"]
                         if item["instance_id"] in providers
                     },
@@ -125,9 +128,7 @@ class HarnessApplicationService:
             initial = read_json(path)
             task_id = initial.get("task_id") or initial.get("request", {}).get("task_id")
             if not isinstance(task_id, str):
-                raise HarnessError(
-                    "VALIDATION_ERROR", "The application intent has no task owner."
-                )
+                raise HarnessError("VALIDATION_ERROR", "The application intent has no task owner.")
             with (
                 FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
                 FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
@@ -181,8 +182,9 @@ class HarnessApplicationService:
         }
         request_sha256 = digest_json(request)
         intent_path = self._intent_path(operation_id)
-        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
-            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
         ):
             if intent_path.exists():
                 intent = read_json(intent_path)
@@ -210,9 +212,7 @@ class HarnessApplicationService:
                         {"current": plan["task"]["status"]},
                     )
                 targets = [
-                    item["instance_id"]
-                    for item in plan["instances"]
-                    if item["status"] == "READY"
+                    item["instance_id"] for item in plan["instances"] if item["status"] == "READY"
                 ]
                 unavailable = [
                     item["instance_id"]
@@ -302,9 +302,7 @@ class HarnessApplicationService:
 
         validate_identifier(operation_id, "operation_id")
         if envelope.actor_type not in {"human", "master"}:
-            raise HarnessError(
-                "VALIDATION_ERROR", "Only a human or Master may cancel a task."
-            )
+            raise HarnessError("VALIDATION_ERROR", "Only a human or Master may cancel a task.")
         command_request = {"task_id": task_id}
         request = {
             "task_id": task_id,
@@ -312,8 +310,9 @@ class HarnessApplicationService:
         }
         request_sha256 = digest_json(request)
         intent_path = self._intent_path(operation_id)
-        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
-            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
         ):
             if intent_path.exists():
                 intent = read_json(intent_path)
@@ -403,9 +402,7 @@ class HarnessApplicationService:
                 self._cancel_instance(
                     task_id,
                     instance_id,
-                    operation_id=self._derived_id(
-                        "cancel", operation_id, instance_id
-                    ),
+                    operation_id=self._derived_id("cancel", operation_id, instance_id),
                 )
             if crash_hook:
                 crash_hook(f"after_instance_cancel_effect:{instance_id}")
@@ -490,15 +487,13 @@ class HarnessApplicationService:
         }
         request_sha256 = digest_json(request)
         intent_path = self._intent_path(operation_id)
-        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
-            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
         ):
             if intent_path.exists():
                 intent = read_json(intent_path)
-                if (
-                    intent.get("kind") != kind
-                    or intent.get("request_sha256") != request_sha256
-                ):
+                if intent.get("kind") != kind or intent.get("request_sha256") != request_sha256:
                     raise HarnessError(
                         "IDEMPOTENCY_CONFLICT",
                         "The application operation id was reused for another request.",
@@ -607,6 +602,98 @@ class HarnessApplicationService:
     def archive_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
         return self._archive_instance(task_id, instance_id)
 
+    def retry_rejected_delivery(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only a human or Master may retry a rejected delivery.",
+            )
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            self.commands.task_guard(task_id),
+        ):
+            transition = self._retry_rejected_delivery_locked(task_id, instance_id, envelope)
+        observed = self.observe_instance(task_id, instance_id)
+        return {"reopened": transition, "result": observed}
+
+    def _retry_rejected_delivery_locked(
+        self,
+        task_id: str,
+        instance_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        ready_request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "target_status": "READY",
+        }
+        ready_replay = self.store.idempotency.lookup(
+            task_id,
+            envelope.idempotency_key,
+            "transition_instance",
+            ready_request,
+        )
+        instance = self._instance(task_id, instance_id)
+        if ready_replay is None:
+            self.commands.validate_task_revision(task_id, envelope.expected_revision)
+            if (
+                instance["status"] not in {"FAILED", "READY", "STARTING", "RUNNING"}
+                or not isinstance(instance.get("delivery_rejection"), dict)
+            ):
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "Only an instance with a rejected delivery may retry publication.",
+                )
+
+        transition = ready_replay
+        if instance["status"] == "FAILED":
+            transition = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "READY",
+                envelope,
+            )
+            instance = self._instance(task_id, instance_id)
+        if instance["status"] == "READY":
+            transition = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "STARTING",
+                self._delivery_retry_envelope(envelope, "starting", task_id),
+            )
+            instance = self._instance(task_id, instance_id)
+        if instance["status"] == "STARTING":
+            transition = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "RUNNING",
+                self._delivery_retry_envelope(envelope, "running", task_id),
+            )
+        if transition is None:
+            transition = {"instance": deepcopy(instance)}
+        return transition
+
+    def _delivery_retry_envelope(
+        self,
+        root: CommandEnvelope,
+        step: str,
+        task_id: str,
+    ) -> CommandEnvelope:
+        return CommandEnvelope(
+            idempotency_key=(
+                f"delivery-retry-{digest_json({'root': root.idempotency_key, 'step': step})[:32]}"
+            ),
+            actor_type=root.actor_type,
+            actor_id=root.actor_id,
+            expected_revision=self.store.task.revision(task_id, task_id),
+        )
+
     def archive_instance_command(
         self,
         task_id: str,
@@ -674,9 +761,7 @@ class HarnessApplicationService:
             raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
         adapter = self.adapters.get(instance["agent_type"])
         if not adapter.available:
-            raise HarnessError(
-                "ADAPTER_UNAVAILABLE", "The instance adapter is not available."
-            )
+            raise HarnessError("ADAPTER_UNAVAILABLE", "The instance adapter is not available.")
         self._require_valid_card(adapter, card)
         task_root = self.store.layout.workspace_root / "tasks" / task_id
         return adapter, adapter.prepare(
@@ -684,11 +769,7 @@ class HarnessApplicationService:
                 instance=deepcopy(instance),
                 task_card=deepcopy(card),
                 task_root=task_root,
-                config_ref=task_root
-                / "instances"
-                / instance_id
-                / "runtime"
-                / "runtime.yaml",
+                config_ref=task_root / "instances" / instance_id / "runtime" / "runtime.yaml",
                 credential_ref=(
                     instance["credential_pair_ref"],
                     instance["credential_pair_revision"],
@@ -711,9 +792,19 @@ class HarnessApplicationService:
                 {"status": observation.status},
             )
         if observation.details.get("completed") is True:
-            delivery = self._collect_publish_and_complete(
-                task_id, instance_id, adapter, observation
-            )
+            try:
+                delivery = self._collect_publish_and_complete(
+                    task_id, instance_id, adapter, observation
+                )
+            except HarnessError as exc:
+                if exc.code not in _DELIVERY_REJECTION_CODES:
+                    raise
+                return self._record_delivery_rejection(
+                    task_id,
+                    instance_id,
+                    observation,
+                    exc,
+                )
             return {
                 "instance": deepcopy(delivery["instance"]),
                 "observation": {
@@ -783,9 +874,7 @@ class HarnessApplicationService:
                 title="Image Agent 执行失败",
                 message=f"实例 {instance_id} 已进入失败状态。请查看实例详情。",
                 deep_link=f"instances/{instance_id}",
-                dedupe_key=(
-                    f"instance-failed:{instance_id}"
-                ),
+                dedupe_key=(f"instance-failed:{instance_id}"),
                 instance_id=instance_id,
             )
         return {
@@ -824,8 +913,9 @@ class HarnessApplicationService:
         }
         request_sha256 = digest_json(request)
         intent_path = self._intent_path(operation_id)
-        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
-            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
         ):
             if intent_path.exists():
                 intent = read_json(intent_path)
@@ -905,9 +995,10 @@ class HarnessApplicationService:
         operation_id: str,
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
-        with FileLock(
-            self._task_lock(task_id), self.store.lock_timeout_seconds
-        ), self.commands.task_guard(task_id):
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            self.commands.task_guard(task_id),
+        ):
             instance = self._instance(task_id, instance_id)
             if instance["status"] == "SUCCEEDED":
                 return self._replay_completed_delivery(
@@ -920,6 +1011,14 @@ class HarnessApplicationService:
                     envelope=envelope,
                 )
             self._require_delivery_command(task_id, instance_id, envelope)
+            batch_id = self._manual_delivery_batch_id(task_id, instance_id)
+            self.assets.inspect_delivery(
+                task_id,
+                instance_id,
+                source_relative_path=source_relative_path,
+                role=role,
+                description=description,
+            )
             manifest = self.assets.publish_delivery(
                 task_id,
                 instance_id,
@@ -927,10 +1026,25 @@ class HarnessApplicationService:
                 role=role,
                 description=description,
                 idempotency_key=operation_id,
+                batch_id=batch_id,
             )
-            transition = self._complete_instance_if_ready(
-                task_id, instance_id, envelope=envelope, require_deliveries=False
-            )
+            prepared = self.assets.list_publication_batch(task_id, instance_id, batch_id)
+            declared = self._declared_delivery_candidates(task_id, instance_id, prepared)
+            transition = None
+            if self._required_delivery_selection(task_id, instance_id, declared) is not None:
+                self.assets.commit_publication_batch(
+                    task_id,
+                    instance_id,
+                    batch_id=batch_id,
+                    manifests=declared,
+                )
+                transition = self._complete_instance_if_ready(
+                    task_id,
+                    instance_id,
+                    envelope=envelope,
+                    require_deliveries=True,
+                    candidate_manifests=declared,
+                )
             return {
                 "manifest": manifest,
                 "complete": transition is not None,
@@ -957,6 +1071,7 @@ class HarnessApplicationService:
             role=role,
             description=description,
             idempotency_key=operation_id,
+            batch_id=self._manual_delivery_batch_id(task_id, instance_id),
         )
         if manifest is None:
             raise HarnessError(
@@ -964,15 +1079,11 @@ class HarnessApplicationService:
                 "A succeeded instance only accepts an exact delivery replay.",
                 {"instance_id": instance_id},
             )
-        transition = self.commands.transition_instance(
-            task_id, instance_id, "SUCCEEDED", envelope
-        )
+        transition = self.commands.transition_instance(task_id, instance_id, "SUCCEEDED", envelope)
         self._ensure_success_notifications(task_id, instance_id, transition)
         return {"manifest": manifest, "complete": True, "transition": transition}
 
-    def _resume_approval(
-        self, intent_path: Path, crash_hook: CrashHook | None
-    ) -> dict[str, Any]:
+    def _resume_approval(self, intent_path: Path, crash_hook: CrashHook | None) -> dict[str, Any]:
         intent = read_json(intent_path)
         request = intent["request"]
         envelope = CommandEnvelope.model_validate(request["envelope"])
@@ -994,9 +1105,7 @@ class HarnessApplicationService:
                 "operation_id": advance.operation_id,
                 "details": deepcopy(advance.details),
             }
-            intent["state"] = (
-                "ADVANCE_ACCEPTED" if advance.accepted else "ADVANCE_REJECTED"
-            )
+            intent["state"] = "ADVANCE_ACCEPTED" if advance.accepted else "ADVANCE_REJECTED"
             atomic_write_json(intent_path, intent)
             if crash_hook:
                 crash_hook("after_adapter_advance")
@@ -1108,16 +1217,38 @@ class HarnessApplicationService:
             actor_id=f"{self._instance(task_id, instance_id)['agent_type']}_adapter",
             expected_revision=self.store.task.revision(task_id, task_id),
         )
-        with FileLock(
-            self._task_lock(task_id), self.store.lock_timeout_seconds
-        ), self.commands.task_guard(task_id):
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            self.commands.task_guard(task_id),
+        ):
             self._require_delivery_command(task_id, instance_id, envelope)
-            manifests = []
-            for delivery in deliveries:
-                operation_id = (
-                    f"collect-{instance_id}-{delivery['sha256'][:16]}-"
-                    f"{hashlib.sha256(delivery['role'].encode()).hexdigest()[:8]}"
+            candidates = [
+                self.assets.inspect_delivery(
+                    task_id,
+                    instance_id,
+                    source_relative_path=delivery["source_relative_path"],
+                    role=delivery["role"],
+                    description=delivery["description"],
+                    expected_sha256=delivery.get("sha256"),
+                    derivation=delivery.get("derivation"),
                 )
+                for delivery in deliveries
+            ]
+            self._validate_required_delivery_set(task_id, instance_id, candidates)
+            batch_payload = sorted(
+                candidates,
+                key=lambda item: (
+                    item["role"],
+                    item["kind"],
+                    item["mime_type"],
+                    item["sha256"],
+                    item["source_relative_path"],
+                ),
+            )
+            batch_id = f"batch_{digest_json(batch_payload)[:24]}"
+            manifests = []
+            for delivery, candidate in zip(deliveries, candidates, strict=True):
+                operation_id = f"collect-{instance_id}-{digest_json(candidate)[:32]}"
                 manifests.append(
                     self.assets.publish_delivery(
                         task_id,
@@ -1126,16 +1257,26 @@ class HarnessApplicationService:
                         role=delivery["role"],
                         description=delivery["description"],
                         idempotency_key=operation_id,
+                        batch_id=batch_id,
+                        derivation=candidate["derivation"],
                     )
                 )
+            self.assets.commit_publication_batch(
+                task_id,
+                instance_id,
+                batch_id=batch_id,
+                manifests=manifests,
+            )
             transition = self._complete_instance_if_ready(
-                task_id, instance_id, envelope=envelope, require_deliveries=True
+                task_id,
+                instance_id,
+                envelope=envelope,
+                require_deliveries=True,
+                candidate_manifests=manifests,
             )
             assert transition is not None
         instance = next(
-            item
-            for item in transition["plan"]["instances"]
-            if item["instance_id"] == instance_id
+            item for item in transition["plan"]["instances"] if item["instance_id"] == instance_id
         )
         return {
             "instance": instance,
@@ -1145,6 +1286,59 @@ class HarnessApplicationService:
                 "step_id": observation.step_id,
                 "details": deepcopy(observation.details),
             },
+        }
+
+    def _record_delivery_rejection(
+        self,
+        task_id: str,
+        instance_id: str,
+        observation,
+        error: HarnessError,
+    ) -> dict[str, Any]:
+        current = self._instance(task_id, instance_id)
+        if current["status"] not in {"RUNNING", "WAITING_APPROVAL"}:
+            raise error
+        rejection = {
+            "code": error.code,
+            "message": error.message[:1000],
+            "details": deepcopy(error.details),
+        }
+        revision = self.store.task.revision(task_id, task_id)
+        transition = self.commands.reject_instance_delivery(
+            task_id,
+            instance_id,
+            rejection,
+            CommandEnvelope(
+                idempotency_key=f"reject-delivery-{digest_json(rejection)[:32]}",
+                actor_type="adapter",
+                actor_id=f"{current['agent_type']}_adapter",
+                expected_revision=revision,
+            ),
+        )
+        instance = next(
+            item for item in transition["plan"]["instances"] if item["instance_id"] == instance_id
+        )
+        self.approvals.ensure_notification(
+            task_id,
+            kind="INSTANCE_DELIVERY_REJECTED",
+            owner="human",
+            title="Agent 交付未通过发布校验",
+            message=f"实例 {instance_id} 的交付已隔离。修复后重新校验不会重跑模型步骤。",
+            deep_link=f"instances/{instance_id}",
+            dedupe_key=f"instance-delivery-rejected:{instance_id}:{digest_json(rejection)[:20]}",
+            instance_id=instance_id,
+        )
+        return {
+            "instance": deepcopy(instance),
+            "observation": {
+                "status": observation.status,
+                "step_id": observation.step_id,
+                "capabilities": list(observation.capabilities),
+                "details": deepcopy(observation.details),
+            },
+            "transition": transition,
+            "approval": None,
+            "delivery": {"status": "REJECTED", "rejection": rejection},
         }
 
     def _require_delivery_command(
@@ -1179,9 +1373,7 @@ class HarnessApplicationService:
         return instance
 
     @staticmethod
-    def _require_owning_adapter(
-        instance: dict[str, Any], envelope: CommandEnvelope
-    ) -> None:
+    def _require_owning_adapter(instance: dict[str, Any], envelope: CommandEnvelope) -> None:
         expected_actor_id = f"{instance['agent_type']}_adapter"
         if envelope.actor_type != "adapter" or envelope.actor_id != expected_actor_id:
             raise HarnessError(
@@ -1201,11 +1393,16 @@ class HarnessApplicationService:
         *,
         envelope: CommandEnvelope,
         require_deliveries: bool,
+        candidate_manifests: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """The sole instance-success gate for manual and collected deliveries."""
 
         self._require_delivery_command(task_id, instance_id, envelope)
-        if not self._required_deliveries_satisfied(task_id, instance_id):
+        if not self._required_deliveries_satisfied(
+            task_id,
+            instance_id,
+            candidate_manifests=candidate_manifests,
+        ):
             if require_deliveries:
                 raise HarnessError(
                     "VALIDATION_ERROR",
@@ -1245,42 +1442,126 @@ class HarnessApplicationService:
                 title="主任务已完成",
                 message=f"任务 {task_id} 的必需阶段均已完成。",
                 deep_link=f"tasks/{task_id}",
-                dedupe_key=(
-                    f"task-complete:{task_id}:"
-                    f"{transition['task']['plan_revision']}"
-                ),
+                dedupe_key=(f"task-complete:{task_id}:" f"{transition['task']['plan_revision']}"),
             )
 
-    def _required_deliveries_satisfied(self, task_id: str, instance_id: str) -> bool:
+    def _validate_required_delivery_set(
+        self,
+        task_id: str,
+        instance_id: str,
+        candidates: list[dict[str, Any]],
+    ) -> None:
+        plan = self._plan(task_id)
+        card = next(item for item in plan["task_cards"] if item["instance_id"] == instance_id)
+        declared = len(
+            self._declared_delivery_candidates(task_id, instance_id, candidates)
+        ) == len(candidates)
+        if declared and self._required_deliveries_satisfied(
+            task_id,
+            instance_id,
+            candidate_manifests=candidates,
+        ):
+            return
+        raise HarnessError(
+            "VALIDATION_ERROR",
+            "Collected Image assets do not satisfy the required delivery contract.",
+            {
+                "required": [
+                    deepcopy(item) for item in card["expected_deliveries"] if item["required"]
+                ],
+                "observed": [
+                    {
+                        "kind": item["kind"],
+                        "role": item["role"],
+                        "mime_type": item["mime_type"],
+                        "sha256": item["sha256"],
+                    }
+                    for item in candidates
+                ],
+            },
+        )
+
+    def _required_deliveries_satisfied(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        candidate_manifests: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        published = candidate_manifests
+        if published is None:
+            published = [
+                self.assets.verify_asset(task_id, item["manifest"]["asset_id"])
+                for item in self.assets.list_assets(task_id)
+                if item["integrity_status"] == "VERIFIED"
+                and item["manifest"].get("producer_instance_id") == instance_id
+            ]
+        return self._required_delivery_selection(task_id, instance_id, published) is not None
+
+    def _required_delivery_selection(
+        self,
+        task_id: str,
+        instance_id: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
         plan = self._plan(task_id)
         card = next(
             item for item in plan["task_cards"] if item["instance_id"] == instance_id
         )
-        published = [
-            self.assets.verify_asset(task_id, item["manifest"]["asset_id"])
-            for item in self.assets.list_assets(task_id)
-            if item["integrity_status"] == "VERIFIED"
-            and item["manifest"].get("producer_instance_id") == instance_id
-        ]
-        return all(
-            any(
-                candidate["role"] == expected["role"]
-                and candidate["kind"] == expected["kind"]
-                and candidate["mime_type"] in expected["accepted_mime_types"]
-                for candidate in published
+        remaining = list(candidates)
+        selected: list[dict[str, Any]] = []
+        for expected in card["expected_deliveries"]:
+            if not expected["required"]:
+                continue
+            match = next(
+                (
+                    index
+                    for index, candidate in enumerate(remaining)
+                    if self._delivery_matches(candidate, expected)
+                ),
+                None,
             )
-            for expected in card["expected_deliveries"]
-            if expected["required"]
+            if match is None:
+                return None
+            selected.append(remaining.pop(match))
+        return selected
+
+    def _declared_delivery_candidates(
+        self,
+        task_id: str,
+        instance_id: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        plan = self._plan(task_id)
+        card = next(
+            item for item in plan["task_cards"] if item["instance_id"] == instance_id
+        )
+        return [
+            candidate
+            for candidate in candidates
+            if any(
+                self._delivery_matches(candidate, expected)
+                for expected in card["expected_deliveries"]
+            )
+        ]
+
+    @staticmethod
+    def _manual_delivery_batch_id(task_id: str, instance_id: str) -> str:
+        digest = hashlib.sha256(f"{task_id}:{instance_id}".encode()).hexdigest()
+        return f"batch_manual_{digest[:20]}"
+
+    @staticmethod
+    def _delivery_matches(candidate: dict[str, Any], expected: dict[str, Any]) -> bool:
+        return (
+            candidate["role"] == expected["role"]
+            and candidate["kind"] == expected["kind"]
+            and candidate["mime_type"] in expected["accepted_mime_types"]
         )
 
-    def _resume_save_plan(
-        self, intent_path: Path, crash_hook: CrashHook | None
-    ) -> dict[str, Any]:
+    def _resume_save_plan(self, intent_path: Path, crash_hook: CrashHook | None) -> dict[str, Any]:
         intent = read_json(intent_path)
         request = intent["request"]
-        actor = Actor(
-            request["envelope"]["actor_type"], request["envelope"]["actor_id"]
-        )
+        actor = Actor(request["envelope"]["actor_type"], request["envelope"]["actor_id"])
         assigned_instances: list[dict[str, Any]] = []
         for raw in request["instances"]:
             instance = deepcopy(raw)
@@ -1307,9 +1588,7 @@ class HarnessApplicationService:
                 instance.update(
                     {
                         "credential_pair_ref": credential["credential_pair_id"],
-                        "credential_pair_revision": credential[
-                            "credential_pair_revision"
-                        ],
+                        "credential_pair_revision": credential["credential_pair_revision"],
                     }
                 )
                 if crash_hook:
@@ -1354,9 +1633,7 @@ class HarnessApplicationService:
                 self.credentials.revoke_instance_creation(
                     request["task_id"],
                     creation_id,
-                    revocation_id=self._derived_id(
-                        "revoke", intent["operation_id"], instance_id
-                    ),
+                    revocation_id=self._derived_id("revoke", intent["operation_id"], instance_id),
                     actor=actor,
                 )
             )
@@ -1379,9 +1656,7 @@ class HarnessApplicationService:
         error = intent["error"]
         raise HarnessError(error["code"], error["message"], deepcopy(error["details"]))
 
-    def _resume_start(
-        self, intent_path: Path, crash_hook: CrashHook | None
-    ) -> dict[str, Any]:
+    def _resume_start(self, intent_path: Path, crash_hook: CrashHook | None) -> dict[str, Any]:
         intent = read_json(intent_path)
         task_id = intent["request"]["task_id"]
         plan = self._plan(task_id)
@@ -1425,11 +1700,7 @@ class HarnessApplicationService:
                     instance=deepcopy(instance),
                     task_card=deepcopy(cards[instance_id]),
                     task_root=task_root,
-                    config_ref=task_root
-                    / "instances"
-                    / instance_id
-                    / "runtime"
-                    / "runtime.yaml",
+                    config_ref=task_root / "instances" / instance_id / "runtime" / "runtime.yaml",
                     credential_ref=(
                         instance["credential_pair_ref"],
                         instance["credential_pair_revision"],
@@ -1534,9 +1805,7 @@ class HarnessApplicationService:
             )
 
     @staticmethod
-    def _creation_summary(
-        task_id: str, raw: dict[str, Any], created_at: str
-    ) -> dict[str, Any]:
+    def _creation_summary(task_id: str, raw: dict[str, Any], created_at: str) -> dict[str, Any]:
         required = bool(raw["required"])
         return {
             **deepcopy(raw),

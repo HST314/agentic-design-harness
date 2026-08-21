@@ -31,7 +31,7 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
-from .image_delivery import stage_final_delivery
+from .image_delivery import normalize_image_delivery, stage_final_delivery
 from .image_runtime import (
     IMAGE_ENTRYPOINT,
     IMAGE_WEB_REQUIREMENTS,
@@ -305,6 +305,10 @@ class ImageAgentAdapter:
             "known_facts": {
                 "harness_instructions": instructions,
                 "harness_parameters": image_parameters,
+                "harness_output_contract": {
+                    "expected_deliveries": deepcopy(card["expected_deliveries"]),
+                    "aspect_ratio": card["parameters"].get("aspect_ratio"),
+                },
             },
             "unknowns": {},
             "asset_inputs": asset_inputs,
@@ -635,17 +639,26 @@ class ImageAgentAdapter:
                 "VALIDATION_ERROR",
                 "The Image delivery cannot be mapped to one required final image role.",
             )
+        normalized = normalize_image_delivery(
+            output,
+            accepted_mime_types=tuple(expected[0]["accepted_mime_types"]),
+        )
+        normalized_path = normalized["path"]
+        normalized_relative = normalized_path.relative_to(instance_root).as_posix()
         note = envelope.get("design_note")
         description = "Image Agent verified final artwork."
         if isinstance(note, dict) and isinstance(note.get("task_fit"), str):
             description = note["task_fit"][:4000] or description
         return [
             {
-                "source_relative_path": (f"instances/{instance_id}/outputs/{output_name}"),
+                "source_relative_path": f"instances/{instance_id}/{normalized_relative}",
                 "kind": "image",
                 "role": expected[0]["role"],
                 "description": description,
-                "sha256": final_image["sha256"],
+                "mime_type": normalized["mime_type"],
+                "size_bytes": normalized["size_bytes"],
+                "sha256": normalized["sha256"],
+                "derivation": normalized["derivation"],
             }
         ]
 
