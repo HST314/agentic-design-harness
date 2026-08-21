@@ -1,8 +1,9 @@
 # Harness web shell
 
 TypeScript/Vite control-plane shell for task navigation, FIFO approval inbox,
-approval routing and verified resource browsing. Professional Agent workflow
-pages remain adapter-provided deep links.
+approval routing, verified resources, Token/cost/retry-budget visibility and
+redacted configuration management. Professional Agent workflow pages remain
+adapter-provided deep links.
 
 ```bash
 npm ci

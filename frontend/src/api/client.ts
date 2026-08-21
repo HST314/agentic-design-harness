@@ -131,6 +131,91 @@ export interface AssetManifest {
   };
 }
 
+export interface TokenTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cached_input_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+}
+
+export interface CostSummary {
+  completeness: "COMPLETE" | "PARTIAL" | "UNKNOWN";
+  known_micros: number;
+  priced_event_count: number;
+  unpriced_event_count: number;
+  price_catalog_revisions: string[];
+}
+
+export interface UsageSummary {
+  schema_version: string;
+  task_id: string;
+  instance_id: string | null;
+  completeness: "COMPLETE" | "PARTIAL" | "NOT_REPORTED";
+  event_count: number;
+  tokens: TokenTotals;
+  cost: CostSummary;
+  instances: Array<{
+    instance_id: string;
+    agent_type: string;
+    completeness: "COMPLETE" | "PARTIAL" | "NOT_REPORTED";
+    event_count: number;
+    tokens: TokenTotals;
+    cost: CostSummary;
+    last_checked_at: string | null;
+  }>;
+  models: Array<{
+    model: string;
+    event_count: number;
+    tokens: TokenTotals;
+    cost: CostSummary;
+  }>;
+  time_buckets: Array<{ hour: string; event_count: number; tokens: TokenTotals }>;
+  events: Array<{
+    event_id: string;
+    instance_id: string;
+    request_id: string;
+    model: string;
+    total_tokens: number;
+    occurred_at: string;
+  }>;
+}
+
+export interface RetryBudget {
+  revision: number;
+  retry_policy: {
+    max_auto_retries_per_retry_group: number;
+    max_auto_retry_tokens_task: number;
+    retry_token_reservation_by_agent: Record<string, number>;
+    max_auto_retry_cost_micros: number | null;
+    price_catalog_revision: string | null;
+  };
+  retry_budget_ledger: {
+    retry_tokens_reserved: number;
+    retry_tokens_settled: number;
+    retry_cost_micros_reserved: number;
+    retry_cost_micros_settled: number | null;
+    frozen: boolean;
+    frozen_reason: string | null;
+  };
+  attempts: Array<{ attempt_id: string; status: string }>;
+}
+
+export interface GlobalConfigResponse {
+  schema_version: string;
+  config: Record<string, unknown> & { revision: number };
+}
+
+export interface CredentialSummary {
+  credential_pair_id: string;
+  provider: string;
+  key_id: string;
+  key_tail: string;
+  base_url_hint: string;
+  revision: number;
+  enabled: boolean;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -176,6 +261,39 @@ export class ApiClient {
     signal?: AbortSignal,
   ): Promise<{ schema_version: string; items: TaskFile[]; assets: AssetManifest[] }> {
     return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/files?group=all`, signal);
+  }
+
+  taskUsage(taskId: string, signal?: AbortSignal): Promise<UsageSummary> {
+    return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/usage`, signal);
+  }
+
+  instanceUsage(instanceId: string, signal?: AbortSignal): Promise<UsageSummary> {
+    return this.get(`/api/v1/instances/${encodeURIComponent(instanceId)}/usage`, signal);
+  }
+
+  retryBudget(
+    taskId: string,
+    signal?: AbortSignal,
+  ): Promise<{ schema_version: string; budget: RetryBudget }> {
+    return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/retry-budget`, signal);
+  }
+
+  globalConfig(signal?: AbortSignal): Promise<GlobalConfigResponse> {
+    return this.get("/api/v1/config/global", signal);
+  }
+
+  keyPool(
+    signal?: AbortSignal,
+  ): Promise<{ schema_version: string; items: CredentialSummary[] }> {
+    return this.get("/api/v1/key-pool", signal);
+  }
+
+  updateGlobalConfig(body: Record<string, unknown>): Promise<GlobalConfigResponse> {
+    return this.send("PUT", "/api/v1/config/global", body);
+  }
+
+  updateKeyPool(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.send("PUT", "/api/v1/key-pool", body);
   }
 
   resolveApproval(

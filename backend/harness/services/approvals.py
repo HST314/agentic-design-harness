@@ -123,6 +123,113 @@ class ApprovalInboxService:
             "notification": notification,
         }
 
+    def ensure_budget_approval(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        attempt_id: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create the human-only, deterministic override request for one retry."""
+
+        validate_identifier(task_id, "task_id")
+        validate_identifier(instance_id, "instance_id")
+        validate_identifier(attempt_id, "attempt_id")
+        instance = self.store.instance.get(task_id, instance_id)
+        if instance is None or instance.get("task_id") != task_id:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        approval_id, step_id = self.budget_approval_identity(
+            task_id, instance_id, attempt_id
+        )
+        approval_lock = self.store.layout.control_root / "locks" / f"approval-{task_id}.lock"
+        with FileLock(approval_lock, self.store.lock_timeout_seconds):
+            existing = self.store.approval.get(task_id, approval_id)
+            if existing is None:
+                now = utc_now()
+                payload_ref = f"approvals/{approval_id}/request.json"
+                workspace = self.store.layout.initialize_task(task_id)[1]
+                approvals_root = resolve_task_path(
+                    workspace,
+                    "approvals",
+                    allowed_prefixes=("approvals",),
+                )
+                approval_dir = approvals_root / approval_id
+                approval_dir.mkdir(exist_ok=True, mode=0o700)
+                atomic_write_json(
+                    approval_dir / "request.json",
+                    {
+                        "schema_version": "1.0",
+                        "approval_id": approval_id,
+                        "task_id": task_id,
+                        "instance_id": instance_id,
+                        "step_id": step_id,
+                        "attempt_id": attempt_id,
+                        "available_actions": ["approve_once"],
+                        "context": deepcopy(context),
+                        "created_at": now,
+                    },
+                    mode=0o640,
+                )
+                existing = {
+                    "schema_version": "1.0",
+                    "approval_id": approval_id,
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "step_id": step_id,
+                    "kind": "BUDGET_OVERRIDE",
+                    "owner": "human",
+                    "status": "PENDING",
+                    "payload_ref": payload_ref,
+                    "created_at": now,
+                    "sequence": self._next_sequence(),
+                    "revision": 1,
+                }
+                self.store.approval.put(
+                    task_id,
+                    approval_id,
+                    existing,
+                    expected_revision=0,
+                    actor=Actor("system", "retry_budget_gate"),
+                    command="ensure_budget_approval",
+                    idempotency_key=f"ensure-{approval_id}",
+                )
+            elif existing["kind"] != "BUDGET_OVERRIDE":
+                raise HarnessError(
+                    "IDEMPOTENCY_CONFLICT",
+                    "The deterministic budget approval id belongs to another request.",
+                )
+        notification = self.ensure_notification(
+            task_id,
+            kind="BUDGET_APPROVAL_REQUIRED",
+            owner="human",
+            title="自动重试需要预算确认",
+            message=f"实例 {instance_id} 的重试 {attempt_id} 被预算闸门阻断。",
+            deep_link=f"inbox?approval_id={approval_id}",
+            dedupe_key=f"budget-approval:{approval_id}",
+            instance_id=instance_id,
+            approval_id=approval_id,
+        )
+        return {
+            "approval": deepcopy(existing),
+            "approval_revision": self.store.approval.revision(task_id, approval_id),
+            "notification": notification,
+        }
+
+    @staticmethod
+    def budget_approval_identity(
+        task_id: str, instance_id: str, attempt_id: str
+    ) -> tuple[str, str]:
+        identity = digest_json(
+            {
+                "kind": "BUDGET_OVERRIDE",
+                "task_id": task_id,
+                "instance_id": instance_id,
+                "attempt_id": attempt_id,
+            }
+        )
+        return f"ap_{identity[:24]}", f"budget_{identity[:24]}"
+
     def ensure_notification(
         self,
         task_id: str,

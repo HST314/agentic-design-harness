@@ -26,7 +26,10 @@ from ..services.approvals import ApprovalInboxService
 from ..services.assets import AssetService
 from ..services.configuration import ConfigurationService
 from ..services.credentials import CredentialPoolService
+from ..services.retry_budget import RetryBudgetService
 from ..services.supervisor import ProcessSupervisor
+from ..services.usage import UsageService
+from ..storage.atomic import read_json
 from ..storage.store import FileStateStore
 from .v1 import build_v1_router
 
@@ -42,6 +45,8 @@ class Container:
     approvals: ApprovalInboxService
     credentials: CredentialPoolService
     configuration: ConfigurationService
+    usage: UsageService
+    retry_budgets: RetryBudgetService
     supervisor: ProcessSupervisor
     adapters: AdapterRegistry
     application: HarnessApplicationService
@@ -66,6 +71,8 @@ def build_container(settings: HarnessSettings) -> Container:
     approvals = ApprovalInboxService(store)
     credentials = CredentialPoolService(store)
     configuration = ConfigurationService(store)
+    usage = UsageService(store)
+    retry_budgets = RetryBudgetService(store, approvals)
     supervisor = ProcessSupervisor(
         store,
         commands,
@@ -89,6 +96,22 @@ def build_container(settings: HarnessSettings) -> Container:
             PptAgentContractAdapter(),
         ]
     )
+
+    def apply_live_config(task_id: str, instance_id: str, snapshot_path: Path) -> bool:
+        instance = store.instance.get(task_id, instance_id)
+        if instance is None:
+            return False
+        adapter = adapters.get(instance["agent_type"])
+        snapshot = read_json(snapshot_path)
+        result = adapter.apply_config(
+            instance_id,
+            snapshot,
+            snapshot["config_revision"],
+            f"config_{instance_id}_{snapshot['config_revision']}",
+        )
+        return result.accepted
+
+    configuration.apply_config = apply_live_config
     application = HarnessApplicationService(
         store,
         commands,
@@ -108,10 +131,40 @@ def build_container(settings: HarnessSettings) -> Container:
         approvals=approvals,
         credentials=credentials,
         configuration=configuration,
+        usage=usage,
+        retry_budgets=retry_budgets,
         supervisor=supervisor,
         adapters=adapters,
         application=application,
     )
+
+
+def recover_adapters(container: Container) -> list[dict[str, Any]]:
+    """Reconcile live Agent protocol state without replaying commands."""
+
+    recovered: list[dict[str, Any]] = []
+    tasks_root = container.store.layout.control_root / "tasks"
+    for task_dir in sorted(tasks_root.iterdir() if tasks_root.exists() else []):
+        if not task_dir.is_dir():
+            continue
+        task_id = task_dir.name
+        plan = container.store.plan.get(task_id, task_id)
+        if plan is None:
+            continue
+        for instance in plan["instances"]:
+            if instance["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+                continue
+            adapter = container.adapters.get(instance["agent_type"])
+            result = adapter.recover(instance)
+            recovered.append(
+                {
+                    "task_id": task_id,
+                    "instance_id": instance["instance_id"],
+                    "recovered": result.recovered,
+                    "status": result.status,
+                }
+            )
+    return recovered
 
 
 def create_app(settings: HarnessSettings | None = None) -> FastAPI:
@@ -127,11 +180,17 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
         container.configuration.initialize()
         credential_recoveries = container.credentials.recover()
         config_recoveries = container.configuration.recover()
+        usage_recoveries = container.usage.recover()
+        retry_budget_recoveries = container.retry_budgets.recover()
         asset_recoveries = container.assets.recover()
         process_recoveries = container.supervisor.reconcile()
         application_recoveries = container.application.recover()
+        adapter_recoveries = recover_adapters(container)
         global_config = container.configuration.get_global()
-        assert global_config is not None
+        if global_config is None:
+            raise HarnessError(
+                "VALIDATION_ERROR", "The global configuration did not initialize."
+            )
         container.supervisor.start_monitoring(
             global_config["supervisor"]["health_interval_seconds"]
         )
@@ -142,9 +201,12 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
                     "recovery_warning_count": len(warnings),
                     "credential_recovery_count": len(credential_recoveries),
                     "config_recovery_count": len(config_recoveries),
+                    "usage_recovery_count": len(usage_recoveries),
+                    "retry_budget_recovery_count": len(retry_budget_recoveries),
                     "asset_recovery_count": len(asset_recoveries),
                     "application_recovery_count": len(application_recoveries),
                     "process_recovery_count": len(process_recoveries),
+                    "adapter_recovery_count": len(adapter_recoveries),
                 }
             },
         )

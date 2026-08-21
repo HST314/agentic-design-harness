@@ -78,18 +78,25 @@ _REQUIRED_ROUTES = frozenset(
         "/api/projects/{project_id}",
         "/api/projects/{project_id}/delivery/finalize",
         "/api/projects/{project_id}/jobs",
+        "/api/projects/{project_id}/policy",
         "/api/projects/{project_id}/timeline",
+        "/api/settings/models",
     }
 )
-_REQUIRED_ROUTE_METHODS = {
-    "/api/health": "get",
-    "/api/jobs/{job_id}": "get",
-    "/api/projects": "post",
-    "/api/projects/{project_id}": "get",
-    "/api/projects/{project_id}/delivery/finalize": "post",
-    "/api/projects/{project_id}/jobs": "post",
-    "/api/projects/{project_id}/timeline": "get",
-}
+_REQUIRED_ROUTE_METHODS = (
+    ("/api/health", "get"),
+    ("/api/jobs/{job_id}", "get"),
+    ("/api/jobs/{job_id}/cancel", "post"),
+    ("/api/projects", "post"),
+    ("/api/projects/{project_id}", "get"),
+    ("/api/projects/{project_id}/delivery/finalize", "post"),
+    ("/api/projects/{project_id}/jobs", "post"),
+    ("/api/projects/{project_id}/policy", "post"),
+    ("/api/projects/{project_id}/timeline", "get"),
+    ("/api/settings/models", "get"),
+    ("/api/settings/models", "post"),
+)
+
 
 class ImageAgentAdapter:
     """Translate frozen Harness contracts to the Image Agent's local HTTP API."""
@@ -312,12 +319,9 @@ class ImageAgentAdapter:
         base_url = self._base_url(task_id, instance_id)
         compatibility = self._check_compatibility(base_url)
         runtime_config = read_json(
-            self.store.layout.initialize_instance(task_id, instance_id)
-            / "runtime-config.json"
+            self.store.layout.initialize_instance(task_id, instance_id) / "runtime-config.json"
         )
-        offline_mode = runtime_config["config"]["image_runtime_policy"][
-            "offline_mode"
-        ]
+        offline_mode = runtime_config["config"]["image_runtime_policy"]["offline_mode"]
         card = read_json(
             self.store.layout.initialize_instance(task_id, instance_id)
             / "runtime"
@@ -362,6 +366,42 @@ class ImageAgentAdapter:
             accepted=True,
             operation_id=operation_id,
             details={"job_id": job["job_id"], "job_status": job["status"]},
+        )
+
+    def stop(self, instance_id: str, reason: str, operation_id: str) -> AdapterCommandResult:
+        validate_identifier(operation_id, "operation_id")
+        if not reason or len(reason) > 256 or "\x00" in reason:
+            raise HarnessError("VALIDATION_ERROR", "The stop reason is invalid.")
+        task_id = self._task_id_for_instance(instance_id)
+        state = self._state(task_id, instance_id)
+        job_id = state.get("job_id")
+        job_status = None
+        if isinstance(job_id, str):
+            base_url = self._base_url(task_id, instance_id)
+            current = self._request(base_url, "GET", f"/api/jobs/{job_id}")
+            self._require_job(current)
+            job_status = current["status"]
+            if job_status in _ACTIVE_JOB_STATES:
+                cancelled = self._request(
+                    base_url,
+                    "POST",
+                    f"/api/jobs/{job_id}/cancel",
+                    {},
+                )
+                self._require_job(cancelled)
+                job_status = cancelled["status"]
+        state.update(
+            {
+                "stop_operation_id": operation_id,
+                "stop_reason": reason,
+                "job_status_at_stop": job_status,
+            }
+        )
+        self._write_state(task_id, instance_id, state)
+        return AdapterCommandResult(
+            accepted=True,
+            operation_id=operation_id,
+            details={"job_id": job_id, "job_status": job_status},
         )
 
     def get_status(self, instance_id: str) -> AdapterObservation:
@@ -435,10 +475,99 @@ class ImageAgentAdapter:
         revision: int,
         operation_id: str,
     ) -> AdapterCommandResult:
-        raise HarnessError(
-            "ADAPTER_UNAVAILABLE",
-            "Live Image configuration application is scheduled for the G4 gate.",
-            {"instance_id": instance_id},
+        validate_identifier(operation_id, "operation_id")
+        task_id = self._task_id_for_instance(instance_id)
+        base_url = self._base_url(task_id, instance_id)
+        self._check_compatibility(base_url)
+        files = self.configuration.image_runtime_files(config)
+        policy = files["runtime.yaml"]
+        target_bindings = {
+            item["state"]: item for item in files["model-config.yaml"]["state_bindings"]
+        }
+        settings = self._request(base_url, "GET", "/api/settings/models")
+        updates: dict[str, str] = {}
+        if not isinstance(settings, dict):
+            self._protocol_error("Image Agent model settings response is malformed.")
+        library = settings.get("library")
+        states = settings.get("states")
+        if not isinstance(library, dict) or not isinstance(states, list):
+            self._protocol_error("Image Agent model settings response is malformed.")
+        for state in states:
+            if not isinstance(state, dict) or not isinstance(state.get("state"), str):
+                self._protocol_error("Image Agent model settings response is malformed.")
+            target = target_bindings.get(state["state"])
+            if target is None:
+                continue
+            current = state.get("binding")
+            if (
+                isinstance(current, dict)
+                and current.get("provider") == target["provider"]
+                and current.get("model") == target["model"]
+            ):
+                continue
+            group = state.get("group")
+            options = library.get(group) if isinstance(group, str) else None
+            if not isinstance(options, list):
+                self._protocol_error("Image Agent model library response is malformed.")
+            match = next(
+                (
+                    item
+                    for item in options
+                    if isinstance(item, dict)
+                    and item.get("provider") == target["provider"]
+                    and item.get("model") == target["model"]
+                    and isinstance(item.get("id"), str)
+                ),
+                None,
+            )
+            if match is None:
+                return AdapterCommandResult(
+                    accepted=False,
+                    operation_id=operation_id,
+                    details={
+                        "config_revision": revision,
+                        "restart_required": True,
+                        "reason": "MODEL_BINDING_NOT_HOT_APPLICABLE",
+                        "state": state["state"],
+                    },
+                )
+            updates[state["state"]] = match["id"]
+        # Complete the model preflight before the first mutation. A binding
+        # that cannot be hot-applied must not leave only the policy half of the
+        # requested configuration active.
+        self._request(
+            base_url,
+            "POST",
+            f"/api/projects/{instance_id}/policy",
+            {
+                "policy": policy,
+                "actor": "harness_config_service",
+                "confirmed": True,
+            },
+        )
+        if updates:
+            self._request(
+                base_url,
+                "POST",
+                "/api/settings/models",
+                {
+                    "bindings": updates,
+                    "actor": "harness_config_service",
+                    "confirmed": True,
+                },
+            )
+        state = self._state(task_id, instance_id)
+        state["config_revision"] = revision
+        state["config_operation_id"] = operation_id
+        self._write_state(task_id, instance_id, state)
+        return AdapterCommandResult(
+            accepted=True,
+            operation_id=operation_id,
+            details={
+                "config_revision": revision,
+                "restart_required": False,
+                "updated_model_bindings": sorted(updates),
+            },
         )
 
     def collect_deliveries(self, instance_id: str) -> list[dict[str, Any]]:
@@ -510,9 +639,7 @@ class ImageAgentAdapter:
             description = note["task_fit"][:4000] or description
         return [
             {
-                "source_relative_path": (
-                    f"instances/{instance_id}/outputs/{output_name}"
-                ),
+                "source_relative_path": (f"instances/{instance_id}/outputs/{output_name}"),
                 "kind": "image",
                 "role": expected[0]["role"],
                 "description": description,
@@ -521,6 +648,10 @@ class ImageAgentAdapter:
         ]
 
     def collect_usage(self, instance_id: str, cursor: str | None) -> list[dict[str, Any]]:
+        # The pinned Image Agent does not expose provider usage yet. Returning
+        # an empty observation is deliberate: UsageService persists
+        # NOT_REPORTED instead of manufacturing a zero-Token event.
+        self._task_id_for_instance(instance_id)
         return []
 
     def get_ui_url(self, instance_id: str) -> str | None:
@@ -534,7 +665,18 @@ class ImageAgentAdapter:
         if not self._state_path(task_id, instance_id).exists():
             return AdapterRecoveryResult(recovered=False, status="FAILED")
         status = str(instance_snapshot["status"])
-        return AdapterRecoveryResult(recovered=True, status=status)
+        if status not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+            return AdapterRecoveryResult(recovered=True, status=status)
+        observation = self.get_status(instance_id)
+        return AdapterRecoveryResult(
+            recovered=True,
+            status=observation.status,
+            details={
+                "step_id": observation.step_id,
+                "capabilities": list(observation.capabilities),
+                "compatibility": observation.details.get("compatibility"),
+            },
+        )
 
     def _observation(
         self,
@@ -553,18 +695,17 @@ class ImageAgentAdapter:
         manifest = view.get("manifest")
         snapshot = view.get("snapshot")
         capabilities = view.get("capabilities")
-        if not isinstance(manifest, dict) or not isinstance(snapshot, dict) or not isinstance(
-            capabilities, list
+        if (
+            not isinstance(manifest, dict)
+            or not isinstance(snapshot, dict)
+            or not isinstance(capabilities, list)
         ):
             return self._compatibility_failure(details, "Image project response is malformed.")
         failed_step = manifest.get("failed_step")
         if failed_step is not None and not isinstance(failed_step, dict):
-            return self._compatibility_failure(
-                details, "Image project manifest is malformed."
-            )
+            return self._compatibility_failure(details, "Image project manifest is malformed.")
         if any(
-            not isinstance(item, str) or item not in KNOWN_CAPABILITIES
-            for item in capabilities
+            not isinstance(item, str) or item not in KNOWN_CAPABILITIES for item in capabilities
         ) or len(capabilities) != len(set(capabilities)):
             return self._compatibility_failure(
                 details, "Image Agent returned an unknown capability or duplicate capability."
@@ -578,12 +719,9 @@ class ImageAgentAdapter:
             )
         phase = snapshot.get("phase")
         if snapshot and (
-            not isinstance(phase, str)
-            or phase not in WAITING_PHASES | RUNNING_PHASES
+            not isinstance(phase, str) or phase not in WAITING_PHASES | RUNNING_PHASES
         ):
-            return self._compatibility_failure(
-                details, "Image Agent returned an unknown phase."
-            )
+            return self._compatibility_failure(details, "Image Agent returned an unknown phase.")
         if not snapshot and capabilities:
             return self._compatibility_failure(
                 details, "An empty Image snapshot published capabilities."
@@ -594,9 +732,7 @@ class ImageAgentAdapter:
                 return self._compatibility_failure(
                     details, "Image Agent returned a malformed workflow state."
                 )
-            normalized_capabilities = normalize_workflow_capabilities(
-                snapshot, capabilities
-            )
+            normalized_capabilities = normalize_workflow_capabilities(snapshot, capabilities)
             normalized_capabilities = tuple(
                 item for item in normalized_capabilities if item in HARNESS_CAPABILITIES
             )
@@ -693,17 +829,14 @@ class ImageAgentAdapter:
         create_schema = components.get("CreateProjectRequest")
         advance_schema = components.get("AdvanceRequest")
         required_routes_valid = all(
-            isinstance(paths.get(route), dict)
-            and isinstance(paths[route].get(method), dict)
-            for route, method in _REQUIRED_ROUTE_METHODS.items()
+            isinstance(paths.get(route), dict) and isinstance(paths[route].get(method), dict)
+            for route, method in _REQUIRED_ROUTE_METHODS
         )
         if not isinstance(create_schema, dict) or not isinstance(advance_schema, dict):
             self._protocol_error("Image Agent OpenAPI metadata is malformed.")
         create_properties = create_schema.get("properties")
         advance_properties = advance_schema.get("properties")
-        if not isinstance(create_properties, dict) or not isinstance(
-            advance_properties, dict
-        ):
+        if not isinstance(create_properties, dict) or not isinstance(advance_properties, dict):
             self._protocol_error("Image Agent OpenAPI metadata is malformed.")
         if (
             not isinstance(api_version, str)
@@ -786,9 +919,7 @@ class ImageAgentAdapter:
             "finished_at",
         ):
             if field in job and not isinstance(job[field], str):
-                ImageAgentAdapter._protocol_error(
-                    "Image Agent returned an invalid job record."
-                )
+                ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
         error = job.get("error")
         if error is not None and (
             not isinstance(error, dict)
@@ -806,9 +937,7 @@ class ImageAgentAdapter:
         events = job.get("events")
         if events is not None:
             if not isinstance(events, list):
-                ImageAgentAdapter._protocol_error(
-                    "Image Agent returned an invalid job record."
-                )
+                ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
             previous_sequence = 0
             for event in events:
                 if (
@@ -818,9 +947,7 @@ class ImageAgentAdapter:
                     or not isinstance(event.get("type"), str)
                     or not isinstance(event.get("timestamp"), str)
                 ):
-                    ImageAgentAdapter._protocol_error(
-                        "Image Agent returned an invalid job record."
-                    )
+                    ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
                 previous_sequence = event["seq"]
 
     @staticmethod
@@ -841,9 +968,7 @@ class ImageAgentAdapter:
                 or not isinstance(item.get("type"), str)
                 or not isinstance(item.get("timestamp"), str)
             ):
-                ImageAgentAdapter._protocol_error(
-                    "Image Agent returned an invalid timeline page."
-                )
+                ImageAgentAdapter._protocol_error("Image Agent returned an invalid timeline page.")
             sequences.append(item["sequence"])
         cursor = timeline.get("next_cursor")
         if (
@@ -921,9 +1046,7 @@ class ImageAgentAdapter:
         instance = self.store.instance.get(task_id, instance_id)
         process = None if instance is None else instance.get("process")
         if not isinstance(process, dict) or process.get("state") != "RUNNING":
-            raise HarnessError(
-                "PROCESS_START_FAILED", "The Image Agent process is not running."
-            )
+            raise HarnessError("PROCESS_START_FAILED", "The Image Agent process is not running.")
         return f"http://{self.host}:{int(process['port'])}"
 
     def _state_path(self, task_id: str, instance_id: str) -> Path:
@@ -936,9 +1059,7 @@ class ImageAgentAdapter:
     def _state(self, task_id: str, instance_id: str) -> dict[str, Any]:
         path = self._state_path(task_id, instance_id)
         if not path.exists():
-            raise HarnessError(
-                "PROCESS_START_FAILED", "The Image Agent adapter was not prepared."
-            )
+            raise HarnessError("PROCESS_START_FAILED", "The Image Agent adapter was not prepared.")
         return read_json(path)
 
     def _write_state(self, task_id: str, instance_id: str, state: dict[str, Any]) -> None:

@@ -31,6 +31,11 @@ class PptAgentContractAdapter:
     def start(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
         self._unavailable(instance_id)
 
+    def stop(
+        self, instance_id: str, reason: str, operation_id: str
+    ) -> AdapterCommandResult:
+        self._unavailable(instance_id)
+
     def get_status(self, instance_id: str) -> AdapterObservation:
         return AdapterObservation(
             status="UNAVAILABLE",

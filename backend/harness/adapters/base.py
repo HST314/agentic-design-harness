@@ -59,6 +59,10 @@ class AgentAdapter(Protocol):
 
     def start(self, instance_id: str, operation_id: str) -> AdapterCommandResult: ...
 
+    def stop(
+        self, instance_id: str, reason: str, operation_id: str
+    ) -> AdapterCommandResult: ...
+
     def get_status(self, instance_id: str) -> AdapterObservation: ...
 
     def request_advance(

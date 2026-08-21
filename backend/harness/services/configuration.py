@@ -260,6 +260,13 @@ class ConfigurationService:
             }
             append_record(self._task_events(task_id), event)
             self._materialize_instance_config(snapshot, instance)
+            return deepcopy(snapshot)
+
+    def get_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
+        self._instance(task_id, instance_id)
+        snapshot = self._read_instance_config(task_id, instance_id)
+        if snapshot is None:
+            snapshot = self.create_instance_snapshot(task_id, instance_id)
         return deepcopy(snapshot)
 
     def update_instance(
