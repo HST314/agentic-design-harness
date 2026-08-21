@@ -8,8 +8,8 @@ from typing import Any
 from harness.contracts import ContractRegistry
 from harness.domain.commands import CommandEnvelope
 from harness.domain.service import TaskCommandService
+from harness.storage.atomic import atomic_write_json
 from harness.storage.store import FileStateStore
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS_ROOT = PROJECT_ROOT / "contracts" / "v1"
@@ -24,6 +24,34 @@ def build_service(root: Path) -> tuple[FileStateStore, TaskCommandService]:
     store = build_store(root)
     store.start()
     return store, TaskCommandService(store, store.contracts)
+
+
+def register_model_call_attempt(
+    store: FileStateStore,
+    task_id: str,
+    instance_id: str,
+    attempt_id: str,
+) -> dict[str, Any]:
+    """Create the authoritative record normally written by ProcessSupervisor."""
+    record = {
+        "attempt_id": attempt_id,
+        "request_id": f"request_{attempt_id}",
+        "task_id": task_id,
+        "instance_id": instance_id,
+        "launch_id": f"launch_{instance_id}",
+        "status": "COMPLETED",
+        "started_at": "2026-08-21T02:00:00Z",
+        "completed_at": "2026-08-21T02:00:01Z",
+    }
+    path = (
+        store.layout.control_root
+        / "tasks"
+        / task_id
+        / "attempts"
+        / f"{attempt_id}.json"
+    )
+    atomic_write_json(path, record)
+    return record
 
 
 def envelope(
