@@ -1,5 +1,11 @@
 import { defineConfig } from "@playwright/test";
 
+const browserEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter(
+    ([name]) => !["HARNESS_BROWSER_PROVIDER_API_KEY", "HARNESS_BROWSER_PROVIDER_URL"].includes(name),
+  ),
+);
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 90_000,
@@ -10,8 +16,11 @@ export default defineConfig({
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL,
     trace: process.env.HARNESS_BROWSER_REAL_PROVIDER === "1" ? "off" : "retain-on-failure",
-    launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
-      : undefined,
+    launchOptions: {
+      ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+        ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+        : {}),
+      env: browserEnvironment,
+    },
   },
 });

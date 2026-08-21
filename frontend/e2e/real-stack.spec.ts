@@ -1,4 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 
 const taskId = "t_browser_real_stack";
@@ -32,14 +34,32 @@ type GatePhase =
   | "advance_approval"
   | "assert_completion"
   | "assert_clarification"
-  | "assert_usage"
+  | "assert_usage_completeness"
+  | "assert_text_usage"
+  | "assert_image_usage"
+  | "assert_vlm_usage"
+  | "assert_cost_completeness"
   | "assert_usage_ui"
-  | "assert_delivery_ui";
+  | "assert_delivery_ui"
+  | "persist_evidence";
 
 type UsageCounts = {
   reasoning_llm: number;
   text_to_image_model: number;
   vision_language_model: number;
+};
+
+type BrowserErrorCounts = {
+  failed_requests: number;
+  console_errors: number;
+  page_errors: number;
+  http_error_responses: number;
+};
+
+type BrowserErrorDiagnostics = BrowserErrorCounts & {
+  console_error_codes: string[];
+  page_error_codes: string[];
+  http_error_routes: string[];
 };
 
 function remainingWorkflowBudget(deadlineMs: number): number {
@@ -258,6 +278,7 @@ async function redactedFailureDiagnostics(
   phase: GatePhase,
   advancedActions: string[],
   lastStatus: string,
+  browserErrors: BrowserErrorDiagnostics,
 ): Promise<Record<string, unknown>> {
   let status = safeInstanceStatus(lastStatus);
   let usageCounts: UsageCounts = {
@@ -291,7 +312,127 @@ async function redactedFailureDiagnostics(
     usage_counts: usageCounts,
     usage_available: usageAvailable,
     answer_clarification_observed: advancedActions.includes("answer_clarification"),
+    browser_error_counts: browserErrors,
   };
+}
+
+function consoleErrorCode(message: string): string {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("failed to load resource")) return "RESOURCE_LOAD_ERROR";
+  if (normalized.includes("content security policy")) return "CONTENT_SECURITY_POLICY_ERROR";
+  if (normalized.includes("uncaught")) return "UNCAUGHT_CONSOLE_ERROR";
+  return "OTHER_CONSOLE_ERROR";
+}
+
+function localErrorRoute(status: number, method: string, rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    const local = url.hostname === "127.0.0.1" || url.hostname === "localhost";
+    return `${status} ${method} ${local ? url.pathname : "EXTERNAL_ORIGIN"}`;
+  } catch {
+    return `${status} ${method} INVALID_URL`;
+  }
+}
+
+function usageCallEvidence(
+  usage: Record<string, any>,
+  callType: keyof UsageCounts,
+): Record<string, number> {
+  const events = Array.isArray(usage.events)
+    ? usage.events.filter((event: Record<string, any>) => event?.call_type === callType)
+    : [];
+  return {
+    event_count: events.length,
+    total_tokens: events.reduce(
+      (total: number, event: Record<string, any>) => total + Number(event.total_tokens ?? 0),
+      0,
+    ),
+    image_units: events.reduce(
+      (total: number, event: Record<string, any>) => total + (
+        Array.isArray(event.billing_units)
+          ? event.billing_units
+              .filter((unit: Record<string, any>) => unit?.unit === "image")
+              .reduce(
+                (units: number, unit: Record<string, any>) => units + Number(unit.quantity ?? 0),
+                0,
+              )
+          : 0
+      ),
+      0,
+    ),
+  };
+}
+
+async function persistRedactedEvidence(
+  usage: Record<string, any>,
+  delivery: Record<string, any>,
+  deliveryStatus: string,
+  advancedActions: string[],
+  browserErrors: BrowserErrorCounts,
+  startedAtMs: number,
+): Promise<void> {
+  const evidencePath = process.env.HARNESS_BROWSER_EVIDENCE_PATH;
+  if (!evidencePath) return;
+  const payload = {
+    schema_version: "real-provider-browser-evidence.v2",
+    generated_at_utc: new Date().toISOString(),
+    baseline: {
+      harness_commit: process.env.HARNESS_BROWSER_HARNESS_COMMIT ?? "UNKNOWN",
+      image_agent_commit: process.env.HARNESS_BROWSER_IMAGE_AGENT_COMMIT ?? "UNKNOWN",
+      harness_worktree_clean: process.env.HARNESS_BROWSER_HARNESS_CLEAN === "1",
+      image_agent_worktree_clean: process.env.HARNESS_BROWSER_IMAGE_AGENT_CLEAN === "1",
+      playwright_version: process.env.HARNESS_BROWSER_PLAYWRIGHT_VERSION ?? "UNKNOWN",
+      chromium_revision: process.env.HARNESS_BROWSER_CHROMIUM_REVISION ?? "UNKNOWN",
+      browser_version: process.env.HARNESS_BROWSER_VERSION ?? "UNKNOWN",
+    },
+    execution: {
+      provider_mode: process.env.HARNESS_BROWSER_REAL_PROVIDER === "1"
+        ? "real_external"
+        : "deterministic_local",
+      browser_api_mocked: false,
+      production_frontend_build: true,
+      real_harness_process: true,
+      real_image_agent_subprocess: true,
+      result: "PASSED",
+      duration_ms: Math.round(performance.now() - startedAtMs),
+    },
+    models: {
+      reasoning_llm: process.env.HARNESS_BROWSER_TEXT_MODEL ?? "UNKNOWN",
+      text_to_image_model: process.env.HARNESS_BROWSER_IMAGE_MODEL ?? "UNKNOWN",
+      vision_language_model: process.env.HARNESS_BROWSER_VLM_MODEL ?? "UNKNOWN",
+    },
+    assertions: {
+      instance_terminal_status: "SUCCEEDED",
+      action_sequence: advancedActions,
+      answer_clarification_observed: advancedActions.includes("answer_clarification"),
+      usage_completeness: String(usage.completeness),
+      cost_completeness: String(usage.cost?.completeness ?? "UNKNOWN"),
+      usage: {
+        reasoning_llm: usageCallEvidence(usage, "reasoning_llm"),
+        text_to_image_model: usageCallEvidence(usage, "text_to_image_model"),
+        vision_language_model: usageCallEvidence(usage, "vision_language_model"),
+      },
+      public_delivery_count: 1,
+      public_delivery: {
+        mime_type: String(delivery.mime_type),
+        sha256: String(delivery.sha256),
+        integrity_status: deliveryStatus,
+      },
+      browser_error_counts: browserErrors,
+    },
+    secrets: {
+      credential_value_recorded: false,
+      provider_url_recorded: false,
+      provider_response_body_recorded: false,
+    },
+  };
+  await mkdir(dirname(evidencePath), { recursive: true });
+  const temporaryPath = `${evidencePath}.tmp-${process.pid}`;
+  await writeFile(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  await rename(temporaryPath, evidencePath);
 }
 
 function clarificationAnswers(context: Record<string, any>): Record<string, unknown> {
@@ -398,6 +539,7 @@ async function approveInUi(
 }
 
 test("production build completes a real backend workflow without browser API mocks", async ({ page, request }) => {
+  const startedAtMs = performance.now();
   const deterministicProvider = process.env.HARNESS_BROWSER_REAL_PROVIDER !== "1";
   const workflowBudgetMs = deterministicProvider
     ? deterministicProviderWorkflowBudgetMs
@@ -412,11 +554,33 @@ test("production build completes a real backend workflow without browser API moc
   const imageModel = process.env.HARNESS_BROWSER_IMAGE_MODEL ?? "browser-image";
   const failedRequests: string[] = [];
   const advancedActions: string[] = [];
+  const consoleErrorCodes: string[] = [];
+  const pageErrorCodes: string[] = [];
+  const httpErrorRoutes: string[] = [];
+  let consoleErrorCount = 0;
+  let pageErrorCount = 0;
   let phase: GatePhase = "seed_workflow";
   let lastStatus = "UNKNOWN";
   page.on("requestfailed", (failed) => {
     if (failed.failure()?.errorText !== "net::ERR_ABORTED") {
       failedRequests.push(`${failed.method()} ${failed.url()}: ${failed.failure()?.errorText}`);
+    }
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      consoleErrorCount += 1;
+      consoleErrorCodes.push(consoleErrorCode(message.text()));
+    }
+  });
+  page.on("pageerror", (error) => {
+    pageErrorCount += 1;
+    pageErrorCodes.push(error.name || "UNKNOWN_PAGE_ERROR");
+  });
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      httpErrorRoutes.push(
+        localErrorRoute(response.status(), response.request().method(), response.url()),
+      );
     }
   });
 
@@ -461,7 +625,7 @@ test("production build completes a real backend workflow without browser API moc
     phase = "assert_clarification";
     expect(advancedActions).toContain("answer_clarification");
 
-    phase = "assert_usage";
+    phase = "assert_usage_completeness";
     const usage = await jsonRequest(
       request,
       "get",
@@ -470,6 +634,7 @@ test("production build completes a real backend workflow without browser API moc
       workflowDeadlineMs,
     );
     expect(usage.completeness).toBe("COMPLETE");
+    phase = "assert_text_usage";
     const textEvents = usage.events.filter(
       (event: Record<string, any>) => event.call_type === "reasoning_llm",
     );
@@ -477,6 +642,7 @@ test("production build completes a real backend workflow without browser API moc
     expect(textEvents.every((event: Record<string, any>) =>
       event.usage_basis === "tokens" && event.total_tokens > 0,
     )).toBe(true);
+    phase = "assert_image_usage";
     const imageEvents = usage.events.filter(
       (event: Record<string, any>) => event.call_type === "text_to_image_model",
     );
@@ -488,6 +654,7 @@ test("production build completes a real backend workflow without browser API moc
         && event.billing_units[0].unit === "image"
         && event.billing_units[0].attributes.resolution === "2560x1440",
     )).toBe(true);
+    phase = "assert_vlm_usage";
     const vlmEvents = usage.events.filter(
       (event: Record<string, any>) => event.call_type === "vision_language_model",
     );
@@ -496,6 +663,7 @@ test("production build completes a real backend workflow without browser API moc
       event.usage_basis === "tokens" && event.total_tokens > 0,
     )).toBe(true);
     expect(usage.tokens.total_tokens).toBeGreaterThan(0);
+    phase = "assert_cost_completeness";
     expect(usage.cost.completeness).toBe("UNKNOWN");
 
     phase = "assert_usage_ui";
@@ -529,13 +697,58 @@ test("production build completes a real backend workflow without browser API moc
     await expect(shared.getByText("VERIFIED", { exact: true })).toBeVisible({
       timeout: remainingWorkflowBudget(workflowDeadlineMs),
     });
-    expect(failedRequests).toEqual([]);
+    const sharedFiles = await jsonRequest(
+      request,
+      "get",
+      `/api/v1/tasks/${taskId}/files?group=shared`,
+      undefined,
+      workflowDeadlineMs,
+    );
+    const publicAssets = sharedFiles.assets.filter(
+      (asset: Record<string, any>) => asset?.manifest?.producer_instance_id === instanceId,
+    );
+    expect(publicAssets).toHaveLength(1);
+    expect(publicAssets[0].integrity_status).toBe("VERIFIED");
+    const delivery = sharedFiles.items.find(
+      (item: Record<string, any>) =>
+        item?.relative_path === publicAssets[0].manifest.relative_path,
+    );
+    expect(delivery).toBeDefined();
+    const browserErrors: BrowserErrorCounts = {
+      failed_requests: failedRequests.length,
+      console_errors: consoleErrorCount,
+      page_errors: pageErrorCount,
+      http_error_responses: httpErrorRoutes.length,
+    };
+    expect(browserErrors.failed_requests).toBe(0);
+    expect(browserErrors.console_errors).toBe(0);
+    expect(browserErrors.page_errors).toBe(0);
+    expect(browserErrors.http_error_responses).toBe(0);
+
+    phase = "persist_evidence";
+    await persistRedactedEvidence(
+      usage,
+      delivery,
+      String(publicAssets[0].integrity_status),
+      advancedActions,
+      browserErrors,
+      startedAtMs,
+    );
   } catch {
     const diagnostics = await redactedFailureDiagnostics(
       request,
       phase,
       advancedActions,
       lastStatus,
+      {
+        failed_requests: failedRequests.length,
+        console_errors: consoleErrorCount,
+        page_errors: pageErrorCount,
+        http_error_responses: httpErrorRoutes.length,
+        console_error_codes: consoleErrorCodes,
+        page_error_codes: pageErrorCodes,
+        http_error_routes: httpErrorRoutes,
+      },
     );
     throw new Error(
       `Real-provider smoke failed; redacted diagnostics only: ${JSON.stringify(diagnostics)}`,

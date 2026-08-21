@@ -5,8 +5,12 @@ PYTHONPATH_VALUE := backend:$(TEST_DEPS)
 IMAGE_AGENT_ROOT ?= ../image_agent_mvp
 IMAGE_AGENT_DEPS ?= .runtime/image-agent-deps
 IMAGE_AGENT_ENV_STAMP := $(IMAGE_AGENT_DEPS)/.requirements-installed
+REAL_PROVIDER_ENV_FILE ?=
+REAL_PROVIDER_EVIDENCE_PATH ?= build/real-provider-evidence.json
+REAL_PROVIDER_LOG_FILE ?= build/real-provider-smoke.log
+REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(REAL_PROVIDER_ENV_FILE)",)
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit boundary-check check verify serve frontend-check frontend-e2e frontend-integration real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit boundary-check check verify serve frontend-check frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -46,12 +50,20 @@ frontend-integration: test-env image-agent-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" \
 	$(PYTHON) scripts/run_browser_integration.py
 
-real-provider-smoke: test-env image-agent-env
+real-provider-preflight: test-env
+	PYTHONPATH="$(PYTHONPATH_VALUE)" \
+	$(PYTHON) scripts/run_browser_integration.py --real-provider --preflight-only \
+		$(REAL_PROVIDER_ENV_ARG)
+
+real-provider-smoke: real-provider-preflight image-agent-env
 	HARNESS_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
 	HARNESS_IMAGE_AGENT_PYTHON="$(shell command -v $(PYTHON))" \
 	HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT="$(abspath $(IMAGE_AGENT_DEPS))" \
 	PYTHONPATH="$(PYTHONPATH_VALUE)" \
-	$(PYTHON) scripts/run_browser_integration.py --real-provider
+	$(PYTHON) scripts/run_browser_integration.py --real-provider \
+		$(REAL_PROVIDER_ENV_ARG) \
+		--evidence-path "$(REAL_PROVIDER_EVIDENCE_PATH)" \
+		--log-file "$(REAL_PROVIDER_LOG_FILE)"
 
 check: test lint compile secret-scan boundary-check frontend-check
 
