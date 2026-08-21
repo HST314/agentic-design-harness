@@ -112,6 +112,162 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/tasks/t_ui/files/preview?path=*", async (route) => {
     await route.fulfill({ status: 200, contentType: "image/png", body: "preview" });
   });
+  const usage = {
+    schema_version: "1.0",
+    task_id: "t_ui",
+    instance_id: null,
+    completeness: "COMPLETE",
+    event_count: 1,
+    tokens: {
+      input_tokens: 1000,
+      output_tokens: 250,
+      cached_input_tokens: 100,
+      reasoning_tokens: 50,
+      total_tokens: 1250,
+    },
+    cost: {
+      completeness: "COMPLETE",
+      known_micros: 3000,
+      priced_event_count: 1,
+      unpriced_event_count: 0,
+      price_catalog_revisions: ["price_v1"],
+    },
+    instances: [
+      {
+        instance_id: "i_ui",
+        agent_type: "image",
+        completeness: "COMPLETE",
+        event_count: 1,
+        tokens: {
+          input_tokens: 1000,
+          output_tokens: 250,
+          cached_input_tokens: 100,
+          reasoning_tokens: 50,
+          total_tokens: 1250,
+        },
+        cost: {
+          completeness: "COMPLETE",
+          known_micros: 3000,
+          priced_event_count: 1,
+          unpriced_event_count: 0,
+          price_catalog_revisions: ["price_v1"],
+        },
+        last_checked_at: "2026-08-20T12:06:00Z",
+      },
+    ],
+    models: [
+      {
+        model: "image-model",
+        event_count: 1,
+        tokens: {
+          input_tokens: 1000,
+          output_tokens: 250,
+          cached_input_tokens: 100,
+          reasoning_tokens: 50,
+          total_tokens: 1250,
+        },
+        cost: {
+          completeness: "COMPLETE",
+          known_micros: 3000,
+          priced_event_count: 1,
+          unpriced_event_count: 0,
+          price_catalog_revisions: ["price_v1"],
+        },
+      },
+    ],
+    time_buckets: [],
+    events: [
+      {
+        event_id: "usage_ui",
+        instance_id: "i_ui",
+        request_id: "request_ui",
+        model: "image-model",
+        total_tokens: 1250,
+        occurred_at: "2026-08-20T12:06:00Z",
+      },
+    ],
+  };
+  await page.route("**/api/v1/tasks/t_ui/usage", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(usage),
+    });
+  });
+  await page.route("**/api/v1/instances/i_ui/usage", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ...usage, instance_id: "i_ui" }),
+    });
+  });
+  await page.route("**/api/v1/tasks/t_ui/retry-budget", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        budget: {
+          revision: 2,
+          retry_policy: {
+            max_auto_retries_per_retry_group: 2,
+            max_auto_retry_tokens_task: 5000,
+            retry_token_reservation_by_agent: { image: 1000 },
+            max_auto_retry_cost_micros: null,
+            price_catalog_revision: null,
+          },
+          retry_budget_ledger: {
+            retry_tokens_reserved: 1000,
+            retry_tokens_settled: 1250,
+            retry_cost_micros_reserved: 0,
+            retry_cost_micros_settled: 3000,
+            frozen: false,
+            frozen_reason: null,
+          },
+          attempts: [{ attempt_id: "attempt_ui", status: "RESERVED" }],
+        },
+      }),
+    });
+  });
+  await page.route("**/api/v1/config/global", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        config: {
+          revision: route.request().method() === "PUT" ? 4 : 3,
+          image_provider: "fake",
+          image_runtime_policy: { offline_mode: true },
+          image_model_config: { model_config_id: "ui_model", state_bindings: [] },
+          supervisor: { health_interval_seconds: 2 },
+        },
+      }),
+    });
+  });
+  await page.route("**/api/v1/key-pool", async (route) => {
+    const body = route.request().method() === "GET"
+      ? {
+          schema_version: "1.0",
+          items: [
+            {
+              credential_pair_id: "cred_ui",
+              provider: "fake",
+              key_id: "key_ui",
+              key_tail: "-1234",
+              base_url_hint: "https://provider.invalid/…",
+              revision: 1,
+              enabled: true,
+            },
+          ],
+        }
+      : { schema_version: "1.0", items: [] };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
   await page.route("**/api/v1/instances/i_ui", async (route) => {
     if (route.request().method() === "PUT") {
       await route.fulfill({
@@ -262,6 +418,13 @@ test("shell has no horizontal overflow on phone and landscape", async ({ page })
     }));
     expect(dimensions.scrollWidth).toBe(dimensions.clientWidth);
     await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
+    await page.goto("/settings");
+    const settingsDimensions = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    expect(settingsDimensions.scrollWidth).toBe(settingsDimensions.clientWidth);
+    await expect(page.getByRole("heading", { name: "运行配置与凭据池" })).toBeVisible();
   }
 });
 
@@ -271,6 +434,8 @@ test("task and instance pages preserve the Image workbench boundary", async ({ p
   await expect(page).toHaveURL(/\/tasks\/t_ui$/);
   await expect(page.getByRole("heading", { name: "阶段与实例" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "任务文件" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "用量观测" })).toBeVisible();
+  await expect(page.getByText("1,250", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "final.png" })).toBeVisible();
   await page.getByRole("link", { name: /Image Agent/ }).click();
   await expect(page).toHaveURL(/\/instances\/i_ui$/);
@@ -278,6 +443,30 @@ test("task and instance pages preserve the Image workbench boundary", async ({ p
   const workbench = page.getByRole("link", { name: "打开工作台" });
   await expect(workbench).toHaveAttribute("href", "http://127.0.0.1:18123/");
   await expect(workbench).toHaveAttribute("target", "_blank");
+});
+
+test("settings keep credentials redacted and clear submitted secrets", async ({ page }) => {
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "运行配置与凭据池" })).toBeVisible();
+  await expect(page.getByText("-1234", { exact: true })).toBeVisible();
+  const secret = "browser-only-secret";
+  const keyPool = page.getByLabel("替换凭据池（JSON 数组）");
+  await keyPool.fill(JSON.stringify([
+    {
+      credential_pair_id: "cred_new",
+      provider: "fake",
+      key_id: "key_new",
+      base_url: "https://provider.invalid/v1",
+      api_key: secret,
+      api_key_env: "FAKE_API_KEY",
+      base_url_env: "FAKE_BASE_URL",
+      revision: 1,
+      enabled: true,
+    },
+  ]));
+  await page.getByRole("button", { name: "安全保存凭据池" }).click();
+  await expect(page.getByLabel("替换凭据池（JSON 数组）")).toHaveValue("");
+  await expect(page.locator("body")).not.toContainText(secret);
 });
 
 test("human approval resolves once and the inbox records it as handled", async ({ page }) => {

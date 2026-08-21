@@ -6,7 +6,9 @@ import {
   type AssetManifest,
   type InboxItem,
   type InstanceDetailResponse,
+  type RetryBudget,
   type TaskFile,
+  type UsageSummary,
 } from "./api/client";
 import { currentRoute, navigate, routePath, type Route, type RouteName } from "./router";
 
@@ -144,7 +146,7 @@ async function renderRoute(route: Route, version: number): Promise<void> {
     else if (route.name === "task") await renderTask(route.taskId, version);
     else if (route.name === "instance") await renderInstance(route.instanceId, version);
     else if (route.name === "inbox") await renderInbox(version);
-    else renderPlaceholder(route.name, version);
+    else await renderSettings(version);
   } catch (error) {
     if (version !== renderVersion) return;
     renderError(error);
@@ -172,7 +174,12 @@ async function renderTasks(version: number): Promise<void> {
 }
 
 async function renderTask(taskId: string, version: number): Promise<void> {
-  const [response, resources] = await Promise.all([api.task(taskId), api.taskFiles(taskId)]);
+  const [response, resources, usage, retryBudget] = await Promise.all([
+    api.task(taskId),
+    api.taskFiles(taskId),
+    api.taskUsage(taskId),
+    api.retryBudget(taskId),
+  ]);
   if (version !== renderVersion) return;
   const plan = response.plan;
   pageContent().innerHTML = `
@@ -198,6 +205,7 @@ async function renderTask(taskId: string, version: number): Promise<void> {
             .join("")}</div>`
         : emptyState("layers", "尚未保存执行计划", "保存计划并创建实例后，可在此查看纵向执行链。", false)
     }
+    ${renderUsagePanel(usage, retryBudget.budget)}
     ${renderResources(taskId, resources.items, resources.assets)}`;
   wireNavigation();
 }
@@ -205,9 +213,12 @@ async function renderTask(taskId: string, version: number): Promise<void> {
 async function renderInstance(instanceId: string, version: number): Promise<void> {
   window.clearTimeout(pollTimer);
   pollTimer = undefined;
-  const response = await api.instance(instanceId);
+  const [response, usage] = await Promise.all([
+    api.instance(instanceId),
+    api.instanceUsage(instanceId),
+  ]);
   if (version !== renderVersion) return;
-  renderInstanceContent(response);
+  renderInstanceContent(response, usage);
   wireNavigation();
   if (["STARTING", "RUNNING"].includes(response.instance.status)) {
     pollTimer = window.setTimeout(
@@ -217,7 +228,10 @@ async function renderInstance(instanceId: string, version: number): Promise<void
   }
 }
 
-function renderInstanceContent(response: InstanceDetailResponse): void {
+function renderInstanceContent(
+  response: InstanceDetailResponse,
+  usage: UsageSummary,
+): void {
   const { instance, observation } = response;
   const process = instance.process;
   const safeUiUrl = instance.ui_url?.match(/^https?:\/\//) ? instance.ui_url : null;
@@ -252,6 +266,7 @@ function renderInstanceContent(response: InstanceDetailResponse): void {
         ${detailItem("能力数量", observation?.capabilities.length.toString() ?? "0")}
       </dl></section>
     </div>
+    ${renderUsagePanel(usage)}
     ${
       observation?.details.compatibility_error
         ? `<div class="alert alert--danger" role="alert"><strong>兼容性检查失败</strong><span>${escapeHtml(observation.details.compatibility_error)}</span></div>`
@@ -442,15 +457,116 @@ function renderResources(taskId: string, files: TaskFile[], assets: AssetManifes
   </section>`;
 }
 
-function renderPlaceholder(route: "settings", version: number): void {
+async function renderSettings(version: number): Promise<void> {
+  const [globalConfig, keyPool] = await Promise.all([
+    api.globalConfig(),
+    api.keyPool(),
+  ]);
   if (version !== renderVersion) return;
-  const copy = pageCopy[route];
-  pageContent().innerHTML = emptyState(
-    route,
-    `${copy.title}将在后续工作包接入`,
-    copy.description,
-    true,
-  );
+  const revision = globalConfig.config.revision;
+  const { revision: _revision, ...editableConfig } = globalConfig.config;
+  pageContent().innerHTML = `
+    <div class="page-heading"><div><p class="eyebrow">受控配置</p><h2>运行配置与凭据池</h2><p>全局保存覆盖所有未归档实例；凭据始终按 Key + Base URL 完整配对。</p></div><span class="count-pill">全局 r${revision}</span></div>
+    <div class="settings-grid">
+      <section class="settings-card" aria-labelledby="global-config-title">
+        <div><p class="eyebrow">全局配置</p><h3 id="global-config-title">Image 运行参数</h3><p>仅接受受控 Schema 字段；运行中实例会热应用，无法热应用时明确标记需要重启。</p></div>
+        <form data-global-config data-revision="${revision}">
+          <div class="field"><label for="global-config-json">配置 JSON</label><textarea id="global-config-json" name="config" rows="18" spellcheck="false">${escapeHtml(JSON.stringify(editableConfig, null, 2))}</textarea><small>保存采用 revision 检查，避免覆盖其他操作人的新版本。</small></div>
+          <div class="form-actions"><button class="button button--primary" type="submit">保存全局配置</button></div>
+          <p class="form-feedback" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+      <section class="settings-card" aria-labelledby="key-pool-title">
+        <div><p class="eyebrow">凭据池</p><h3 id="key-pool-title">完整凭据对</h3><p>明文 Key 只在本次提交中发送，响应、事件和页面均不回显。</p></div>
+        <div class="credential-list">${
+          keyPool.items.length
+            ? keyPool.items.map((item) => `<article><div>${statusBadge(item.enabled ? "READY" : "CANCELLED")}<span class="identifier">${escapeHtml(item.credential_pair_id)}</span></div><dl>${detailItem("Provider", item.provider)}${detailItem("Key ID", item.key_id)}${detailItem("Key 尾号", item.key_tail)}${detailItem("服务地址", item.base_url_hint)}${detailItem("修订", `r${item.revision}`)}</dl></article>`).join("")
+            : '<p class="resource-empty">尚未配置凭据对。</p>'
+        }</div>
+        <form data-key-pool>
+          <div class="field"><label for="key-pool-json">替换凭据池（JSON 数组）</label><textarea id="key-pool-json" name="pairs" rows="10" spellcheck="false" placeholder='[{"credential_pair_id":"cred_01", …}]'></textarea><small>同一 revision 不可修改；编辑时递增 revision。保存后输入框会立即清空。</small></div>
+          <div class="form-actions"><button class="button button--primary" type="submit">安全保存凭据池</button></div>
+          <p class="form-feedback" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+    </div>`;
+  wireSettingsActions();
+}
+
+function renderUsagePanel(usage: UsageSummary, budget?: RetryBudget): string {
+  const maximum = budget?.retry_policy.max_auto_retry_tokens_task ?? 0;
+  const consumed = budget
+    ? budget.retry_budget_ledger.retry_tokens_settled +
+      budget.retry_budget_ledger.retry_tokens_reserved
+    : 0;
+  const progress = maximum > 0 ? Math.min(100, Math.round((consumed / maximum) * 100)) : 0;
+  const boundedProgressValue = maximum > 0 ? Math.min(consumed, maximum) : 0;
+  return `<section class="usage-section" aria-labelledby="usage-title-${escapeHtml(usage.instance_id ?? usage.task_id)}">
+    <div class="section-heading"><div><p class="eyebrow">Token 与费用</p><h2 id="usage-title-${escapeHtml(usage.instance_id ?? usage.task_id)}">用量观测</h2><p>${usage.completeness === "NOT_REPORTED" ? "当前 Agent 尚未上报用量；这里不会把缺失数据显示成 0 用量。" : "原始事件可重建，汇总按实例、模型与时间保持可追溯。"}</p></div>${usageCompletenessBadge(usage.completeness)}</div>
+    <div class="metric-grid">
+      ${metricCard("总 Token", formatNumber(usage.tokens.total_tokens), `${usage.event_count} 次调用`)}
+      ${metricCard("输入 / 输出", `${formatNumber(usage.tokens.input_tokens)} / ${formatNumber(usage.tokens.output_tokens)}`, `缓存 ${formatNumber(usage.tokens.cached_input_tokens)}`)}
+      ${metricCard("已知费用", usage.cost.completeness === "UNKNOWN" ? "费用未知" : formatMicros(usage.cost.known_micros), `${usage.cost.unpriced_event_count} 条未定价`)}
+      ${metricCard("模型", formatNumber(usage.models.length), usage.models[0]?.model ?? "尚无记录")}
+    </div>
+    ${budget ? `<div class="budget-card"><div><p class="eyebrow">自动重试预算</p><h3>${budget.retry_budget_ledger.frozen ? "预算已冻结" : `已用与预留 ${formatNumber(consumed)} / ${formatNumber(maximum)}`}</h3><p>${budget.retry_budget_ledger.frozen ? escapeHtml(budget.retry_budget_ledger.frozen_reason ?? "实际用量超过预留") : `每组最多 ${budget.retry_policy.max_auto_retries_per_retry_group} 次；费用上限${budget.retry_policy.max_auto_retry_cost_micros === null ? "未配置" : formatMicros(budget.retry_policy.max_auto_retry_cost_micros)}。`}</p></div>${maximum > 0 ? `<div class="budget-progress" role="progressbar" aria-label="自动重试 Token 预算" aria-valuemin="0" aria-valuemax="${maximum}" aria-valuenow="${boundedProgressValue}"><span style="width:${progress}%"></span></div>` : '<p class="budget-zero">自动重试 Token 额度为 0；重试将进入人工预算确认。</p>'}</div>` : ""}
+    ${usage.instances.length ? `<div class="usage-table" role="region" aria-label="实例 Token 汇总" tabindex="0"><table><thead><tr><th scope="col">实例</th><th scope="col">完整性</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">总计</th><th scope="col">费用</th></tr></thead><tbody>${usage.instances.map((item) => `<tr><th scope="row">${escapeHtml(item.instance_id)}</th><td>${usageCompletenessBadge(item.completeness)}</td><td>${formatNumber(item.tokens.input_tokens)}</td><td>${formatNumber(item.tokens.output_tokens)}</td><td>${formatNumber(item.tokens.total_tokens)}</td><td>${item.cost.completeness === "UNKNOWN" ? "未知" : formatMicros(item.cost.known_micros)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${usage.events.length ? `<details class="usage-events"><summary>查看最近调用（${usage.events.length}）</summary><div>${usage.events.slice(-20).reverse().map((event) => `<article><span>${escapeHtml(event.model)}</span><strong>${formatNumber(event.total_tokens)} Token</strong><small>${escapeHtml(event.request_id)} · ${formatDate(event.occurred_at)}</small></article>`).join("")}</div></details>` : ""}
+  </section>`;
+}
+
+function wireSettingsActions(): void {
+  wireNavigation();
+  root.querySelector<HTMLFormElement>("[data-global-config]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget as HTMLFormElement;
+    await submitJsonForm(form, async (value) => {
+      await api.updateGlobalConfig({
+        config: value,
+        operation_id: operationId("global_config"),
+        envelope: commandEnvelope("human", "human_operator", Number(form.dataset.revision)),
+      });
+    }, "config");
+  });
+  root.querySelector<HTMLFormElement>("[data-key-pool]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget as HTMLFormElement;
+    await submitJsonForm(form, async (value) => {
+      if (!Array.isArray(value) || value.length === 0) throw new Error("请填写至少一个完整凭据对。");
+      await api.updateKeyPool({
+        pairs: value,
+        envelope: commandEnvelope("human", "human_operator", 0),
+      });
+      const textarea = form.elements.namedItem("pairs") as HTMLTextAreaElement;
+      textarea.value = "";
+    }, "pairs");
+  });
+}
+
+async function submitJsonForm(
+  form: HTMLFormElement,
+  submit: (value: unknown) => Promise<void>,
+  field: string,
+): Promise<void> {
+  const button = form.querySelector<HTMLButtonElement>("button[type='submit']");
+  const feedback = form.querySelector<HTMLElement>(".form-feedback");
+  if (!button || button.disabled) return;
+  setButtonBusy(button, "正在安全保存");
+  if (feedback) feedback.textContent = "正在校验并提交…";
+  try {
+    const value = JSON.parse(String(new FormData(form).get(field) ?? "")) as unknown;
+    await submit(value);
+    if (feedback) feedback.textContent = "保存成功，正在刷新受控视图。";
+    if (currentRoute().name === "settings") await renderSettings(renderVersion);
+  } catch (error) {
+    if (feedback) {
+      feedback.classList.add("form-feedback--error");
+      feedback.textContent = error instanceof Error ? error.message : "保存失败，请检查输入。";
+    }
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.textContent = "重试保存";
+  }
 }
 
 function instanceRow(instance: AgentInstance | undefined, fallbackId: string): string {
@@ -482,6 +598,30 @@ function inboxStatusBadge(status: InboxItem["status"]): string {
   return `<span class="badge badge--${style}"><span aria-hidden="true"></span>${labels[status]}</span>`;
 }
 
+function usageCompletenessBadge(
+  status: UsageSummary["completeness"],
+): string {
+  const label = {
+    COMPLETE: "完整上报",
+    PARTIAL: "部分上报",
+    NOT_REPORTED: "未上报",
+  }[status];
+  const style = status === "COMPLETE" ? "success" : status === "PARTIAL" ? "warning" : "neutral";
+  return `<span class="badge badge--${style}"><span aria-hidden="true"></span>${label}</span>`;
+}
+
+function metricCard(label: string, value: string, detail: string): string {
+  return `<article class="metric-card"><p>${escapeHtml(label)}</p><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function formatMicros(value: number): string {
+  return `¥${(value / 1_000_000).toFixed(4)}`;
+}
+
 function actionLabel(action: string): string {
   const labels: Record<string, string> = {
     answer_clarification: "回答澄清问题",
@@ -492,6 +632,7 @@ function actionLabel(action: string): string {
     choose_skill: "选择创作技能",
     submit_manual_action: "提交人工动作",
     regenerate: "重新生成",
+    approve_once: "批准一次预算越权",
   };
   return labels[action] ?? action;
 }

@@ -19,9 +19,7 @@ from harness.storage.repository import utc_now
 from runtime_helpers import build_service, create_task
 
 ROOT = Path(__file__).resolve().parents[2]
-IMAGE_SCHEMA = (
-    ROOT / "tests" / "fixtures" / "image-agent-contract" / "ImageTaskCard.schema.json"
-)
+IMAGE_SCHEMA = ROOT / "tests" / "fixtures" / "image-agent-contract" / "ImageTaskCard.schema.json"
 
 
 class ImageAdapterTests(unittest.TestCase):
@@ -35,9 +33,7 @@ class ImageAdapterTests(unittest.TestCase):
         self.configuration.initialize()
         source_root = self.root / "image-source"
         (source_root / "schemas").mkdir(parents=True)
-        shutil.copyfile(
-            IMAGE_SCHEMA, source_root / "schemas" / "ImageTaskCard.schema.json"
-        )
+        shutil.copyfile(IMAGE_SCHEMA, source_root / "schemas" / "ImageTaskCard.schema.json")
         self.adapter = ImageAgentAdapter(
             self.store,
             self.store.contracts,
@@ -75,9 +71,7 @@ class ImageAdapterTests(unittest.TestCase):
         self.assertEqual(
             mapped["known_facts"],
             {
-                "harness_instructions": [
-                    "Use the registered brief as the only copy source."
-                ],
+                "harness_instructions": ["Use the registered brief as the only copy source."],
                 "harness_parameters": {"aspect_ratio": "16:9", "variants": 2},
             },
         )
@@ -110,9 +104,7 @@ class ImageAdapterTests(unittest.TestCase):
         view["capabilities"] = ["future_action"]
         unknown_capability = self.adapter._observation(view, None, 2, None)
         self.assertEqual(unknown_capability.status, "FAILED")
-        self.assertIn(
-            "unknown capability", unknown_capability.details["compatibility_error"]
-        )
+        self.assertIn("unknown capability", unknown_capability.details["compatibility_error"])
 
     def test_waiting_snapshot_maps_to_frozen_approval_observation(self) -> None:
         observation = self.adapter._observation(
@@ -212,9 +204,10 @@ class ImageAdapterTests(unittest.TestCase):
             },
         )
         for job in malformed_jobs:
-            with self.subTest(job=job), self.assertRaisesRegex(
-                HarnessError, "invalid job record"
-            ) as rejected:
+            with (
+                self.subTest(job=job),
+                self.assertRaisesRegex(HarnessError, "invalid job record") as rejected,
+            ):
                 self.adapter._require_job(job)
             self.assertEqual(rejected.exception.code, "VALIDATION_ERROR")
 
@@ -226,6 +219,156 @@ class ImageAdapterTests(unittest.TestCase):
         ):
             self.adapter._check_compatibility("http://127.0.0.1:1")
         self.assertEqual(rejected.exception.code, "VALIDATION_ERROR")
+
+    def test_apply_config_hot_loads_policy_and_model_bindings(self) -> None:
+        calls = []
+
+        def request(_base_url, method, path, payload=None, **_kwargs):
+            calls.append((method, path, payload))
+            if path == "/api/settings/models" and method == "GET":
+                return {
+                    "library": {
+                        "reasoning": [
+                            {
+                                "id": "model_target",
+                                "provider": "fake",
+                                "model": "target-model",
+                            }
+                        ]
+                    },
+                    "states": [
+                        {
+                            "state": "intake_clarify",
+                            "group": "reasoning",
+                            "binding": {
+                                "provider": "fake",
+                                "model": "old-model",
+                            },
+                        }
+                    ],
+                }
+            return {"status": "ok"}
+
+        runtime_files = {
+            "runtime.yaml": {"offline_mode": True},
+            "model-config.yaml": {
+                "state_bindings": [
+                    {
+                        "state": "intake_clarify",
+                        "provider": "fake",
+                        "model": "target-model",
+                    }
+                ]
+            },
+        }
+        state = {"schema_version": "1.0"}
+        with (
+            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
+            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
+            patch.object(self.adapter, "_check_compatibility"),
+            patch.object(self.configuration, "image_runtime_files", return_value=runtime_files),
+            patch.object(self.adapter, "_request", side_effect=request),
+            patch.object(self.adapter, "_state", return_value=state),
+            patch.object(self.adapter, "_write_state") as write_state,
+        ):
+            result = self.adapter.apply_config(
+                "i_image_adapter", {"config": {}}, 4, "config_apply_4"
+            )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.details["updated_model_bindings"], ["intake_clarify"])
+        self.assertIn(
+            (
+                "POST",
+                "/api/settings/models",
+                {
+                    "bindings": {"intake_clarify": "model_target"},
+                    "actor": "harness_config_service",
+                    "confirmed": True,
+                },
+            ),
+            calls,
+        )
+        self.assertEqual(state["config_revision"], 4)
+        write_state.assert_called_once()
+
+    def test_apply_config_preflights_models_before_mutating_policy(self) -> None:
+        calls = []
+
+        def request(_base_url, method, path, payload=None, **_kwargs):
+            calls.append((method, path, payload))
+            if path == "/api/settings/models" and method == "GET":
+                return {
+                    "library": {"reasoning": []},
+                    "states": [
+                        {
+                            "state": "intake_clarify",
+                            "group": "reasoning",
+                            "binding": {
+                                "provider": "other",
+                                "model": "other-model",
+                            },
+                        }
+                    ],
+                }
+            return {}
+
+        with (
+            patch.object(
+                self.adapter,
+                "_task_id_for_instance",
+                return_value="t_image_adapter",
+            ),
+            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
+            patch.object(self.adapter, "_check_compatibility"),
+            patch.object(self.adapter, "_request", side_effect=request),
+            patch.object(
+                self.adapter.configuration,
+                "image_runtime_files",
+                return_value={
+                    "runtime.yaml": {"workspace_max_iterations": 8},
+                    "model-config.yaml": {
+                        "state_bindings": [
+                            {
+                                "state": "intake_clarify",
+                                "provider": "fake",
+                                "model": "missing-model",
+                            }
+                        ]
+                    },
+                },
+            ),
+        ):
+            result = self.adapter.apply_config(
+                "i_image_adapter", {"config": {}}, 5, "config_apply_5"
+            )
+
+        self.assertFalse(result.accepted)
+        self.assertTrue(result.details["restart_required"])
+        self.assertEqual(
+            calls,
+            [("GET", "/api/settings/models", None)],
+        )
+
+    def test_stop_cancels_only_an_active_image_job(self) -> None:
+        state = {"job_id": "job_123"}
+        responses = [
+            {"job_id": "job_123", "status": "running"},
+            {"job_id": "job_123", "status": "cancelling"},
+        ]
+        with (
+            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
+            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
+            patch.object(self.adapter, "_state", return_value=state),
+            patch.object(self.adapter, "_request", side_effect=responses) as request,
+            patch.object(self.adapter, "_write_state") as write_state,
+        ):
+            result = self.adapter.stop("i_image_adapter", "user_cancelled", "stop_image_adapter")
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(request.call_args_list[1].args[1:3], ("POST", "/api/jobs/job_123/cancel"))
+        self.assertEqual(state["job_status_at_stop"], "cancelling")
+        write_state.assert_called_once()
 
     def test_harness_actions_map_to_strict_image_advance_requests(self) -> None:
         cases = (
@@ -267,9 +410,7 @@ class ImageAdapterTests(unittest.TestCase):
             map_advance_payload("branch", {"actor": "reviewer"})
         self.assertEqual(unsupported.exception.code, "ADAPTER_UNAVAILABLE")
         with self.assertRaises(HarnessError) as extra:
-            map_advance_payload(
-                "approve_final", {"actor": "reviewer", "selected_id": "unexpected"}
-            )
+            map_advance_payload("approve_final", {"actor": "reviewer", "selected_id": "unexpected"})
         self.assertEqual(extra.exception.code, "VALIDATION_ERROR")
 
     def test_waiting_projection_exposes_only_actions_supported_by_advance_request(self) -> None:
