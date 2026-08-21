@@ -46,10 +46,14 @@ claims a real PPT delivery.
 - Versioned API: `tests/integration/test_app.py` exercises task creation, plan persistence,
   task/instance reads and typed Adapter discovery through the application boundary.
 - Real Agent: `make g2-e2e` launches Image Agent
-  `main@61c5b4f1b66d5d85f62b39b5b338ac2304e94d26` offline, observes its deferred Job,
+  `main@2339550ab15ad05e0dde7f48e1386a5a1a0eb663` offline, observes its deferred Job,
   Timeline and Snapshot until `WAITING_APPROVAL`, then opens its HTTP workbench.
 - Browser: `frontend/e2e/shell.spec.ts` covers task and instance navigation, workbench deep
   link, small-screen overflow, keyboard-visible controls and responsive layout.
+- Production browser: `make frontend-integration` builds the release bundle and drives all
+  three approvals through the UI against real Harness/Image processes plus a deterministic
+  local Provider, without browser request mocks. `make real-provider-smoke` exposes the same
+  isolated path only when dedicated external Provider credentials are supplied explicitly.
 
 ## G3 gate evidence
 

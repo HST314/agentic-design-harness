@@ -203,6 +203,163 @@ class ImageAdapterTests(unittest.TestCase):
             )
         self.assertEqual(pagination.exception.code, "VALIDATION_ERROR")
 
+    def test_usage_collection_maps_tokens_and_image_units_with_stable_cursor(self) -> None:
+        pages = [
+            {
+                "items": [
+                    {
+                        "sequence": 4,
+                        "timestamp": "2026-08-21T10:00:00+00:00",
+                        "usage_id": "usage_text",
+                        "request_id": "local_text",
+                        "provider_request_id": "provider_text",
+                        "provider": "ark",
+                        "model": "reasoner",
+                        "call_type": "reasoning_llm",
+                        "usage_basis": "tokens",
+                        "token_usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 3,
+                            "cached_input_tokens": 1,
+                            "reasoning_tokens": 2,
+                            "total_tokens": 10,
+                        },
+                        "billing_units": [],
+                        "raw_usage": {"prompt_tokens": 7, "completion_tokens": 3},
+                    }
+                ],
+                "next_cursor": 4,
+                "has_more": True,
+            },
+            {
+                "items": [
+                    {
+                        "sequence": 9,
+                        "timestamp": "2026-08-21T10:00:01Z",
+                        "usage_id": "usage_image",
+                        "request_id": "local_image",
+                        "provider_request_id": None,
+                        "provider": "ark",
+                        "model": "seedream",
+                        "call_type": "text_to_image_model",
+                        "usage_basis": "image_units",
+                        "token_usage": None,
+                        "billing_units": [
+                            {
+                                "unit": "image",
+                                "quantity": 1,
+                                "attributes": {
+                                    "resolution": "2560x1440",
+                                    "model_tier": "seedream",
+                                },
+                            }
+                        ],
+                        "raw_usage": {},
+                    }
+                ],
+                "next_cursor": 9,
+                "has_more": False,
+            },
+        ]
+        instance = {"credential_pair_ref": "cred_test_01"}
+        with (
+            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
+            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
+            patch.object(self.store.instance, "get", return_value=instance),
+            patch.object(self.adapter, "_request", side_effect=pages) as request,
+        ):
+            events = self.adapter.collect_usage("i_image_adapter", None)
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["schema_version"], "1.1")
+        self.assertEqual(events[0]["total_tokens"], 10)
+        self.assertEqual(events[0]["occurred_at"], "2026-08-21T10:00:00.000000Z")
+        self.assertEqual(events[1]["usage_basis"], "image_units")
+        self.assertEqual(events[1]["total_tokens"], 0)
+        self.store.contracts.validate("token-usage-event", events[0])
+        self.store.contracts.validate("token-usage-event", events[1])
+        self.assertIn("after=4", request.call_args_list[1].args[2])
+
+        with (
+            patch.object(self.adapter, "_task_id_for_instance"),
+            self.assertRaisesRegex(HarnessError, "usage cursor"),
+        ):
+            self.adapter.collect_usage("i_image_adapter", "provider_cursor")
+
+    def test_usage_collection_rejects_sensitive_raw_provider_fields(self) -> None:
+        page = {
+            "items": [
+                {
+                    "sequence": 1,
+                    "timestamp": "2026-08-21T10:00:00Z",
+                    "usage_id": "usage_secret",
+                    "request_id": "local_secret",
+                    "provider_request_id": None,
+                    "provider": "ark",
+                    "model": "reasoner",
+                    "call_type": "reasoning_llm",
+                    "usage_basis": "tokens",
+                    "token_usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "total_tokens": 2,
+                    },
+                    "billing_units": [],
+                    "raw_usage": {"api_key": "must-not-cross"},
+                }
+            ],
+            "next_cursor": 1,
+            "has_more": False,
+        }
+        with (
+            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
+            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
+            patch.object(
+                self.store.instance,
+                "get",
+                return_value={"credential_pair_ref": "cred_test_01"},
+            ),
+            patch.object(self.adapter, "_request", return_value=page),
+            self.assertRaisesRegex(HarnessError, "raw usage"),
+        ):
+            self.adapter.collect_usage("i_image_adapter", None)
+
+        page["items"][0]["raw_usage"] = {
+            "note": "Bear" + "er sensitive-provider-value"
+        }
+        with (
+            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
+            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
+            patch.object(
+                self.store.instance,
+                "get",
+                return_value={"credential_pair_ref": "cred_test_01"},
+            ),
+            patch.object(self.adapter, "_request", return_value=page),
+            self.assertRaisesRegex(HarnessError, "raw usage"),
+        ):
+            self.adapter.collect_usage("i_image_adapter", None)
+
+    def test_usage_collection_rejects_a_nonadvancing_producer_page(self) -> None:
+        with (
+            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
+            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
+            patch.object(
+                self.store.instance,
+                "get",
+                return_value={"credential_pair_ref": "cred_test_01"},
+            ),
+            patch.object(
+                self.adapter,
+                "_request",
+                return_value={"items": [], "next_cursor": 0, "has_more": True},
+            ),
+            self.assertRaisesRegex(HarnessError, "did not advance"),
+        ):
+            self.adapter.collect_usage("i_image_adapter", None)
+
     def test_job_record_requires_typed_terminal_and_event_shapes(self) -> None:
         malformed_jobs = (
             {"job_id": "not-a-job", "status": "queued"},

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/token-usage-event-v1.1.schema.json",
+  "title": "TokenUsageEvent 1.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "event_id", "task_id", "instance_id", "agent_type",
+    "request_id", "provider_request_id", "provider", "model", "call_type",
+    "usage_basis", "credential_pair_ref", "input_tokens", "output_tokens",
+    "cached_input_tokens", "reasoning_tokens", "total_tokens", "billing_units",
+    "raw_usage", "occurred_at"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.1"},
+    "event_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "task_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "instance_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "agent_type": {"type": "string", "enum": ["image", "ppt", "master"]},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "provider_request_id": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "maxLength": 256},
+        {"type": "null"}
+      ]
+    },
+    "provider": {"type": "string", "minLength": 1, "maxLength": 128},
+    "model": {"type": "string", "minLength": 1, "maxLength": 256},
+    "call_type": {
+      "type": "string",
+      "enum": ["reasoning_llm", "vision_language_model", "text_to_image_model"]
+    },
+    "usage_basis": {"type": "string", "enum": ["tokens", "image_units", "mixed"]},
+    "credential_pair_ref": {
+      "oneOf": [
+        {"$ref": "common.schema.json#/$defs/identifier"},
+        {"type": "null"}
+      ]
+    },
+    "input_tokens": {"type": "integer", "minimum": 0},
+    "output_tokens": {"type": "integer", "minimum": 0},
+    "cached_input_tokens": {"type": "integer", "minimum": 0},
+    "reasoning_tokens": {"type": "integer", "minimum": 0},
+    "total_tokens": {"type": "integer", "minimum": 0},
+    "billing_units": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit", "quantity", "attributes"],
+        "properties": {
+          "unit": {"type": "string", "minLength": 1, "maxLength": 64},
+          "quantity": {"type": "integer", "minimum": 1},
+          "attributes": {"type": "object", "maxProperties": 64}
+        }
+      }
+    },
+    "raw_usage": {"type": "object", "maxProperties": 64},
+    "cost_micros": {"type": "integer", "minimum": 0},
+    "price_catalog_revision": {"$ref": "common.schema.json#/$defs/identifier"},
+    "occurred_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"usage_basis": {"const": "tokens"}}},
+      "then": {"properties": {"billing_units": {"maxItems": 0}}}
+    },
+    {
+      "if": {"properties": {"usage_basis": {"const": "image_units"}}},
+      "then": {
+        "properties": {
+          "call_type": {"const": "text_to_image_model"},
+          "input_tokens": {"const": 0},
+          "output_tokens": {"const": 0},
+          "cached_input_tokens": {"const": 0},
+          "reasoning_tokens": {"const": 0},
+          "total_tokens": {"const": 0},
+          "billing_units": {
+            "minItems": 1,
+            "contains": {
+              "type": "object",
+              "properties": {"unit": {"const": "image"}},
+              "required": ["unit"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"usage_basis": {"const": "mixed"}}},
+      "then": {"properties": {"billing_units": {"minItems": 1}}}
+    },
+    {
+      "if": {"required": ["cost_micros"]},
+      "then": {"required": ["price_catalog_revision"]}
+    }
+  ]
+}

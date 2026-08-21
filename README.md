@@ -66,12 +66,22 @@ make g2-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 # G3 人工审批 → 真实 Adapter/进程 → 受控发布 → 主任务完成门禁
 make g3-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 
+# 生产构建 + 真实 Harness/Image 进程 + 本地确定性 Provider，无浏览器 API Mock
+make frontend-integration IMAGE_AGENT_ROOT=../image_agent_mvp
+
 # G4 三进程、凭据轮转、配置覆盖、用量、取消与无重放恢复门禁
 make g4-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 
 # G5 全门禁：verify + G3/G4 真实离线进程 + Playwright + 18 条证据索引
 make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
+
+需显式访问外部 Provider 时，使用独立测试凭据设置
+`HARNESS_REAL_PROVIDER_BASE_URL`、`HARNESS_REAL_PROVIDER_API_KEY`、
+`HARNESS_REAL_PROVIDER_TEXT_MODEL`、`HARNESS_REAL_PROVIDER_IMAGE_MODEL` 与
+`HARNESS_REAL_PROVIDER_VLM_MODEL`，再运行
+`make real-provider-smoke IMAGE_AGENT_ROOT=../image_agent_mvp`。该入口默认不会运行，
+执行时使用一次性 Harness 数据目录且关闭 Playwright trace，避免持久化请求凭据。
 
 ## 启动空服务
 
@@ -95,7 +105,8 @@ make serve
 - `GET /api/v1/tasks/{id}/files` 及其 `preview` / `download`：只读取已提交且实时校验
   通过的输入和公共交付。
 - `GET /api/v1/tasks/{id}/usage`、`GET /api/v1/instances/{id}/usage`：展示可从原始
-  NDJSON 重建的用量，并明确区分完整、部分和未上报；
+  NDJSON 重建的用量，文字/VLM 调用保留 Token，图片调用保留数量、分辨率与模型档位
+  账单单位，并明确区分完整、部分和未上报；
 - `GET/PUT /api/v1/tasks/{id}/retry-budget`：人工修订预算；自动请求在任务锁内原子
   检查次数、Token 和可选费用并预留，超限生成一次性人工审批；
 - `GET/PUT /api/v1/config/global`、实例 config 与 key-pool：强制全局覆盖、热应用和
