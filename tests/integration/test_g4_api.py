@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
 from harness.domain.commands import CommandEnvelope
-from runtime_helpers import create_task, envelope, image_plan
+from runtime_helpers import create_task, envelope, image_plan, register_model_call_attempt
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,6 +32,12 @@ class G4ApiTests(unittest.TestCase):
                     "t_g4_api",
                     **image_plan("t_g4_api"),
                     envelope=envelope("save-g4-api", 1),
+                )
+                register_model_call_attempt(
+                    container.store,
+                    "t_g4_api",
+                    "i_image_1",
+                    "attempt_initial",
                 )
 
                 global_config = client.get("/api/v1/config/global")
@@ -137,6 +143,15 @@ class G4ApiTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(budget.status_code, 200, budget.text)
+                caller_group = self._retry(
+                    "attempt_g4_api_forged_group", "request-g4-api-forged-group"
+                )
+                caller_group["retry_group_id"] = "retry_group_caller_controlled"
+                rejected_group = client.post(
+                    "/api/v1/instances/i_image_1/retries",
+                    json=caller_group,
+                )
+                self.assertEqual(rejected_group.status_code, 422, rejected_group.text)
                 first_retry = client.post(
                     "/api/v1/instances/i_image_1/retries",
                     json=self._retry("attempt_g4_api_1", "request-g4-api-retry-1"),
@@ -186,7 +201,6 @@ class G4ApiTests(unittest.TestCase):
     def _retry(self, attempt_id: str, operation_id: str) -> dict[str, object]:
         return {
             "attempt_id": attempt_id,
-            "retry_group_id": "retry_group_g4_api",
             "retry_of_attempt_id": "attempt_initial",
             "operation_id": operation_id,
             "envelope": self._envelope(

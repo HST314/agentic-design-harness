@@ -15,6 +15,7 @@ from ..storage.locks import FileLock
 from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 from .approvals import ApprovalInboxService
+from .retry_lineage import RetryLineageAuthority
 
 
 class RetryPolicy(BaseModel):
@@ -44,6 +45,7 @@ class RetryBudgetService:
     def __init__(self, store: FileStateStore, approvals: ApprovalInboxService) -> None:
         self.store = store
         self.approvals = approvals
+        self.lineage = RetryLineageAuthority(store)
 
     def get(self, task_id: str) -> dict[str, Any]:
         validate_identifier(task_id, "task_id")
@@ -113,7 +115,6 @@ class RetryBudgetService:
         instance_id: str,
         *,
         attempt_id: str,
-        retry_group_id: str,
         retry_of_attempt_id: str,
         idempotency_key: str,
         actor: Actor,
@@ -125,7 +126,6 @@ class RetryBudgetService:
             (task_id, "task_id"),
             (instance_id, "instance_id"),
             (attempt_id, "attempt_id"),
-            (retry_group_id, "retry_group_id"),
             (retry_of_attempt_id, "retry_of_attempt_id"),
             (idempotency_key, "idempotency_key"),
         ):
@@ -149,7 +149,6 @@ class RetryBudgetService:
             "task_id": task_id,
             "instance_id": instance_id,
             "attempt_id": attempt_id,
-            "retry_group_id": retry_group_id,
             "retry_of_attempt_id": retry_of_attempt_id,
             "reservation_tokens": reservation_tokens,
             "estimated_cost_micros": estimated_cost_micros,
@@ -174,18 +173,13 @@ class RetryBudgetService:
                     "IDEMPOTENCY_CONFLICT",
                     "The retry attempt id already belongs to another request.",
                 )
-            lineage_groups = {
-                item["retry_group_id"]
-                for item in snapshot["attempts"]
-                if item["attempt_id"] == retry_of_attempt_id
-                or item["retry_of_attempt_id"] == retry_of_attempt_id
-            }
-            if lineage_groups and lineage_groups != {retry_group_id}:
-                raise HarnessError(
-                    "VALIDATION_ERROR",
-                    "A replacement retry must retain its original retry group lineage.",
-                    {"retry_group_id": sorted(lineage_groups)[0]},
-                )
+            self.lineage.ensure_attempt_id_available(task_id, attempt_id)
+            lineage = self.lineage.resolve(
+                snapshot,
+                task_id,
+                instance_id,
+                retry_of_attempt_id,
+            )
             policy = RetryPolicy.model_validate(snapshot["retry_policy"])
             configured_reservation = policy.retry_token_reservation_by_agent.get(
                 instance["agent_type"]
@@ -203,7 +197,7 @@ class RetryBudgetService:
             gates = self._gates(
                 snapshot,
                 policy,
-                retry_group_id=retry_group_id,
+                retry_group_id=lineage.retry_group_id,
                 requested_tokens=requested_tokens,
                 estimated_cost_micros=estimated_cost_micros,
                 price_catalog_revision=price_catalog_revision,
@@ -214,8 +208,10 @@ class RetryBudgetService:
             now = utc_now()
             attempt = {
                 "attempt_id": attempt_id,
-                "retry_group_id": retry_group_id,
+                "retry_group_id": lineage.retry_group_id,
                 "retry_of_attempt_id": retry_of_attempt_id,
+                "root_attempt_id": lineage.root_attempt_id,
+                "root_instance_id": lineage.root_instance_id,
                 "instance_id": instance_id,
                 "agent_type": instance["agent_type"],
                 "automatic": True,

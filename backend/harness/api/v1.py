@@ -118,7 +118,6 @@ class RetryBudgetWriteRequest(StrictRequest):
 
 class RetryRequest(StrictRequest):
     attempt_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
-    retry_group_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     retry_of_attempt_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     reservation_tokens: int | None = Field(default=None, ge=1)
     estimated_cost_micros: int | None = Field(default=None, ge=0)
@@ -579,7 +578,6 @@ def build_v1_router(container: Container) -> APIRouter:
             task_id,
             instance_id,
             attempt_id=body.attempt_id,
-            retry_group_id=body.retry_group_id,
             retry_of_attempt_id=body.retry_of_attempt_id,
             idempotency_key=body.operation_id,
             actor=Actor(body.envelope.actor_type, body.envelope.actor_id),
