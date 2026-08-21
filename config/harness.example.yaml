@@ -8,4 +8,4 @@ lock_timeout_seconds: 5.0
 image_agent_root: ../image_agent_mvp
 image_agent_python: /usr/bin/python3
 image_agent_dependency_root: .runtime/image-agent-deps
-image_agent_revision: 2339550ab15ad05e0dde7f48e1386a5a1a0eb663
+image_agent_revision: 0e559d0153f479c8abefb14613804b8cde486282
