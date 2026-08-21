@@ -740,10 +740,23 @@ test("settings keep credentials redacted and clear submitted secrets", async ({ 
 });
 
 test("human approval resolves once and the inbox records it as handled", async ({ page }) => {
+  const browserErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") browserErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+
   await page.goto("/inbox?approval_id=ap_ui");
   await expect(page.getByRole("heading", { name: "按到达顺序处理" })).toBeVisible();
   await expect(page.getByText("工作流等待决议")).toBeVisible();
+  const actorId = page.getByLabel("操作人 ID");
+  await expect(actorId).toHaveAttribute("pattern", String.raw`[A-Za-z][A-Za-z0-9_\-]{0,127}`);
+  await actorId.fill("9_invalid");
+  await expect.poll(() => actorId.evaluate((input) => input.checkValidity())).toBe(false);
+  await actorId.fill("human_operator");
+  await expect.poll(() => actorId.evaluate((input) => input.checkValidity())).toBe(true);
   await page.getByRole("button", { name: "批准并推进" }).click();
   await expect(page.getByText("该审批已完成处理。")).toBeVisible();
   await expect(page.getByText("已处理", { exact: true })).toBeVisible();
+  expect(browserErrors).toEqual([]);
 });
