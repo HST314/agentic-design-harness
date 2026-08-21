@@ -235,6 +235,7 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
   transition: color 180ms ease;
 }
 .card-link:hover { color: var(--color-primary); }
+.card-link:active { color: var(--color-primary-strong); }
 .card-link span, .row-arrow { width: 20px; height: 20px; }
 .card-link svg, .row-arrow svg { width: 18px; height: 18px; }
 .badge {
@@ -305,6 +306,7 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
   transition: border-color 180ms ease, background-color 180ms ease;
 }
 .instance-row:hover { border-color: var(--color-primary); background: var(--color-muted); }
+.instance-row:active { border-color: var(--color-primary-strong); background: var(--color-primary-softer); }
 .instance-row strong, .instance-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .instance-row strong { font-size: 14px; }
 .instance-row small { color: var(--color-secondary-text); font-size: 12px; }
@@ -334,6 +336,7 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
 .button--secondary:hover { border-color: var(--color-primary); background: var(--color-primary-softer); }
 .button--danger { border-color: var(--color-danger); color: var(--color-danger); background: var(--color-surface); }
 .button--danger:hover { color: var(--color-surface); background: var(--color-danger); }
+.button:active:not(:disabled) { filter: brightness(.94); }
 .button:disabled { cursor: wait; opacity: .72; }
 .button--disabled { cursor: not-allowed; color: var(--color-secondary-text); background: var(--color-muted); }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; }
@@ -405,6 +408,61 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
 .inline-error { margin: 8px 0 0; font-size: 13px; }
 .handled-copy { margin: 14px 0 0 !important; padding: 12px; border-radius: 9px; background: var(--color-muted); font-size: 14px; }
 
+.usage-section { margin-top: 34px; padding-top: 26px; border-top: 1px solid var(--color-border); }
+.metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.metric-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+.metric-card p, .metric-card small { color: var(--color-secondary-text); }
+.metric-card p { margin-bottom: 10px; font-size: 12px; font-weight: 700; }
+.metric-card strong { display: block; overflow: hidden; margin-bottom: 5px; font-size: 21px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.metric-card small { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.budget-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, .45fr);
+  align-items: center;
+  gap: 24px;
+  margin-top: 14px;
+  padding: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+}
+.budget-card h3 { margin: 3px 0 4px; font-size: 16px; }
+.budget-card p:last-child { margin-bottom: 0; color: var(--color-secondary-text); font-size: 13px; }
+.budget-zero { margin: 0; padding: 12px; border: 1px dashed var(--color-border); border-radius: 9px; color: var(--color-secondary-text); font-size: 13px; }
+.budget-progress { height: 10px; overflow: hidden; border-radius: 999px; background: var(--color-muted); }
+.budget-progress span { display: block; height: 100%; border-radius: inherit; background: var(--color-primary); transition: width 200ms ease; }
+.usage-table { max-width: 100%; overflow: auto; margin-top: 14px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); }
+.usage-table table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-table th, .usage-table td { padding: 12px 14px; border-bottom: 1px solid var(--color-border); text-align: left; }
+.usage-table thead th { color: var(--color-secondary-text); background: var(--color-muted); font-size: 12px; }
+.usage-table tbody tr:last-child th, .usage-table tbody tr:last-child td { border-bottom: 0; }
+.usage-events { margin-top: 14px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); }
+.usage-events summary { min-height: 44px; display: flex; align-items: center; padding: 10px 14px; color: var(--color-primary-strong); font-size: 13px; font-weight: 700; }
+.usage-events > div { border-top: 1px solid var(--color-border); }
+.usage-events article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; padding: 12px 14px; border-bottom: 1px solid var(--color-border); }
+.usage-events article:last-child { border-bottom: 0; }
+.usage-events span, .usage-events small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-events small { grid-column: 1 / -1; color: var(--color-secondary-text); font-size: 12px; }
+.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 16px; }
+.settings-card { min-width: 0; padding: 20px; border: 1px solid var(--color-border); border-radius: 14px; background: var(--color-surface); box-shadow: var(--shadow-card); }
+.settings-card > div:first-child h3 { margin: 3px 0 6px; font-size: 18px; }
+.settings-card > div:first-child p:last-child { color: var(--color-secondary-text); font-size: 14px; }
+.settings-card form { display: grid; gap: 14px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--color-border); }
+.settings-card textarea { line-height: 1.55; }
+.credential-list { display: grid; gap: 10px; margin-top: 16px; }
+.credential-list article { padding: 14px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-muted); }
+.credential-list article > div { display: flex; align-items: center; gap: 10px; }
+.credential-list dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0 0; }
+.credential-list dt { color: var(--color-secondary-text); font-size: 12px; }
+.credential-list dd { overflow: hidden; margin: 3px 0 0; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+
 :focus-visible { outline: 3px solid var(--color-ring); outline-offset: 3px; }
 
 @media (max-width: 760px) {
@@ -439,6 +497,15 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
   .approval-form { grid-template-columns: 1fr; }
   .approval-form .field:nth-child(3), .approval-form .form-actions, .approval-form .form-feedback { grid-column: auto; }
   .approval-routing .button, .pending-card .button { width: 100%; }
+  .metric-grid, .settings-grid { grid-template-columns: 1fr; }
+  .budget-card { grid-template-columns: 1fr; }
+  .credential-list dl { grid-template-columns: 1fr; }
+  .field input, .field select, .field textarea { font-size: 16px; }
+}
+
+@media (min-width: 761px) and (max-width: 1080px) {
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-color-scheme: dark) {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -228,10 +229,24 @@ class HarnessApplicationService:
                     crash_hook("after_start_intent")
             return self._resume_start(intent_path, crash_hook)
 
-    def cancel_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
+    def cancel_instance(
+        self, task_id: str, instance_id: str, *, operation_id: str | None = None
+    ) -> dict[str, Any]:
         instance = self._instance(task_id, instance_id)
         if instance["status"] == "CANCELLED":
             return instance
+        stop_operation = operation_id or self._derived_id("cancel", task_id, instance_id)
+        validate_identifier(stop_operation, "operation_id")
+        if instance["status"] in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+            adapter = self.adapters.get(instance["agent_type"])
+            # The process group is still the authoritative cancellation
+            # boundary when the Agent endpoint is already unavailable.
+            with suppress(HarnessError):
+                adapter.stop(
+                    instance_id,
+                    "harness_instance_cancelled",
+                    self._derived_id("stop", stop_operation, instance_id),
+                )
         return self.supervisor.cancel_instance(task_id, instance_id)
 
     def archive_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:

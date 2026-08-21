@@ -1,30 +1,30 @@
 # Phase 1 acceptance traceability
 
 This matrix maps RFC v0.2 section 19 to the work package and executable evidence
-that must close it. `G3 complete` means the Image single-instance slice now closes
-human approval, notification and controlled delivery publication; it does not claim
-G4 configuration/usage/multi-instance or the final Phase 1 E2E packages.
+that must close it. `G4 complete` means usage, retry budgets, Image runtime control
+and the real three-process gate are closed; it does not claim the final G5 product,
+adversarial and release evidence packages.
 
 | RFC 19 | Work package | Evidence | Current status |
 | --- | --- | --- | --- |
 | 1 | P1-03/P1-04 | task/input command tests; `test_assets` import/selection tests | service complete; UI pending |
-| 2 | P1-03/P1-07/P1-08 | plan tests plus `test_g2_image_agent` real offline Image launch | G2 single-instance complete; multi-instance pending |
-| 3 | P1-07/P1-14 | `test_supervisor` three-process/port/directory isolation | P1-07 gate complete; final E2E pending |
+| 2 | P1-03/P1-07/P1-08 | plan tests plus G2 and G4 real offline Image launches | G4 multi-instance complete |
+| 3 | P1-07/P1-14 | supervisor isolation tests plus `test_g4_multi_image_agent` | G4 real three-process gate complete |
 | 4 | P1-07/P1-12 | instance API, G2 real-Agent gate and Playwright task→instance→workbench flow | G3 single-instance complete |
-| 5 | P1-05/P1-13 | `test_credentials` allocation, concurrency, crash, integrity and sticky-pair tests | service complete; final adversarial suite pending |
-| 6 | P1-06 | `test_configuration` local/global, concurrency, recovery and restart tests | complete |
+| 5 | P1-05/P1-13 | credential service tests plus G4 real `1→2→3→1` allocation | G4 gate complete; final security audit pending |
+| 6 | P1-06 | configuration service tests plus G4 real local→global hot-apply overwrite | G4 gate complete |
 | 7 | P1-02/P1-04 | layout plus traversal/symlink/browser-boundary tests | complete |
 | 8 | P1-04 | publication visibility, forged-file/manifest, crash and corruption tests | complete |
 | 9 | P1-11/P1-12 | Asset Service safe list/preview/download tests; API and resource-browser E2E | complete |
 | 10 | P1-09 | owner freeze, monotonic sequence, revision/idempotency and restart-dedupe tests | complete |
-| 11 | P1-08/P1-10/P1-12 | usage completeness and UI tests | planned |
+| 11 | P1-08/P1-10/P1-12 | `test_usage_budget`, G4 API and Playwright usage UI | G4 gate complete |
 | 12 | P1-09 | unread/handled reducer, notification dedupe and approval deep-link browser tests | complete |
-| 13 | P1-02/P1-07/P1-13 | launch/attempt idempotency, startup reconcile and model-call interruption tests | service complete; final E2E pending |
+| 13 | P1-02/P1-07/P1-13 | launch/attempt tests plus G4 control-plane restart with stable real job IDs | G4 recovery gate complete; crash-kill final E2E pending |
 | 14 | P1-03/P1-08 | topology replacement/recovery tests, typed unavailable Adapter and real Image E2E | G2 single-instance complete |
 | 15 | P1-03 | delayed required-PPT blocking tests | complete |
 | 16 | P1-03/P1-09 | aggregation priority tests | complete |
-| 17 | P1-07 | process-group cancellation, port release and workspace-retention test | complete |
-| 18 | P1-10/P1-13 | concurrent retry-budget adversarial tests | planned |
+| 17 | P1-07/P1-08 | process-group tests plus real Adapter job cancellation with surviving peers | G4 gate complete |
+| 18 | P1-10/P1-13 | concurrent/replay/replacement/unknown-cost budget adversarial tests | G4 gate complete |
 
 ## P1-00 fixtures
 
@@ -70,3 +70,20 @@ G4 configuration/usage/multi-instance or the final Phase 1 E2E packages.
   `tests/e2e/test_g3_real_image_agent.py`. The latter launches the pinned Image Adapter and real
   Image process against a deterministic local HTTP provider, crosses every human approval,
   finalizes the Image delivery, publishes the verified asset and completes the instance/task.
+
+## G4 gate evidence
+
+- Usage: `tests/integration/test_usage_budget.py` validates ownership, credential linkage,
+  idempotency conflict, completeness, model/time/instance aggregation, integer micro-cost and
+  reconstruction. Image explicitly returns no events when its pinned API has no usage source.
+- Retry budget: the same suite covers task-lock check+reservation, concurrent hard limits,
+  replay, replacement-instance lineage, unknown costs, human-only one-shot overrides,
+  settlement, over-reservation freeze and approval recovery.
+- Adapter/API: `tests/unit/test_image_adapter.py` covers policy/model hot apply and active-job
+  cancellation. `tests/integration/test_g4_api.py` covers usage, retry-budget, global/instance
+  config and secret-redacted key-pool boundaries.
+- Browser: `frontend/e2e/shell.spec.ts` covers Token/cost/budget visibility, explicit
+  completeness, redacted credentials, cleared secret input, keyboard access and mobile overflow.
+- Exit gate: `make g4-e2e` launches three pinned real Image processes offline, proves isolated
+  PIDs/ports/directories, `1→2→3→1` credential allocation, local-to-global config overwrite,
+  explicit unreported usage, restart recovery with unchanged job IDs, and independent cancel.

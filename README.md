@@ -3,10 +3,10 @@
 单机平面设计多智能体控制平面。系统由 Master Agent 与人工共同编排任务，
 通过稳定契约管理彼此隔离的 Image、PPT 及后续专业 Agent。
 
-当前 `main` 已完成 RFC v0.2 的 G3 人工介入与交付闭环：在 G2 真实 Image
-单实例纵切上增加冻结 Owner 的审批、FIFO 收件箱、异步推进对账、最终交付发现、
-受控发布和资源浏览。它仍不是完整 Phase 1 产品；Token 用量、运行时配置、
-多实例预算并发与最终产品验收属于 G4 及后续工作包。
+当前 `main` 已完成 RFC v0.2 的 G4 用量、预算与多实例门禁：在 G3 人工介入和
+受控交付闭环上增加标准化 Token 用量、任务级自动重试预算、人工单次越权、
+Image 配置热应用/取消/恢复，以及 3 个真实离线 Image 进程联调。它仍不是完整
+Phase 1 产品；分页、完整六页产品界面、最终对抗验收和发布证据包属于 G5。
 
 ## 当前能力
 
@@ -17,12 +17,13 @@
 - `backend/harness/domain`：统一命令信封、任务/输入/计划命令、冻结状态转换、
   人工/自动启动、取消、授权降级和确定性聚合；
 - `backend/harness/services`：受控资产导入/发布、冻结审批与 FIFO 通知、完整凭据对
-  轮询、全局/实例配置、一实例一进程的监管与崩溃恢复，以及 durable 应用用例编排；
+  轮询、全局/实例配置、用量聚合、自动重试预算、一实例一进程监管与 durable 编排；
 - `backend/harness/adapters`：typed Adapter Protocol、显式 Registry、真实 Image
   TaskCard 映射/隔离启动/HTTP 观测，以及 PPT 不可运行契约占位；
-- `backend/harness/api`：任务/实例、审批/收件箱、审批路由和安全资源读写接口；
-- `frontend/`：任务、实例、审批收件箱和资源浏览，含响应式布局、键盘操作、
-  防重复提交和无障碍状态反馈；
+- `backend/harness/api`：任务/实例、审批/收件箱、资源、usage、retry-budget、
+  config/key-pool 及实例取消接口；
+- `frontend/`：任务、实例、审批收件箱、资源、Token/费用/预算和脱敏配置管理，
+  含响应式布局、键盘操作、防重复提交和无障碍状态反馈；
 - `contracts/v1/`：Phase 0 冻结的跨模块事实源及 consumer-first TaskCard 1.1；
 - `tests/`：契约、单元、集成和崩溃注入测试，其中原 P0 46 条保持全绿。
 
@@ -61,6 +62,9 @@ make g2-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 
 # G3 人工审批 → 真实 Adapter/进程 → 受控发布 → 主任务完成门禁
 make g3-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+
+# G4 三进程、凭据轮转、配置覆盖、用量、取消与无重放恢复门禁
+make g4-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
 
 ## 启动空服务
@@ -84,6 +88,14 @@ make serve
 - `PUT /api/v1/instances/{id}/approval-mode`：只改变后续审批路由，既有 Owner 不迁移；
 - `GET /api/v1/tasks/{id}/files` 及其 `preview` / `download`：只读取已提交且实时校验
   通过的输入和公共交付。
+- `GET /api/v1/tasks/{id}/usage`、`GET /api/v1/instances/{id}/usage`：展示可从原始
+  NDJSON 重建的用量，并明确区分完整、部分和未上报；
+- `GET/PUT /api/v1/tasks/{id}/retry-budget`：人工修订预算；自动请求在任务锁内原子
+  检查次数、Token 和可选费用并预留，超限生成一次性人工审批；
+- `GET/PUT /api/v1/config/global`、实例 config 与 key-pool：强制全局覆盖、热应用和
+  完整凭据对管理，响应不回显明文 Key；
+- `POST /api/v1/instances/{id}/cancel`：先请求 Adapter 停止活动 job，再以进程组作为
+  权威取消边界。
 
 可复制 `config/harness.example.yaml` 并通过 `HARNESS_CONFIG` 指定。运行状态写入
 `control-data/`，任务工作区写入 `workspace/tasks/`，二者均不会进入版本控制。
@@ -94,10 +106,10 @@ make serve
 - Master 和人工只能通过领域命令/API 改变控制平面状态；
 - API Key 不进入任务卡、共享目录、事件、日志或响应；
 - 当前前端只承载控制面，专业工作流通过 Adapter 提供的 HTTP 深链打开；
-- G2 门禁继续使用固定 Image Agent 版本验证真实离线启动和观测；G3 门禁同时覆盖
-  脚本化故障回归和真实 Image Adapter/进程全链，验证人工审批只推进一次、拒绝不
-  提交决议、待审批不可交付、交付摘要复验、Asset Service 可见性提交及必需资产
-  齐备后完成。
+- G2/G3 门禁继续验证真实离线启动、人工审批和受控交付；G4 门禁同时保持 3 个
+  固定版本 Image 进程，验证 PID/端口/目录隔离、凭据 `1→2→3→1`、局部配置被
+  全局保存覆盖、未上报不伪造 0、控制面重启不重发 Agent job，以及单实例取消不
+  影响其他实例。
 
 完整范围、状态语义与 18 条 Phase 1 验收标准见 [RFC v0.2](docs/rfc-v0.2.md)，
 测试追踪见 [Phase 1 验收矩阵](docs/verification/phase1-traceability.md)。

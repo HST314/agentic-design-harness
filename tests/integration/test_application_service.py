@@ -43,6 +43,7 @@ class FakeImageAdapter:
     def __init__(self) -> None:
         self.runtime_spec = None
         self.start_calls = []
+        self.stop_calls = []
         self.advance_calls = []
         self.observation = AdapterObservation("RUNNING")
         self.deliveries = []
@@ -61,6 +62,10 @@ class FakeImageAdapter:
     def start(self, instance_id, operation_id):
         self.start_calls.append((instance_id, operation_id))
         return AdapterCommandResult(True, operation_id)
+
+    def stop(self, instance_id, reason, operation_id):
+        self.stop_calls.append((instance_id, reason, operation_id))
+        return AdapterCommandResult(True, operation_id, {"reason": reason})
 
     def get_status(self, instance_id):
         return self.observation
@@ -464,6 +469,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(replay["launches"]), 1)
         self.assertEqual(len(self.fake_adapter.start_calls), 1)
         self.application.cancel_instance("t_start_application", "i_image_1")
+        self.assertEqual(len(self.fake_adapter.stop_calls), 1)
 
     def test_start_intent_is_durable_before_manual_confirmation(self) -> None:
         self._configure_runtime_artifact("pre-confirmation-fake-agent")

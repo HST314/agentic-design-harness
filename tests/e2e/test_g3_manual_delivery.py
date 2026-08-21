@@ -40,6 +40,9 @@ class ScriptedG3ImageAdapter:
     def start(self, instance_id, operation_id):
         return AdapterCommandResult(True, operation_id)
 
+    def stop(self, instance_id, reason, operation_id):
+        return AdapterCommandResult(True, operation_id, {"reason": reason})
+
     def get_status(self, _instance_id):
         if self.completed:
             return AdapterObservation(
