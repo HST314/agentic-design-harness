@@ -5,10 +5,29 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
+from typing import Any
+
+from PIL import Image, UnidentifiedImageError
 
 from ..core.errors import HarnessError
+from ..services.asset_files import (
+    detect_mime,
+    detect_mime_stream,
+    file_digest,
+    stream_digest,
+)
+from ..storage.atomic import fsync_directory
+
+_PNG_PARAMETERS = {
+    "format": "PNG",
+    "color_mode": "RGB",
+    "compress_level": 9,
+    "optimize": False,
+}
+_MAX_IMAGE_PIXELS = 40_000_000
 
 
 def stage_final_delivery(
@@ -56,9 +75,7 @@ def stage_final_delivery(
             output.flush()
             os.fsync(output.fileno())
         if digest.hexdigest() != expected_sha256:
-            raise HarnessError(
-                "ASSET_CORRUPTED", "The finalized Image delivery digest is invalid."
-            )
+            raise HarnessError("ASSET_CORRUPTED", "The finalized Image delivery digest is invalid.")
         if destination.exists():
             current_fd = os.open(destination, file_flags)
             if not stat.S_ISREG(os.fstat(current_fd).st_mode):
@@ -86,3 +103,123 @@ def stage_final_delivery(
         for descriptor in (temporary_fd, source_fd, delivery_fd, root_fd):
             if descriptor >= 0:
                 os.close(descriptor)
+
+
+def normalize_image_delivery(
+    source: Path,
+    *,
+    accepted_mime_types: tuple[str, ...],
+) -> dict[str, Any]:
+    """Return contract-compatible bytes, deriving a deterministic PNG when allowed."""
+
+    source_fd = -1
+    temporary: Path | None = None
+    try:
+        source_fd = os.open(
+            source,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            raise OSError("delivery is not a regular file")
+        with os.fdopen(source_fd, "rb") as source_stream:
+            source_fd = -1
+            source_mime = detect_mime_stream(source_stream, source.name)
+            source_size, source_sha256 = stream_digest(source_stream)
+            if source_mime in accepted_mime_types:
+                return {
+                    "path": source,
+                    "mime_type": source_mime,
+                    "size_bytes": source_size,
+                    "sha256": source_sha256,
+                    "derivation": None,
+                }
+            if source_mime != "image/jpeg" or "image/png" not in accepted_mime_types:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "The finalized Image delivery does not match its output MIME contract.",
+                    {
+                        "actual_mime_type": source_mime,
+                        "accepted_mime_types": list(accepted_mime_types),
+                    },
+                )
+
+            destination = source.with_name(f"{source.stem}.contract.png")
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.",
+                suffix=".derive.tmp",
+                dir=destination.parent,
+            )
+            temporary = Path(temporary_name)
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w+b") as output_stream:
+                with Image.open(source_stream) as opened:
+                    width, height = opened.size
+                    if width <= 0 or height <= 0 or width * height > _MAX_IMAGE_PIXELS:
+                        raise HarnessError(
+                            "ASSET_VALIDATION_FAILED",
+                            "The finalized Image delivery dimensions are unsafe.",
+                            {"width": width, "height": height},
+                        )
+                    opened.load()
+                    verified_source = stream_digest(source_stream)
+                    if verified_source != (source_size, source_sha256):
+                        raise HarnessError(
+                            "ASSET_CORRUPTED",
+                            "The finalized JPEG delivery changed during conversion.",
+                        )
+                    normalized = opened.convert(_PNG_PARAMETERS["color_mode"])
+                    normalized.save(
+                        output_stream,
+                        format=_PNG_PARAMETERS["format"],
+                        compress_level=_PNG_PARAMETERS["compress_level"],
+                        optimize=_PNG_PARAMETERS["optimize"],
+                    )
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+
+        assert temporary is not None
+        os.chmod(temporary, 0o640)
+        derived_size, derived_sha256 = file_digest(temporary)
+        if detect_mime(temporary, destination.name) != "image/png":
+            raise HarnessError(
+                "ASSET_VALIDATION_FAILED",
+                "The derived Image delivery is not a valid PNG.",
+            )
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+        except FileExistsError:
+            current_size, current_sha256 = file_digest(destination)
+            if (current_size, current_sha256) != (derived_size, derived_sha256):
+                raise HarnessError(
+                    "ASSET_CORRUPTED",
+                    "The derived Image delivery changed after conversion.",
+                ) from None
+        else:
+            os.chmod(destination, 0o640)
+            fsync_directory(destination.parent)
+        return {
+            "path": destination,
+            "mime_type": "image/png",
+            "size_bytes": derived_size,
+            "sha256": derived_sha256,
+            "derivation": {
+                "source_sha256": source_sha256,
+                "source_mime_type": source_mime,
+                "derived_sha256": derived_sha256,
+                "derived_mime_type": "image/png",
+                "transform": "jpeg_to_png",
+                "parameters": dict(_PNG_PARAMETERS),
+            },
+        }
+    except HarnessError:
+        raise
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
+        raise HarnessError(
+            "ASSET_VALIDATION_FAILED",
+            "The finalized JPEG delivery could not be converted safely.",
+        ) from None
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

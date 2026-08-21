@@ -551,14 +551,34 @@ class ApprovalInboxService:
                     kind = "INSTANCE_SUCCEEDED"
                     title = "Agent 交付已发布"
                     message = f"实例 {instance['instance_id']} 的必需交付已校验并发布。"
+                    dedupe_key = f"instance-succeeded:{instance['instance_id']}"
+                elif status == "FAILED" and isinstance(
+                    instance.get("delivery_rejection"), dict
+                ):
+                    rejection = instance["delivery_rejection"]
+                    kind = "INSTANCE_DELIVERY_REJECTED"
+                    title = "Agent 交付未通过发布校验"
+                    message = (
+                        f"实例 {instance['instance_id']} 的交付已隔离。"
+                        "修复后重新校验不会重跑模型步骤。"
+                    )
+                    rejection_identity = {
+                        key: rejection[key] for key in ("code", "message", "details")
+                    }
+                    dedupe_key = (
+                        f"instance-delivery-rejected:{instance['instance_id']}:"
+                        f"{digest_json(rejection_identity)[:20]}"
+                    )
                 elif status in {"FAILED", "FAILED_TO_START"}:
                     kind = "INSTANCE_FAILED"
                     title = "Agent 执行失败"
                     message = f"实例 {instance['instance_id']} 已进入失败状态。"
+                    dedupe_key = f"instance-failed:{instance['instance_id']}"
                 elif status == "CRASHED":
                     kind = "INSTANCE_CRASHED"
                     title = "Agent 进程异常退出"
                     message = f"实例 {instance['instance_id']} 的受监管进程已崩溃。"
+                    dedupe_key = f"instance-crashed:{instance['instance_id']}"
                 else:
                     continue
                 self.ensure_notification(
@@ -568,10 +588,7 @@ class ApprovalInboxService:
                     title=title,
                     message=message,
                     deep_link=f"instances/{instance['instance_id']}",
-                    dedupe_key=(
-                        f"instance-{kind.removeprefix('INSTANCE_').lower()}:"
-                        f"{instance['instance_id']}"
-                    ),
+                    dedupe_key=dedupe_key,
                     instance_id=instance["instance_id"],
                 )
             task = plan["task"]

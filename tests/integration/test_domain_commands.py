@@ -221,6 +221,15 @@ class TaskCommandTests(unittest.TestCase):
             self._transition("t_illegal", "i_image_1", "SUCCEEDED", "skip-runtime")
         self.assertEqual(transition.exception.code, "INVALID_STATE_TRANSITION")
 
+        create_task(self.service, "t_failed_restart", "auto")
+        self._save("t_failed_restart", image_plan("t_failed_restart"))
+        self._transition("t_failed_restart", "i_image_1", "STARTING", "start")
+        self._transition("t_failed_restart", "i_image_1", "RUNNING", "run")
+        self._transition("t_failed_restart", "i_image_1", "FAILED", "fail")
+        with self.assertRaises(HarnessError) as direct_resume:
+            self._transition("t_failed_restart", "i_image_1", "RUNNING", "bypass-restart")
+        self.assertEqual(direct_resume.exception.code, "INVALID_STATE_TRANSITION")
+
     def test_cancel_is_a_domain_command_and_preserves_workspace(self) -> None:
         created = create_task(self.service, "t_cancel")
         cancelled = self.service.cancel_task(

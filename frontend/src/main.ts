@@ -387,11 +387,17 @@ function renderInstanceContent(
             : '<span class="button button--disabled" aria-disabled="true">工作台尚未就绪</span>'
         }
         ${instance.status === "READY" ? '<button class="button button--primary" type="button" data-instance-action="start">启动实例</button>' : ""}
-        ${["RUNNING", "WAITING_APPROVAL", "FAILED_TO_START", "FAILED", "CRASHED"].includes(instance.status) ? '<button class="button button--secondary" type="button" data-instance-action="restart">重启实例</button>' : ""}
+        ${instance.delivery_rejection?.retryable ? '<button class="button button--primary" type="button" data-delivery-retry>重新校验交付</button>' : ""}
+        ${["RUNNING", "WAITING_APPROVAL", "FAILED_TO_START", "FAILED", "CRASHED"].includes(instance.status) && !instance.delivery_rejection ? '<button class="button button--secondary" type="button" data-instance-action="restart">重启实例</button>' : ""}
         ${["UNAVAILABLE", "READY", "STARTING", "RUNNING", "WAITING_APPROVAL"].includes(instance.status) ? '<button class="button button--danger" type="button" data-instance-action="cancel">取消实例</button>' : ""}
         ${["UNAVAILABLE", "FAILED_TO_START", "SUCCEEDED", "FAILED", "CRASHED", "CANCELLED", "SUPERSEDED"].includes(instance.status) ? '<button class="button button--secondary" type="button" data-instance-action="archive">归档实例</button>' : ""}
       </div>
     </div>
+    ${
+      instance.delivery_rejection
+        ? `<div class="alert alert--danger" role="alert"><strong>交付未通过发布校验</strong><span>${escapeHtml(instance.delivery_rejection.message)}（${escapeHtml(instance.delivery_rejection.code)}）</span><span>不合格文件仍隔离在实例输出区；重新校验不会重跑已完成的模型步骤。</span></div>`
+        : ""
+    }
     <div class="detail-grid">
       <section class="info-card"><p class="eyebrow">运行进程</p><h3>隔离运行环境</h3><dl class="detail-list">
         ${detailItem("进程状态", process?.state ?? "未启动")}
@@ -440,6 +446,22 @@ function renderInstanceContent(
         : ""
     }`;
   wireInstanceOperations(response);
+  root.querySelector<HTMLButtonElement>("[data-delivery-retry]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    if (button.disabled) return;
+    setButtonBusy(button, "正在重新校验");
+    try {
+      await api.retryDelivery(instance.instance_id, {
+        operation_id: operationId("delivery_retry"),
+        envelope: commandEnvelope("human", "human_operator", response.task_revision),
+      });
+      await renderInstance(instance.instance_id, renderVersion);
+    } catch (error) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      showInlineError(button, error);
+    }
+  });
   root.querySelector<HTMLFormElement>("[data-instance-config]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget as HTMLFormElement;

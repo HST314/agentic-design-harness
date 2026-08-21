@@ -78,9 +78,7 @@ class AssetService:
     def initialize_instance_workspace(self, task_id: str, instance_id: str) -> Path:
         instance = self._require_instance(task_id, instance_id)
         if instance["status"] == "ARCHIVED":
-            raise HarnessError(
-                "INVALID_STATE_TRANSITION", "An archived instance is read-only."
-            )
+            raise HarnessError("INVALID_STATE_TRANSITION", "An archived instance is read-only.")
         return self.store.layout.initialize_instance(task_id, instance_id)
 
     def import_bytes(
@@ -188,7 +186,7 @@ class AssetService:
         lock = FileLock(self._asset_lock(task_id), self.store.lock_timeout_seconds)
         transaction_id = f"imp_{hashlib.sha256(idempotency_key.encode()).hexdigest()[:24]}"
         record_path = self._transaction_dir(task_id) / f"{transaction_id}.json"
-        request = {
+        request: dict[str, Any] = {
             "filename": filename,
             "description": description,
             "source": source,
@@ -334,14 +332,16 @@ class AssetService:
         role: str,
         description: str,
         idempotency_key: str,
+        batch_id: str | None = None,
+        derivation: dict[str, Any] | None = None,
         crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
         instance = self._require_instance(task_id, instance_id)
         if instance["status"] == "ARCHIVED":
-            raise HarnessError(
-                "INVALID_STATE_TRANSITION", "An archived instance is read-only."
-            )
+            raise HarnessError("INVALID_STATE_TRANSITION", "An archived instance is read-only.")
         self._validate_idempotency_key(idempotency_key)
+        if batch_id is not None:
+            validate_identifier(batch_id, "batch_id")
         if not role or len(role) > 128 or len(description) > 4000:
             self._invalid("Delivery role or description is invalid.")
         normalized = normalized_relative_path(source_relative_path).as_posix()
@@ -354,15 +354,17 @@ class AssetService:
         )
         if source.is_symlink() or not source.is_file():
             self._invalid("A delivery source must be a regular instance output file.")
-        request = {
+        request: dict[str, Any] = {
             "instance_id": instance_id,
             "source_relative_path": normalized,
             "role": role,
             "description": description,
         }
-        transaction_digest = hashlib.sha256(
-            f"{instance_id}:{idempotency_key}".encode()
-        ).hexdigest()
+        if batch_id is not None:
+            request["batch_id"] = batch_id
+        if derivation is not None:
+            request["derivation"] = deepcopy(derivation)
+        transaction_digest = hashlib.sha256(f"{instance_id}:{idempotency_key}".encode()).hexdigest()
         transaction_id = f"pub_{transaction_digest[:24]}"
         asset_digest = hashlib.sha256(f"{task_id}:{transaction_id}".encode()).hexdigest()
         asset_id = f"a_pub_{asset_digest[:20]}"
@@ -392,6 +394,128 @@ class AssetService:
                 atomic_write_json(record_path, record)
             return self._resume_publication(record_path, crash_hook)
 
+    def inspect_delivery(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        source_relative_path: str,
+        role: str,
+        description: str,
+        expected_sha256: str | None = None,
+        derivation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Inspect one private output without creating a public transaction or event."""
+
+        self._require_instance(task_id, instance_id)
+        if not role or len(role) > 128 or len(description) > 4000:
+            self._invalid("Delivery role or description is invalid.")
+        normalized = normalized_relative_path(source_relative_path).as_posix()
+        workspace = self.initialize_task_workspace(task_id)
+        source = resolve_task_path(
+            workspace,
+            normalized,
+            allowed_prefixes=(f"instances/{instance_id}/outputs",),
+        )
+        if source.is_symlink() or not source.is_file():
+            self._invalid("A delivery source must be a regular instance output file.")
+        size_bytes, sha256 = file_digest(source)
+        if expected_sha256 is not None and sha256 != expected_sha256:
+            raise HarnessError(
+                "ASSET_CORRUPTED",
+                "The collected delivery digest changed before publication.",
+                {"expected_sha256": expected_sha256, "actual_sha256": sha256},
+            )
+        mime_type = detect_mime(source, source.name)
+        self._validate_mime(mime_type)
+        candidate = {
+            "source_relative_path": normalized,
+            "kind": kind_for_mime(mime_type),
+            "role": role,
+            "description": description,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+            "derivation": deepcopy(derivation),
+        }
+        self._validate_derivation(candidate)
+        return candidate
+
+    def commit_publication_batch(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        batch_id: str,
+        manifests: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Commit one visibility gate for a fully validated set of publications."""
+
+        self._require_instance(task_id, instance_id)
+        validate_identifier(batch_id, "batch_id")
+        if not manifests:
+            self._invalid("A publication batch cannot be empty.")
+        for manifest in manifests:
+            self.store.contracts.validate("asset-manifest", manifest)
+            if (
+                manifest["task_id"] != task_id
+                or manifest.get("producer_instance_id") != instance_id
+            ):
+                self._invalid("Every batch asset must belong to its producing instance.")
+        ordered = sorted(manifests, key=lambda item: item["asset_id"])
+        if len({item["asset_id"] for item in ordered}) != len(ordered):
+            self._invalid("A publication batch cannot contain duplicate assets.")
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "batch_id": batch_id,
+            "assets": [
+                {
+                    "asset_id": item["asset_id"],
+                    "publication_id": item["publication_id"],
+                    "sha256": item["sha256"],
+                }
+                for item in ordered
+            ],
+        }
+        record_path = self._transaction_dir(task_id) / f"{batch_id}.json"
+        with FileLock(self._asset_lock(task_id), self.store.lock_timeout_seconds):
+            if record_path.exists():
+                record = read_json(record_path)
+                self._check_request(record, "publication_batch", request)
+            else:
+                record = {
+                    "transaction_type": "publication_batch",
+                    "transaction_id": batch_id,
+                    "batch_id": batch_id,
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "request": request,
+                    "request_sha256": digest_json({"kind": "publication_batch", **request}),
+                    "state": "PREPARED",
+                    "created_at": utc_now(),
+                }
+                atomic_write_json(record_path, record)
+            return self._resume_publication_batch(record_path)
+
+    def list_publication_batch(
+        self, task_id: str, instance_id: str, batch_id: str
+    ) -> list[dict[str, Any]]:
+        """List verified private manifests prepared for one publication batch."""
+
+        self._require_instance(task_id, instance_id)
+        validate_identifier(batch_id, "batch_id")
+        manifests: list[dict[str, Any]] = []
+        for event in recover_records(self._event_path(task_id)):
+            if event.get("event_type") != "ASSET_PUBLISHED" or event.get("batch_id") != batch_id:
+                continue
+            manifest = event["manifest"]
+            if manifest.get("producer_instance_id") != instance_id:
+                self._invalid("A publication batch contains an asset from another instance.")
+            self._verify_manifest_file(task_id, manifest)
+            manifests.append(deepcopy(manifest))
+        return sorted(manifests, key=lambda item: item["asset_id"])
+
     def replay_delivery(
         self,
         task_id: str,
@@ -401,21 +525,26 @@ class AssetService:
         role: str,
         description: str,
         idempotency_key: str,
+        batch_id: str | None = None,
+        derivation: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Return an exact committed publication replay without creating one."""
 
         self._require_instance(task_id, instance_id)
         self._validate_idempotency_key(idempotency_key)
         normalized = normalized_relative_path(source_relative_path).as_posix()
-        request = {
+        request: dict[str, Any] = {
             "instance_id": instance_id,
             "source_relative_path": normalized,
             "role": role,
             "description": description,
         }
-        transaction_digest = hashlib.sha256(
-            f"{instance_id}:{idempotency_key}".encode()
-        ).hexdigest()
+        if batch_id is not None:
+            validate_identifier(batch_id, "batch_id")
+            request["batch_id"] = batch_id
+        if derivation is not None:
+            request["derivation"] = deepcopy(derivation)
+        transaction_digest = hashlib.sha256(f"{instance_id}:{idempotency_key}".encode()).hexdigest()
         record_path = self._transaction_dir(task_id) / f"pub_{transaction_digest[:24]}.json"
         with FileLock(self._asset_lock(task_id), self.store.lock_timeout_seconds):
             if not record_path.exists():
@@ -441,6 +570,8 @@ class AssetService:
                         results.append(self._resume_import(record_path))
                     elif record.get("transaction_type") == "publication":
                         results.append(self._resume_publication(record_path, None))
+                    elif record.get("transaction_type") == "publication_batch":
+                        results.append(self._resume_publication_batch(record_path))
                 workspace = self.store.layout.workspace_root / "tasks" / task_id
                 for temporary in workspace.glob("resources/shared/*/.*.tmp"):
                     publication_id = temporary.name[1:-4]
@@ -473,8 +604,7 @@ class AssetService:
             (
                 item
                 for item in recover_records(self._event_path(task_id))
-                if item.get("event_type") == "ASSET_IMPORTED"
-                and item.get("asset_id") == asset_id
+                if item.get("event_type") == "ASSET_IMPORTED" and item.get("asset_id") == asset_id
             ),
             None,
         )
@@ -516,7 +646,10 @@ class AssetService:
     ) -> dict[str, Any]:
         record = read_json(record_path)
         if record["state"] == "COMMITTED":
-            self.verify_asset(record["task_id"], record["asset_id"])
+            if record["request"].get("batch_id") is None:
+                self.verify_asset(record["task_id"], record["asset_id"])
+            else:
+                self._verify_manifest_file(record["task_id"], record["manifest"])
             self._publication_temporary_path(record).unlink(missing_ok=True)
             self._publication_manifest_temporary_path(record).unlink(missing_ok=True)
             return deepcopy(record["manifest"])
@@ -626,6 +759,7 @@ class AssetService:
                 "size_bytes": final_size,
                 "sha256": final_sha256,
                 "description": record["request"]["description"],
+                "derivation": deepcopy(record["request"].get("derivation")),
                 "source_relative_path": record["source_relative_path"],
                 "publication_id": record["publication_id"],
                 "published_at": now,
@@ -660,6 +794,7 @@ class AssetService:
                     "event_type": "ASSET_PUBLISHED",
                     "asset_id": record["asset_id"],
                     "publication_id": record["publication_id"],
+                    "batch_id": record["request"].get("batch_id"),
                     "manifest": manifest,
                     "manifest_relpath": record["manifest_relpath"],
                     "request_sha256": record["request_sha256"],
@@ -674,6 +809,62 @@ class AssetService:
         temporary.unlink(missing_ok=True)
         manifest_temporary.unlink(missing_ok=True)
         return deepcopy(manifest)
+
+    def _resume_publication_batch(self, record_path: Path) -> dict[str, Any]:
+        record = read_json(record_path)
+        task_id = record["task_id"]
+        batch_id = record["batch_id"]
+        committed = self._publication_batch_event(task_id, batch_id)
+        if committed is not None:
+            if committed["request_sha256"] != record["request_sha256"]:
+                raise HarnessError(
+                    "IDEMPOTENCY_CONFLICT",
+                    "The committed publication batch does not match its transaction.",
+                )
+            if record["state"] != "COMMITTED":
+                record.update(
+                    {
+                        "state": "COMMITTED",
+                        "committed_at": committed["occurred_at"],
+                        "result": committed,
+                    }
+                )
+                atomic_write_json(record_path, record)
+            return deepcopy(committed)
+
+        asset_ids = []
+        for item in record["request"]["assets"]:
+            publication = self._publication_event(task_id, item["publication_id"])
+            if (
+                publication is None
+                or publication.get("batch_id") != batch_id
+                or publication["asset_id"] != item["asset_id"]
+                or publication["manifest"]["sha256"] != item["sha256"]
+                or publication["manifest"]["task_id"] != task_id
+                or publication["manifest"].get("producer_instance_id") != record["instance_id"]
+            ):
+                raise HarnessError(
+                    "ASSET_VALIDATION_FAILED",
+                    "A publication batch is missing one prepared asset.",
+                    {"batch_id": batch_id, "asset_id": item["asset_id"]},
+                )
+            self._verify_manifest_file(task_id, publication["manifest"])
+            asset_ids.append(item["asset_id"])
+        now = utc_now()
+        event = {
+            "event_id": f"evt_{uuid.uuid4().hex}",
+            "event_type": "ASSET_PUBLICATION_BATCH_COMMITTED",
+            "batch_id": batch_id,
+            "task_id": task_id,
+            "instance_id": record["instance_id"],
+            "asset_ids": asset_ids,
+            "request_sha256": record["request_sha256"],
+            "occurred_at": now,
+        }
+        append_record(self._event_path(task_id), event)
+        record.update({"state": "COMMITTED", "committed_at": now, "result": event})
+        atomic_write_json(record_path, record)
+        return deepcopy(event)
 
     def list_assets(self, task_id: str) -> list[dict[str, Any]]:
         self._require_task(task_id)
@@ -816,15 +1007,35 @@ class AssetService:
             raise
 
     def _visible_asset_events(self, task_id: str) -> list[dict[str, Any]]:
+        records = recover_records(self._event_path(task_id))
+        committed_batches = {
+            event["batch_id"]: event
+            for event in records
+            if event.get("event_type") == "ASSET_PUBLICATION_BATCH_COMMITTED"
+        }
+        instance_statuses: dict[str, str | None] = {}
         latest: dict[str, dict[str, Any]] = {}
-        for event in recover_records(self._event_path(task_id)):
+        for event in records:
             if event.get("event_type") in {"ASSET_IMPORTED", "ASSET_PUBLISHED"}:
+                batch_id = event.get("batch_id")
+                if batch_id is not None:
+                    batch = committed_batches.get(batch_id)
+                    producer = event["manifest"]["producer_instance_id"]
+                    if producer not in instance_statuses:
+                        instance = self.store.instance.get(task_id, producer)
+                        instance_statuses[producer] = (
+                            instance["status"] if instance is not None else None
+                        )
+                    if (
+                        batch is None
+                        or event["asset_id"] not in batch["asset_ids"]
+                        or instance_statuses[producer] != "SUCCEEDED"
+                    ):
+                        continue
                 latest[event["asset_id"]] = event
         return sorted(latest.values(), key=lambda item: (item["occurred_at"], item["asset_id"]))
 
-    def _resolve_browser_path(
-        self, task_id: str, workspace: Path, relative_path: str
-    ) -> Path:
+    def _resolve_browser_path(self, task_id: str, workspace: Path, relative_path: str) -> Path:
         return resolve_committed_browser_path(
             workspace,
             relative_path,
@@ -876,6 +1087,17 @@ class AssetService:
                 for item in recover_records(self._event_path(task_id))
                 if item.get("event_type") == "ASSET_PUBLISHED"
                 and item.get("publication_id") == publication_id
+            ),
+            None,
+        )
+
+    def _publication_batch_event(self, task_id: str, batch_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                item
+                for item in recover_records(self._event_path(task_id))
+                if item.get("event_type") == "ASSET_PUBLICATION_BATCH_COMMITTED"
+                and item.get("batch_id") == batch_id
             ),
             None,
         )
@@ -938,9 +1160,7 @@ class AssetService:
             raise
         return size, digest.hexdigest()
 
-    def _check_request(
-        self, record: dict[str, Any], kind: str, request: dict[str, Any]
-    ) -> None:
+    def _check_request(self, record: dict[str, Any], kind: str, request: dict[str, Any]) -> None:
         if record["request_sha256"] != digest_json({"kind": kind, **request}):
             raise HarnessError(
                 "IDEMPOTENCY_CONFLICT",
@@ -995,6 +1215,17 @@ class AssetService:
     def _validate_mime(self, mime_type: str) -> None:
         if mime_type not in self.allowed_mime_types:
             self._invalid("The detected MIME type is not allowed.")
+
+    def _validate_derivation(self, candidate: dict[str, Any]) -> None:
+        derivation = candidate.get("derivation")
+        if derivation is None:
+            return
+        if not isinstance(derivation, dict) or (
+            derivation.get("derived_sha256") != candidate["sha256"]
+            or derivation.get("derived_mime_type") != candidate["mime_type"]
+        ):
+            self._invalid("Delivery derivation does not match the derived file.")
+        self.store.contracts.validate("delivery-derivation", derivation)
 
     @staticmethod
     def _validate_idempotency_key(value: str) -> None:
