@@ -76,7 +76,9 @@ g4-e2e: test-env image-agent-env
 	PYTHONPATH="$(PYTHONPATH_VALUE):tests" \
 	$(PYTHON) -m unittest tests.e2e.test_g4_multi_image_agent -v
 
-g5-e2e: verify g3-e2e g4-e2e frontend-e2e evidence
+g5-e2e:
+	G5_MAKE="$(MAKE)" $(PYTHON) scripts/run_g5_gate.py
+	$(PYTHON) scripts/generate_phase1_evidence.py
 
 evidence:
 	$(PYTHON) scripts/generate_phase1_evidence.py

@@ -138,6 +138,14 @@ test.beforeEach(async ({ page }) => {
             sha256: "a".repeat(64),
             previewable: true,
           },
+          {
+            relative_path: "inputs/brief.md",
+            filename: "brief.md",
+            mime_type: "text/markdown",
+            size_bytes: 96,
+            sha256: "b".repeat(64),
+            previewable: true,
+          },
         ],
         assets: [
           {
@@ -499,6 +507,137 @@ test("task and instance pages preserve the Image workbench boundary", async ({ p
   const workbench = page.getByRole("link", { name: "打开工作台" });
   await expect(workbench).toHaveAttribute("href", "http://127.0.0.1:18123/");
   await expect(workbench).toHaveAttribute("target", "_blank");
+});
+
+test("instance lifecycle controls submit guarded start, restart, cancel and archive commands", async ({ page }) => {
+  let instanceStatus = "READY";
+  let taskRevision = 10;
+  const submitted: Array<{ action: string; body: Record<string, unknown> }> = [];
+
+  await page.route("**/api/v1/instances/i_ui", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        task_id: "t_ui",
+        task_revision: taskRevision,
+        pending_approval: null,
+        credential: null,
+        config: { config_revision: 1, restart_required: false, config: {} },
+        instance: {
+          instance_id: "i_ui",
+          task_id: "t_ui",
+          agent_type: "image",
+          status: instanceStatus,
+          required: true,
+          approval_mode: "human",
+          config_revision: 1,
+          credential_pair_ref: "cred_ui",
+          credential_pair_revision: 1,
+          ui_url: instanceStatus === "RUNNING" ? "http://127.0.0.1:18123/" : null,
+          process: instanceStatus === "RUNNING"
+            ? {
+                pid: 1234,
+                port: 18123,
+                state: "RUNNING",
+                started_at: "2026-08-20T12:00:00Z",
+              }
+            : null,
+        },
+        observation: null,
+      }),
+    });
+  });
+  await page.route(/\/api\/v1\/instances\/i_ui\/(?:start|restart|cancel|archive)$/, async (route) => {
+    const action = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    submitted.push({ action, body });
+    instanceStatus = {
+      start: "RUNNING",
+      restart: "RUNNING",
+      cancel: "CANCELLED",
+      archive: "ARCHIVED",
+    }[action] ?? instanceStatus;
+    taskRevision += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "1.0", task_revision: taskRevision }),
+    });
+  });
+
+  await page.goto("/instances/i_ui");
+  await page.getByRole("button", { name: "启动实例" }).click();
+  await expect(page.getByRole("button", { name: "重启实例" })).toBeVisible();
+
+  await page.getByRole("button", { name: "重启实例" }).click();
+  await expect.poll(() => submitted.length).toBe(2);
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "取消实例" }).click();
+  await expect(page.getByRole("button", { name: "归档实例" })).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "归档实例" }).click();
+  await expect(page.getByText("已归档", { exact: true })).toBeVisible();
+
+  expect(submitted.map(({ action }) => action)).toEqual(["start", "restart", "cancel", "archive"]);
+  submitted.forEach(({ action, body }, index) => {
+    expect(body.operation_id).toEqual(expect.stringMatching(`^instance_${action}_`));
+    expect(body.envelope).toMatchObject({
+      actor_type: "human",
+      actor_id: "human_operator",
+      expected_revision: 10 + index,
+    });
+    expect((body.envelope as Record<string, unknown>).idempotency_key).toEqual(
+      expect.stringMatching(/^ui_/),
+    );
+  });
+});
+
+test("resources provide an explicit safe preview and a browser download", async ({ page, context }) => {
+  const previewedPaths: string[] = [];
+  const downloadedPaths: string[] = [];
+  await page.route("**/api/v1/tasks/t_ui/files/preview?path=*", async (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path") ?? "";
+    previewedPaths.push(path);
+    await route.fulfill({
+      status: 200,
+      contentType: "text/markdown; charset=utf-8",
+      body: "# 已校验任务书\n\n仅显示受控工作区中的已提交内容。",
+    });
+  });
+  await context.route("**/api/v1/tasks/t_ui/files/download**", async (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path") ?? "";
+    downloadedPaths.push(path);
+    await route.fulfill({
+      status: 200,
+      contentType: "text/markdown; charset=utf-8",
+      headers: { "Content-Disposition": 'attachment; filename="brief.md"' },
+      body: "# 已校验任务书",
+    });
+  });
+
+  await page.goto("/tasks/t_ui/resources");
+  const briefCard = page.locator("article.resource-card").filter({ hasText: "brief.md" });
+  await briefCard.getByRole("button", { name: "安全预览" }).click();
+  await expect(briefCard.getByText("仅显示受控工作区中的已提交内容。")).toBeVisible();
+  await expect(briefCard.locator("pre.resource-text-preview")).toBeFocused();
+  await expect(briefCard.getByRole("button", { name: "已安全预览" })).toBeDisabled();
+  expect(previewedPaths).toContain("inputs/brief.md");
+
+  const downloadPromise = page.waitForEvent("download");
+  const downloadLink = briefCard.getByRole("link", { name: "下载文件" });
+  await expect(downloadLink).toHaveAttribute("download", "");
+  // Chromium bypasses request routing for download-attribute navigations. After
+  // asserting that UI contract, let the mocked Content-Disposition drive the download.
+  await downloadLink.evaluate((link) => link.removeAttribute("download"));
+  await downloadLink.click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("brief.md");
+  expect(await download.failure()).toBeNull();
+  expect(downloadedPaths).toEqual(["inputs/brief.md"]);
 });
 
 test("task detail exposes approvals, Token and read-only events as deep links", async ({ page }) => {
