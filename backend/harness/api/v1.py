@@ -681,6 +681,19 @@ def build_v1_router(container: Container) -> APIRouter:
         )
         return {"schema_version": "1.0", **result}
 
+    @router.post("/instances/{instance_id}/deliveries/retry", tags=["assets"])
+    async def retry_instance_delivery(
+        instance_id: str, body: InstanceOperationRequest
+    ) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        result = await run_in_threadpool(
+            container.application.retry_rejected_delivery,
+            task_id,
+            instance_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
+
     @router.get("/config/global", tags=["configuration"])
     async def get_global_config() -> dict[str, Any]:
         config = await run_in_threadpool(container.configuration.get_global)

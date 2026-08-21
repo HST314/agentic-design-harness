@@ -112,9 +112,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             self.store, self.commands, self.credentials, self.configuration
         )
         self.fake_adapter = FakeImageAdapter()
-        self.adapters = AdapterRegistry(
-            [self.fake_adapter, PptAgentContractAdapter()]
-        )
+        self.adapters = AdapterRegistry([self.fake_adapter, PptAgentContractAdapter()])
         self.application = HarnessApplicationService(
             self.store,
             self.commands,
@@ -141,9 +139,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         artifact_root.mkdir()
         entrypoint = artifact_root / "fake_agent_process.py"
         shutil.copyfile(FAKE_AGENT, entrypoint)
-        (artifact_root / "requirements.lock").write_text(
-            "stdlib-only\n", encoding="utf-8"
-        )
+        (artifact_root / "requirements.lock").write_text("stdlib-only\n", encoding="utf-8")
         for path in artifact_root.rglob("*"):
             path.chmod(0o444)
         artifact_root.chmod(0o555)
@@ -218,9 +214,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertIsNone(self.store.plan.get("t_recover_application", "t_recover_application"))
         recovered = self.application.recover()
         self.assertEqual(recovered[0]["status"], "RECOVERED")
-        self.assertIsNotNone(
-            self.store.plan.get("t_recover_application", "t_recover_application")
-        )
+        self.assertIsNotNone(self.store.plan.get("t_recover_application", "t_recover_application"))
         assignments = [
             item
             for item in recover_records(self.credentials.events_path)
@@ -312,12 +306,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         intent = read_json(self.application._intent_path("intent_revision_advance"))
         self.assertEqual(intent["state"], "ABORTED")
         self.assertEqual(recover_records(self.credentials.events_path), [])
-        self.assertIsNone(
-            self.store.instance.get("t_intent_revision_advance", "i_image_1")
-        )
-        self.assertIsNone(
-            self.store.instance.get("t_intent_revision_advance", "i_image_2")
-        )
+        self.assertIsNone(self.store.instance.get("t_intent_revision_advance", "i_image_1"))
+        self.assertIsNone(self.store.instance.get("t_intent_revision_advance", "i_image_2"))
         self.assertEqual(self.application.recover(), [])
 
     def test_revision_advance_after_partial_assignment_compensates_and_aborts(self) -> None:
@@ -339,9 +329,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 envelope=envelope("partial-revision-advance", created["revision"]),
                 crash_hook=crash,
             )
-        self.assertIsNotNone(
-            self.store.instance.get("t_partial_revision_advance", "i_image_1")
-        )
+        self.assertIsNotNone(self.store.instance.get("t_partial_revision_advance", "i_image_1"))
         advanced = self.commands.register_input_manifest(
             "t_partial_revision_advance",
             "assets/revised-input.json",
@@ -370,17 +358,13 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         credential_state = read_json(self.credentials.state_path)
         self.assertEqual(credential_state["assignments"], {})
         for instance_id in ("i_image_1", "i_image_2"):
-            self.assertIsNone(
-                self.store.instance.get("t_partial_revision_advance", instance_id)
-            )
+            self.assertIsNone(self.store.instance.get("t_partial_revision_advance", instance_id))
 
         # Credential recovery must retire the compensated snapshot again if the
         # generic event-first store rebuild recreates it during a later restart.
         self.store.recover()
         self.credentials.recover()
-        self.assertIsNone(
-            self.store.instance.get("t_partial_revision_advance", "i_image_1")
-        )
+        self.assertIsNone(self.store.instance.get("t_partial_revision_advance", "i_image_1"))
         self.assertEqual(self.application.recover(), [])
 
         def crash_retry(checkpoint: str) -> None:
@@ -402,9 +386,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.credentials.recover()
         retry_recovery = self.application.recover()
         self.assertEqual(retry_recovery[0]["status"], "RECOVERED")
-        retry_plan = self.store.plan.get(
-            "t_partial_revision_advance", "t_partial_revision_advance"
-        )
+        retry_plan = self.store.plan.get("t_partial_revision_advance", "t_partial_revision_advance")
         self.assertEqual(retry_plan["task"]["status"], "AWAITING_START_CONFIRMATION")
         self.assertEqual(
             len(retry_plan["instances"]),
@@ -452,9 +434,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             self.application.confirm_and_start_ready_instances(
                 "t_start_application",
                 operation_id="start_application_instances",
-                envelope=envelope(
-                    "start-application-instances", saved["task_revision"]
-                ),
+                envelope=envelope("start-application-instances", saved["task_revision"]),
                 crash_hook=crash,
             )
         self.assertEqual(self.fake_adapter.start_calls, [])
@@ -516,9 +496,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                     task_cards=draft["task_cards"],
                     providers={"i_image_1": "fake", "i_image_2": "fake"},
                     operation_id=f"concurrent_application_{index}",
-                    envelope=envelope(
-                        f"concurrent-application-{index}", created["revision"]
-                    ),
+                    envelope=envelope(f"concurrent-application-{index}", created["revision"]),
                 )
             except HarnessError as exc:
                 return exc
@@ -577,19 +555,14 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                     [item["status"] for item in result["plan"]["instances"]],
                     ["CANCELLED", "CANCELLED", "CANCELLED"],
                 )
-                intent = read_json(
-                    self.application._intent_path(f"cancel_crash_{index}")
-                )
+                intent = read_json(self.application._intent_path(f"cancel_crash_{index}"))
                 self.assertEqual(intent["state"], "COMMITTED")
                 self.assertEqual(
                     [item["initial_status"] for item in intent["target_instances"]],
                     ["RUNNING", "RUNNING", "RUNNING"],
                 )
                 self.assertEqual(
-                    {
-                        item["state"]
-                        for item in intent["instance_progress"].values()
-                    },
+                    {item["state"] for item in intent["instance_progress"].values()},
                     {"CANCELLED"},
                 )
 
@@ -618,9 +591,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         recovered = self.application.recover()
 
         recovery = next(
-            item
-            for item in recovered
-            if item["operation_id"] == "cancel_startup_recovery"
+            item for item in recovered if item["operation_id"] == "cancel_startup_recovery"
         )
         self.assertEqual(recovery["status"], "RECOVERED")
         self.assertEqual(recovery["result"]["task"]["status"], "CANCELLED")
@@ -679,6 +650,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             ),
         )
         self.assertFalse(incomplete["complete"])
+        self.assertEqual(self.assets.list_assets("t_delivery_application"), [])
 
         final_image = instance_root / "outputs" / "final.png"
         final_image.write_bytes(b"\x89PNG\r\n\x1a\napplication-delivery")
@@ -718,7 +690,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             ),
         )
         self.assertEqual(replay, completed)
-        self.assertEqual(len(self.assets.list_assets("t_delivery_application")), 2)
+        self.assertEqual(len(self.assets.list_assets("t_delivery_application")), 1)
         self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
 
         with self.assertRaises(HarnessError) as new_delivery:
@@ -737,7 +709,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(new_delivery.exception.code, "INVALID_STATE_TRANSITION")
-        self.assertEqual(len(self.assets.list_assets("t_delivery_application")), 2)
+        self.assertEqual(len(self.assets.list_assets("t_delivery_application")), 1)
 
     def test_delivery_command_rejects_wrong_actor_before_publication(self) -> None:
         created = create_task(self.commands, "t_delivery_actor", "auto")
@@ -763,12 +735,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             "RUNNING",
             envelope("delivery-actor-running", starting["task_revision"], "adapter"),
         )
-        instance_root = self.assets.initialize_instance_workspace(
-            "t_delivery_actor", "i_image_1"
-        )
-        (instance_root / "outputs" / "final.png").write_bytes(
-            b"\x89PNG\r\n\x1a\nactor-gate"
-        )
+        instance_root = self.assets.initialize_instance_workspace("t_delivery_actor", "i_image_1")
+        (instance_root / "outputs" / "final.png").write_bytes(b"\x89PNG\r\n\x1a\nactor-gate")
 
         with self.assertRaises(HarnessError) as denied:
             self.application.publish_delivery_and_complete(
@@ -778,9 +746,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 role="final_artwork",
                 description="Actor gate regression",
                 operation_id="publish_wrong_actor",
-                envelope=envelope(
-                    "complete-wrong-actor", running["task_revision"], "human"
-                ),
+                envelope=envelope("complete-wrong-actor", running["task_revision"], "human"),
             )
 
         self.assertEqual(denied.exception.code, "VALIDATION_ERROR")
@@ -820,9 +786,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             },
         )
 
-        observed = self.application.observe_instance(
-            "t_approval_application", "i_image_1"
-        )
+        observed = self.application.observe_instance("t_approval_application", "i_image_1")
         replayed_observation = self.application.observe_instance(
             "t_approval_application", "i_image_1"
         )
@@ -901,9 +865,9 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             "WAITING_APPROVAL",
         )
         inbox = self.approvals.list_inbox(owner="human")
-        self.assertEqual([(item["kind"], item["status"]) for item in inbox], [
-            ("APPROVAL_REQUIRED", "UNREAD")
-        ])
+        self.assertEqual(
+            [(item["kind"], item["status"]) for item in inbox], [("APPROVAL_REQUIRED", "UNREAD")]
+        )
         self.assertEqual(
             read_json(self.application._intent_path("resolve_rejected_advance"))["state"],
             "ABORTED",
@@ -911,12 +875,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
 
     def test_pending_approval_blocks_delivery_before_asset_publication(self) -> None:
         observed = self._waiting_approval("t_pending_delivery")
-        instance_root = self.assets.initialize_instance_workspace(
-            "t_pending_delivery", "i_image_1"
-        )
-        (instance_root / "outputs" / "final.png").write_bytes(
-            b"\x89PNG\r\n\x1a\npending-gate"
-        )
+        instance_root = self.assets.initialize_instance_workspace("t_pending_delivery", "i_image_1")
+        (instance_root / "outputs" / "final.png").write_bytes(b"\x89PNG\r\n\x1a\npending-gate")
 
         with self.assertRaises(HarnessError) as blocked:
             self.application.publish_delivery_and_complete(
@@ -941,9 +901,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             self.store.instance.get("t_pending_delivery", "i_image_1")["status"],
             "WAITING_APPROVAL",
         )
-        approval = self.approvals.get_approval(
-            observed["approval"]["approval"]["approval_id"]
-        )
+        approval = self.approvals.get_approval(observed["approval"]["approval"]["approval_id"])
         self.assertEqual(approval["approval"]["status"], "PENDING")
         self.assertEqual(
             [item["kind"] for item in self.approvals.list_inbox(owner="human")],
@@ -995,9 +953,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             details={"completed": True},
         )
 
-        completed = self.application.observe_instance(
-            "t_collect_application", "i_image_1"
-        )
+        completed = self.application.observe_instance("t_collect_application", "i_image_1")
         self.assertEqual(completed["instance"]["status"], "SUCCEEDED")
         published = self.assets.list_assets("t_collect_application")
         self.assertEqual(len(published), 1)
@@ -1013,6 +969,191 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
         self.assertEqual(self.application.recover(), [])
         self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
+
+    def test_delivery_contract_consumes_each_candidate_once_and_rejects_extras(self) -> None:
+        task_id = "t_delivery_contract_cardinality"
+        created = create_task(self.commands, task_id, "auto")
+        draft = image_plan(task_id)
+        draft["task_cards"][0]["expected_deliveries"].append(
+            {
+                "kind": "image",
+                "role": "final_artwork",
+                "required": True,
+                "accepted_mime_types": ["image/png"],
+            }
+        )
+        self.application.save_plan_and_create_instances(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_delivery_contract_cardinality",
+            envelope=envelope("prepare-delivery-contract-cardinality", created["revision"]),
+        )
+        candidate = {
+            "kind": "image",
+            "role": "final_artwork",
+            "mime_type": "image/png",
+            "sha256": "1" * 64,
+        }
+
+        self.assertFalse(
+            self.application._required_deliveries_satisfied(
+                task_id,
+                "i_image_1",
+                candidate_manifests=[candidate],
+            )
+        )
+        with self.assertRaises(HarnessError) as unexpected:
+            self.application._validate_required_delivery_set(
+                task_id,
+                "i_image_1",
+                candidates=[
+                    candidate,
+                    {**candidate, "role": "undeclared_artwork", "sha256": "2" * 64},
+                ],
+            )
+        self.assertEqual(unexpected.exception.code, "VALIDATION_ERROR")
+
+    def test_rejected_delivery_set_stays_private_and_retries_without_agent_restart(self) -> None:
+        task_id = "t_rejected_delivery_set"
+        created = create_task(self.commands, task_id, "auto")
+        draft = image_plan(task_id)
+        draft["task_cards"][0]["expected_deliveries"].append(
+            {
+                "kind": "image",
+                "role": "secondary_artwork",
+                "required": True,
+                "accepted_mime_types": ["image/png"],
+            }
+        )
+        saved = self.application.save_plan_and_create_instances(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            providers={"i_image_1": "fake"},
+            operation_id="prepare_rejected_delivery_set",
+            envelope=envelope("prepare-rejected-delivery-set", created["revision"]),
+        )
+        starting = self.commands.transition_instance(
+            task_id,
+            "i_image_1",
+            "STARTING",
+            envelope("rejected-delivery-starting", saved["task_revision"], "adapter"),
+        )
+        self.commands.transition_instance(
+            task_id,
+            "i_image_1",
+            "RUNNING",
+            envelope("rejected-delivery-running", starting["task_revision"], "adapter"),
+        )
+        instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
+        primary_content = b"\x89PNG\r\n\x1a\nprimary"
+        secondary_content = b"\xff\xd8\xffsecondary-jpeg"
+        primary = instance_root / "outputs" / "primary.png"
+        secondary = instance_root / "outputs" / "secondary.jpg"
+        primary.write_bytes(primary_content)
+        secondary.write_bytes(secondary_content)
+        self.fake_adapter.deliveries = [
+            {
+                "source_relative_path": "instances/i_image_1/outputs/primary.png",
+                "kind": "image",
+                "role": "final_artwork",
+                "description": "Primary artwork",
+                "sha256": hashlib.sha256(primary_content).hexdigest(),
+            },
+            {
+                "source_relative_path": "instances/i_image_1/outputs/secondary.jpg",
+                "kind": "image",
+                "role": "secondary_artwork",
+                "description": "Secondary artwork",
+                "sha256": hashlib.sha256(secondary_content).hexdigest(),
+            },
+        ]
+        self.fake_adapter.observation = AdapterObservation(
+            "RUNNING",
+            step_id="completed",
+            details={"completed": True},
+        )
+
+        rejected = self.application.observe_instance(task_id, "i_image_1")
+
+        self.assertEqual(rejected["instance"]["status"], "FAILED")
+        self.assertEqual(rejected["instance"]["delivery_rejection"]["code"], "VALIDATION_ERROR")
+        self.assertEqual(self.assets.list_assets(task_id), [])
+        self.assertFalse(
+            any(
+                item.get("event_type") == "ASSET_PUBLISHED"
+                for item in recover_records(self.assets._event_path(task_id))
+            )
+        )
+        self.approvals.reconcile_terminal_notifications()
+        notification_kinds = [
+            item["kind"] for item in self.approvals.list_inbox(owner="human")
+        ]
+        self.assertIn("INSTANCE_DELIVERY_REJECTED", notification_kinds)
+        self.assertNotIn("INSTANCE_FAILED", notification_kinds)
+
+        replacement = b"\x89PNG\r\n\x1a\nsecondary-png"
+        secondary.write_bytes(replacement)
+        self.fake_adapter.deliveries[1].update(
+            {
+                "source_relative_path": "instances/i_image_1/outputs/secondary.jpg",
+                "sha256": hashlib.sha256(replacement).hexdigest(),
+            }
+        )
+        retry_revision = self.store.task.revision(task_id, task_id)
+        retried = self.application.retry_rejected_delivery(
+            task_id,
+            "i_image_1",
+            envelope=envelope("retry-rejected-delivery", retry_revision),
+        )
+
+        self.assertEqual(retried["result"]["instance"]["status"], "SUCCEEDED")
+        self.assertEqual(len(self.assets.list_assets(task_id)), 2)
+        self.assertEqual(self.fake_adapter.start_calls, [])
+
+    def test_publication_batch_is_invisible_until_instance_success(self) -> None:
+        task_id = "t_atomic_publication_visibility"
+        revision = self._running_image_task(task_id, 1)
+        instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
+        output = instance_root / "outputs" / "final.png"
+        output.write_bytes(b"\x89PNG\r\n\x1a\natomic-visibility")
+        manifest = self.assets.publish_delivery(
+            task_id,
+            "i_image_1",
+            source_relative_path="instances/i_image_1/outputs/final.png",
+            role="final_artwork",
+            description="Atomic visibility gate",
+            idempotency_key="atomic-visibility-publication",
+            batch_id="batch_atomic_visibility",
+        )
+        with self.assertRaises(HarnessError) as wrong_owner:
+            self.assets.commit_publication_batch(
+                task_id,
+                "i_image_1",
+                batch_id="batch_wrong_owner",
+                manifests=[{**manifest, "producer_instance_id": "i_other"}],
+            )
+        self.assertEqual(wrong_owner.exception.code, "ASSET_VALIDATION_FAILED")
+        self.assets.commit_publication_batch(
+            task_id,
+            "i_image_1",
+            batch_id="batch_atomic_visibility",
+            manifests=[manifest],
+        )
+
+        self.assertEqual(self.assets.list_assets(task_id), [])
+
+        self.commands.transition_instance(
+            task_id,
+            "i_image_1",
+            "SUCCEEDED",
+            envelope("atomic-visibility-success", revision, "adapter"),
+        )
+        self.assertEqual(len(self.assets.list_assets(task_id)), 1)
 
     def test_concurrent_approval_operations_cannot_advance_the_agent_twice(self) -> None:
         created = create_task(self.commands, "t_concurrent_approval", "auto")
@@ -1044,9 +1185,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             capabilities=("approve_taskbook",),
             details={"job_id": "job_concurrent_approval"},
         )
-        observed = self.application.observe_instance(
-            "t_concurrent_approval", "i_image_1"
-        )
+        observed = self.application.observe_instance("t_concurrent_approval", "i_image_1")
         approval = observed["approval"]
         self.fake_adapter.advance_delay = 0.1
 

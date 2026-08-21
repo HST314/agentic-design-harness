@@ -232,9 +232,7 @@ class TaskCommandService:
             lambda: self._confirm_start(request, envelope),
         )
 
-    def _confirm_start(
-        self, request: dict[str, Any], envelope: CommandEnvelope
-    ) -> dict[str, Any]:
+    def _confirm_start(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
         task_id = request["task_id"]
         plan = self._plan(task_id)
         task = plan["task"]
@@ -272,6 +270,26 @@ class TaskCommandService:
             request,
             envelope,
             lambda: self._transition_instance(request, envelope),
+        )
+
+    def reject_instance_delivery(
+        self,
+        task_id: str,
+        instance_id: str,
+        rejection: dict[str, Any],
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "rejection": deepcopy(rejection),
+        }
+        return self._idempotent(
+            task_id,
+            "reject_instance_delivery",
+            request,
+            envelope,
+            lambda: self._reject_instance_delivery(request, envelope),
         )
 
     def set_approval_mode(
@@ -316,9 +334,7 @@ class TaskCommandService:
             raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
         instance["approval_mode"] = request["approval_mode"]
         plan["task"]["updated_at"] = utc_now()
-        return self._persist_aggregate(
-            plan, envelope, "set_approval_mode", request, actual
-        )
+        return self._persist_aggregate(plan, envelope, "set_approval_mode", request, actual)
 
     def _transition_instance(
         self, request: dict[str, Any], envelope: CommandEnvelope
@@ -336,6 +352,16 @@ class TaskCommandService:
             raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
         self.machine.transition("agent_instance", instance["status"], request["target_status"])
         instance["status"] = request["target_status"]
+        if request["target_status"] in {
+            "SUCCEEDED",
+            "FAILED_TO_START",
+            "FAILED",
+            "CRASHED",
+            "CANCELLED",
+            "SUPERSEDED",
+            "ARCHIVED",
+        }:
+            instance.pop("delivery_rejection", None)
         if request["target_status"] in {"STARTING", "RUNNING"}:
             self._activate_lifecycle(instance, utc_now())
         self._refresh_stages(plan, utc_now())
@@ -345,9 +371,44 @@ class TaskCommandService:
             self.machine.transition("main_task", task["status"], target)
             task["status"] = target
         task["updated_at"] = utc_now()
-        return self._persist_aggregate(
-            plan, envelope, "transition_instance", request, actual
+        return self._persist_aggregate(plan, envelope, "transition_instance", request, actual)
+
+    def _reject_instance_delivery(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        task_id = request["task_id"]
+        plan = self._plan(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        instance = next(
+            (item for item in plan["instances"] if item["instance_id"] == request["instance_id"]),
+            None,
         )
+        if instance is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        if (
+            envelope.actor_type != "adapter"
+            or envelope.actor_id != f"{instance['agent_type']}_adapter"
+        ):
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only the owning Agent adapter may reject a collected delivery.",
+            )
+        self.machine.transition("agent_instance", instance["status"], "FAILED")
+        rejection = deepcopy(request["rejection"])
+        rejection["rejected_at"] = utc_now()
+        rejection["retryable"] = True
+        instance["status"] = "FAILED"
+        instance["delivery_rejection"] = rejection
+        self._refresh_stages(plan, utc_now())
+        task = plan["task"]
+        target = self._aggregate_task(plan, preserve_start_confirmation=False)
+        if target != task["status"]:
+            self.machine.transition("main_task", task["status"], target)
+            task["status"] = target
+        task["updated_at"] = utc_now()
+        return self._persist_aggregate(plan, envelope, "reject_instance_delivery", request, actual)
 
     def cancel_task(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
         request = {"task_id": task_id}
@@ -359,9 +420,7 @@ class TaskCommandService:
             lambda: self._cancel_task(request, envelope),
         )
 
-    def _cancel_task(
-        self, request: dict[str, Any], envelope: CommandEnvelope
-    ) -> dict[str, Any]:
+    def _cancel_task(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
         task_id = request["task_id"]
         task = self._task(task_id)
         actual = self.store.task.revision(task_id, task_id)
@@ -469,9 +528,7 @@ class TaskCommandService:
             self.machine.transition("main_task", plan["task"]["status"], target)
             plan["task"]["status"] = target
         plan["task"]["updated_at"] = utc_now()
-        return self._persist_aggregate(
-            plan, envelope, "downgrade_instance", request, actual
-        )
+        return self._persist_aggregate(plan, envelope, "downgrade_instance", request, actual)
 
     def _normalize_plan(
         self,

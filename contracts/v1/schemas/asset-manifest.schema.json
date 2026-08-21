@@ -65,6 +65,12 @@
       "type": "string",
       "maxLength": 4000
     },
+    "derivation": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "delivery-derivation.schema.json"}
+      ]
+    },
     "source_relative_path": {
       "$ref": "common.schema.json#/$defs/relativePath"
     },
