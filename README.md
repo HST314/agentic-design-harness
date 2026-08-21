@@ -98,7 +98,8 @@ make real-provider-smoke \
 缓存，或通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指向匹配的 Chromium 可执行文件。
 预检找不到运行时时会给出固定安装命令。成功门禁默认原子写出
 `build/real-provider-evidence.json`，只保留版本、动作序列、终态、三类用量聚合、
-交付 MIME/SHA-256/完整性及 `requestfailed`、`console.error`、`pageerror` 计数；
+交付 MIME/SHA-256/完整性、favicon 的 200/MIME 断言，及 `requestfailed`、
+`console.error`、`pageerror`、HTTP 错误响应计数；
 真实 Key、Provider URL、请求正文和模型响应正文不会写入。构建和 Playwright 日志写入
 `build/real-provider-smoke.log`，入口直接传播子进程失败码，不依赖 `tee`。
 正式真实门禁要求 Harness 与 Image Agent 均处于已提交、无未跟踪修改的状态，证据会
