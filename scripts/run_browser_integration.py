@@ -60,6 +60,14 @@ class BrowserRuntime:
     executable: Path
 
 
+@dataclass(frozen=True)
+class SourceBaseline:
+    harness_commit: str
+    image_agent_commit: str
+    harness_worktree_clean: bool
+    image_agent_worktree_clean: bool
+
+
 class ProviderHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -569,6 +577,40 @@ def git_is_clean(path: Path) -> bool:
     return completed.returncode == 0 and completed.stdout == ""
 
 
+def capture_source_baseline(harness_root: Path, image_agent_root: Path) -> SourceBaseline:
+    return SourceBaseline(
+        harness_commit=git_commit(harness_root),
+        image_agent_commit=git_commit(image_agent_root),
+        harness_worktree_clean=git_is_clean(harness_root),
+        image_agent_worktree_clean=git_is_clean(image_agent_root),
+    )
+
+
+@contextmanager
+def open_private_persistent_log(path: Path) -> Iterator[BinaryIO]:
+    """Atomically replace path with a private file and keep its descriptor open."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}-",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path: Path | None = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.replace(temporary_path, path)
+        temporary_path = None
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            yield stream
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path is not None:
+            with suppress(FileNotFoundError):
+                temporary_path.unlink()
+
+
 def run_logged(
     command: Sequence[str],
     *,
@@ -601,13 +643,20 @@ def run_logged(
 def assert_redacted_file(path: Path, forbidden_values: Sequence[str]) -> None:
     content = path.read_bytes()
     if any(value and value.encode("utf-8") in content for value in forbidden_values):
-        path.write_text(
-            "Sensitive value detected; persisted output suppressed.\n", encoding="utf-8"
-        )
+        with open_private_persistent_log(path) as stream:
+            stream.write(b"Sensitive value detected; persisted output suppressed.\n")
         raise RuntimeError(f"persisted output failed exact-value redaction scan: {path.name}")
 
 
-def publish_evidence(staging: Path, destination: Path, forbidden_values: Sequence[str]) -> None:
+def publish_evidence(
+    staging: Path,
+    destination: Path,
+    forbidden_values: Sequence[str],
+    *,
+    expected_source_baseline: SourceBaseline | None = None,
+    harness_root: Path | None = None,
+    image_agent_root: Path | None = None,
+) -> None:
     assert_redacted_file(staging, forbidden_values)
     payload = json.loads(staging.read_text(encoding="utf-8"))
     if (
@@ -615,11 +664,33 @@ def publish_evidence(staging: Path, destination: Path, forbidden_values: Sequenc
         or payload.get("execution", {}).get("result") != "PASSED"
     ):
         raise RuntimeError("browser evidence did not record a passed v2 gate")
-    if payload.get("execution", {}).get("provider_mode") == "real_external" and (
-        payload.get("baseline", {}).get("harness_worktree_clean") is not True
-        or payload.get("baseline", {}).get("image_agent_worktree_clean") is not True
-    ):
-        raise RuntimeError("real-provider evidence is not bound to clean source commits")
+    provider_mode = payload.get("execution", {}).get("provider_mode")
+    if provider_mode == "real_external" and expected_source_baseline is None:
+        raise RuntimeError("real-provider evidence requires a verified source baseline")
+    if expected_source_baseline is not None:
+        if provider_mode != "real_external":
+            raise RuntimeError("real-provider evidence did not record the real Provider mode")
+        if harness_root is None or image_agent_root is None:
+            raise RuntimeError("real-provider evidence requires a verified source baseline")
+        evidence_baseline = payload.get("baseline", {})
+        if (
+            evidence_baseline.get("harness_commit")
+            != expected_source_baseline.harness_commit
+            or evidence_baseline.get("image_agent_commit")
+            != expected_source_baseline.image_agent_commit
+            or evidence_baseline.get("harness_worktree_clean") is not True
+            or evidence_baseline.get("image_agent_worktree_clean") is not True
+        ):
+            raise RuntimeError("real-provider evidence does not match its source baseline")
+        current_source_baseline = capture_source_baseline(harness_root, image_agent_root)
+        if (
+            current_source_baseline != expected_source_baseline
+            or not current_source_baseline.harness_worktree_clean
+            or not current_source_baseline.image_agent_worktree_clean
+        ):
+            raise RuntimeError(
+                "source repositories changed during the browser gate; refusing to publish evidence"
+            )
     destination.parent.mkdir(parents=True, exist_ok=True)
     os.replace(staging, destination)
     destination.chmod(0o600)
@@ -709,15 +780,12 @@ def main() -> int:
         vlm_model = "browser-vlm"
         provider_scope = provider()
 
-    harness_commit = git_commit(ROOT)
-    image_agent_commit = git_commit(image_root)
-    harness_clean = git_is_clean(ROOT)
-    image_agent_clean = git_is_clean(image_root)
+    source_baseline = capture_source_baseline(ROOT, image_root)
     if options.real_provider and options.evidence_path is not None and (
-        harness_commit == "UNKNOWN"
-        or image_agent_commit == "UNKNOWN"
-        or not harness_clean
-        or not image_agent_clean
+        source_baseline.harness_commit == "UNKNOWN"
+        or source_baseline.image_agent_commit == "UNKNOWN"
+        or not source_baseline.harness_worktree_clean
+        or not source_baseline.image_agent_worktree_clean
     ):
         raise RuntimeError(
             "real-provider evidence requires clean, committed Harness and Image Agent worktrees"
@@ -737,10 +805,10 @@ def main() -> int:
         os.close(descriptor)
         evidence_staging = Path(temporary_evidence)
 
-    log_path = options.log_file.resolve() if options.log_file else None
-    if log_path is not None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_context = log_path.open("wb") if log_path is not None else nullcontext(None)
+    log_path = Path(os.path.abspath(options.log_file)) if options.log_file else None
+    log_context = (
+        open_private_persistent_log(log_path) if log_path is not None else nullcontext(None)
+    )
     forbidden_values = (provider_key, provider_url) if options.real_provider else ()
 
     try:
@@ -822,11 +890,15 @@ def main() -> int:
                             browser_runtime.chromium_revision
                         ),
                         "HARNESS_BROWSER_VERSION": browser_runtime.browser_version,
-                        "HARNESS_BROWSER_HARNESS_COMMIT": harness_commit,
-                        "HARNESS_BROWSER_IMAGE_AGENT_COMMIT": image_agent_commit,
-                        "HARNESS_BROWSER_HARNESS_CLEAN": "1" if harness_clean else "0",
+                        "HARNESS_BROWSER_HARNESS_COMMIT": source_baseline.harness_commit,
+                        "HARNESS_BROWSER_IMAGE_AGENT_COMMIT": (
+                            source_baseline.image_agent_commit
+                        ),
+                        "HARNESS_BROWSER_HARNESS_CLEAN": (
+                            "1" if source_baseline.harness_worktree_clean else "0"
+                        ),
                         "HARNESS_BROWSER_IMAGE_AGENT_CLEAN": (
-                            "1" if image_agent_clean else "0"
+                            "1" if source_baseline.image_agent_worktree_clean else "0"
                         ),
                     }
                     if evidence_staging is not None:
@@ -858,7 +930,14 @@ def main() -> int:
                         stop(frontend)
                     stop(backend)
         if evidence_staging is not None and evidence_destination is not None:
-            publish_evidence(evidence_staging, evidence_destination, forbidden_values)
+            publish_evidence(
+                evidence_staging,
+                evidence_destination,
+                forbidden_values,
+                expected_source_baseline=source_baseline if options.real_provider else None,
+                harness_root=ROOT,
+                image_agent_root=image_root,
+            )
             evidence_staging = None
             try:
                 evidence_label = evidence_destination.relative_to(ROOT)

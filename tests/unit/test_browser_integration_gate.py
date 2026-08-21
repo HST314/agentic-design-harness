@@ -4,12 +4,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from stat import S_IMODE
+from unittest.mock import patch
 
 from scripts.run_browser_integration import (
+    SourceBaseline,
     assert_redacted_file,
     browser_executable_candidates,
     child_process_environment,
     load_real_provider_environment,
+    open_private_persistent_log,
     publish_evidence,
     validate_real_provider_environment,
 )
@@ -96,6 +100,91 @@ class BrowserIntegrationGateTests(unittest.TestCase):
                 json.loads(destination.read_text(encoding="utf-8"))["execution"]["result"],
                 "PASSED",
             )
+
+    def test_persistent_log_is_private_while_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "real-provider.log"
+            log_path.write_bytes(b"old log")
+            log_path.chmod(0o644)
+
+            with open_private_persistent_log(log_path) as stream:
+                self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
+                stream.write(b"new private log")
+                stream.flush()
+                self.assertEqual(log_path.read_bytes(), b"new private log")
+
+            self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
+
+    def test_persistent_log_replaces_a_symlink_instead_of_following_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "unrelated.log"
+            target.write_bytes(b"must remain unchanged")
+            log_path = root / "real-provider.log"
+            log_path.symlink_to(target)
+
+            with open_private_persistent_log(log_path) as stream:
+                stream.write(b"private gate log")
+
+            self.assertFalse(log_path.is_symlink())
+            self.assertEqual(log_path.read_bytes(), b"private gate log")
+            self.assertEqual(target.read_bytes(), b"must remain unchanged")
+            self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
+
+    def test_real_evidence_is_not_published_when_worktree_becomes_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / "staging.json"
+            destination = root / "evidence.json"
+            expected = SourceBaseline(
+                harness_commit="a" * 40,
+                image_agent_commit="b" * 40,
+                harness_worktree_clean=True,
+                image_agent_worktree_clean=True,
+            )
+            staging.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "real-provider-browser-evidence.v2",
+                        "baseline": {
+                            "harness_commit": expected.harness_commit,
+                            "image_agent_commit": expected.image_agent_commit,
+                            "harness_worktree_clean": True,
+                            "image_agent_worktree_clean": True,
+                        },
+                        "execution": {
+                            "provider_mode": "real_external",
+                            "result": "PASSED",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dirty = SourceBaseline(
+                harness_commit=expected.harness_commit,
+                image_agent_commit=expected.image_agent_commit,
+                harness_worktree_clean=False,
+                image_agent_worktree_clean=True,
+            )
+
+            with (
+                patch(
+                    "scripts.run_browser_integration.capture_source_baseline",
+                    return_value=dirty,
+                ),
+                self.assertRaisesRegex(RuntimeError, "refusing to publish evidence"),
+            ):
+                publish_evidence(
+                    staging,
+                    destination,
+                    (),
+                    expected_source_baseline=expected,
+                    harness_root=root,
+                    image_agent_root=root,
+                )
+
+            self.assertTrue(staging.exists())
+            self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":
