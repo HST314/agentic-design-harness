@@ -5,7 +5,7 @@
 - Baseline: `main@169716b8381f52a0e71b4cf5911c34d3e994cc4d`
 - RFC: `docs/rfc-v0.2.md`, SHA-256 `b44e9c6877ccc3b282ddf9afcbeb1e15a763e0c4cfcc397df13c1ca333a808da`
 - Contract catalog: `contracts/v1`, schema version `1.0`
-- Image Agent: `main@61c5b4f1b66d5d85f62b39b5b338ac2304e94d26`
+- Image Agent: `main@2339550ab15ad05e0dde7f48e1386a5a1a0eb663`
 - Image Agent lock SHA-256: `97123ccc4cd263dff84eb9383979dbd462a03cb7899f75b5386921e08b49df5c`
 
 ## Decision

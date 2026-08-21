@@ -286,6 +286,39 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                     self.assertTrue(finalized.is_file())
                     self.assertGreaterEqual(provider.chat_requests, 3)  # type: ignore[attr-defined]
                     self.assertEqual(provider.image_requests, 5)  # type: ignore[attr-defined]
+                    usage_response = client.get(
+                        "/api/v1/tasks/t_g3_real_image/usage"
+                    )
+                    self.assertEqual(usage_response.status_code, 200, usage_response.text)
+                    usage = usage_response.json()
+                    expected_calls = (  # type: ignore[attr-defined]
+                        provider.chat_requests + provider.image_requests
+                    )
+                    self.assertEqual(usage["completeness"], "COMPLETE")
+                    self.assertEqual(usage["event_count"], expected_calls)
+                    self.assertEqual(
+                        usage["tokens"]["total_tokens"],
+                        provider.chat_requests * 2,  # type: ignore[attr-defined]
+                    )
+                    image_usage = [
+                        event
+                        for event in usage["events"]
+                        if event.get("call_type") == "text_to_image_model"
+                    ]
+                    self.assertEqual(len(image_usage), provider.image_requests)  # type: ignore[attr-defined]
+                    self.assertTrue(
+                        all(
+                            event["usage_basis"] == "image_units"
+                            and event["billing_units"][0]["unit"] == "image"
+                            and event["billing_units"][0]["attributes"]["resolution"]
+                            == "2560x1440"
+                            for event in image_usage
+                        )
+                    )
+                    self.assertEqual(usage["cost"]["completeness"], "UNKNOWN")
+                    self.assertEqual(
+                        usage["cost"]["unpriced_event_count"], expected_calls
+                    )
             finally:
                 if app.state.container.store.instance.get(
                     "t_g3_real_image", instance_id

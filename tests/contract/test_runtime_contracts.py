@@ -42,6 +42,39 @@ class RuntimeContractTests(unittest.TestCase):
             self.registry.validate("main-task", {"schema_version": "1.1"})
         self.assertEqual(unsupported.exception.code, "SCHEMA_VERSION_UNSUPPORTED")
 
+    def test_registry_dispatches_token_usage_event_1_1(self) -> None:
+        event = {
+            "schema_version": "1.1",
+            "event_id": "usage_contract",
+            "task_id": "t_contract",
+            "instance_id": "i_contract",
+            "agent_type": "image",
+            "request_id": "request_contract",
+            "provider_request_id": None,
+            "provider": "ark",
+            "model": "seedream",
+            "call_type": "text_to_image_model",
+            "usage_basis": "image_units",
+            "credential_pair_ref": "cred_contract",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "billing_units": [
+                {
+                    "unit": "image",
+                    "quantity": 1,
+                    "attributes": {"resolution": "2560x1440"},
+                }
+            ],
+            "raw_usage": {},
+            "occurred_at": "2026-08-21T10:00:00Z",
+        }
+
+        self.registry.validate("token-usage-event", event)
+        self.registry.validate("token-usage-event-v1.1", event)
+
     def test_registry_reports_a_stable_validation_error(self) -> None:
         with self.assertRaises(HarnessError) as captured:
             self.registry.validate("main-task", {})

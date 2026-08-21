@@ -1209,6 +1209,47 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(SemanticContractError, "total tokens"):
             validate_usage_semantics(usage)
 
+    def test_token_usage_1_1_keeps_image_units_distinct_from_tokens(self) -> None:
+        usage = {
+            "schema_version": "1.1",
+            "event_id": "usage_image_contract",
+            "task_id": "t_contract",
+            "instance_id": "i_contract",
+            "agent_type": "image",
+            "request_id": "request_contract",
+            "provider_request_id": None,
+            "provider": "ark",
+            "model": "seedream",
+            "call_type": "text_to_image_model",
+            "usage_basis": "image_units",
+            "credential_pair_ref": "cred_contract",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "billing_units": [
+                {
+                    "unit": "image",
+                    "quantity": 1,
+                    "attributes": {"resolution": "2560x1440"},
+                }
+            ],
+            "raw_usage": {},
+            "occurred_at": "2026-08-21T10:00:00Z",
+        }
+        validate("token-usage-event-v1.1.schema.json", usage)
+        validate_usage_semantics(usage)
+
+        usage["billing_units"][0]["quantity"] = 0
+        with self.assertRaises(ValidationError):
+            validate("token-usage-event-v1.1.schema.json", usage)
+
+        usage["billing_units"][0]["quantity"] = 1
+        usage["total_tokens"] = 1
+        with self.assertRaises(ValidationError):
+            validate("token-usage-event-v1.1.schema.json", usage)
+
     def test_invalid_timestamp_and_non_http_ui_url_are_rejected(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
         task = copy.deepcopy(plan["task"])

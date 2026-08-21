@@ -220,7 +220,16 @@ export interface UsageSummary {
     event_id: string;
     instance_id: string;
     request_id: string;
+    provider_request_id?: string | null;
+    provider?: string;
     model: string;
+    call_type?: string;
+    usage_basis?: "tokens" | "image_units" | "mixed";
+    billing_units?: Array<{
+      unit: string;
+      quantity: number;
+      attributes?: Record<string, string | number | boolean>;
+    }>;
     total_tokens: number;
     occurred_at: string;
   }>;

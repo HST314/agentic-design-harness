@@ -26,7 +26,7 @@ class HarnessSettings(BaseModel):
     image_agent_python: Path = Path("/usr/bin/python3")
     image_agent_dependency_root: Path = Path(".runtime/image-agent-deps")
     image_agent_revision: str = Field(
-        default="61c5b4f1b66d5d85f62b39b5b338ac2304e94d26",
+        default="2339550ab15ad05e0dde7f48e1386a5a1a0eb663",
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
     )
 

@@ -6,7 +6,7 @@ IMAGE_AGENT_ROOT ?= ../image_agent_mvp
 IMAGE_AGENT_DEPS ?= .runtime/image-agent-deps
 IMAGE_AGENT_ENV_STAMP := $(IMAGE_AGENT_DEPS)/.requirements-installed
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit boundary-check check verify serve frontend-check frontend-e2e image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit boundary-check check verify serve frontend-check frontend-e2e frontend-integration real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -38,6 +38,20 @@ frontend-check:
 
 frontend-e2e:
 	npm --prefix frontend run test:e2e
+
+frontend-integration: test-env image-agent-env
+	HARNESS_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
+	HARNESS_IMAGE_AGENT_PYTHON="$(shell command -v $(PYTHON))" \
+	HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT="$(abspath $(IMAGE_AGENT_DEPS))" \
+	PYTHONPATH="$(PYTHONPATH_VALUE)" \
+	$(PYTHON) scripts/run_browser_integration.py
+
+real-provider-smoke: test-env image-agent-env
+	HARNESS_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
+	HARNESS_IMAGE_AGENT_PYTHON="$(shell command -v $(PYTHON))" \
+	HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT="$(abspath $(IMAGE_AGENT_DEPS))" \
+	PYTHONPATH="$(PYTHONPATH_VALUE)" \
+	$(PYTHON) scripts/run_browser_integration.py --real-provider
 
 check: test lint compile secret-scan boundary-check frontend-check
 
