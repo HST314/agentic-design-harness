@@ -595,7 +595,7 @@ function renderInboxItem(
         ? `<form class="approval-form" data-approval-id="${escapeHtml(details.approval.approval_id)}" data-approval-revision="${details.approval_revision}">
           <div class="field"><label for="action-${escapeHtml(item.inbox_id)}">推进动作</label><select id="action-${escapeHtml(item.inbox_id)}" name="action" ${actions.length ? "" : "disabled"}>${actions.map((action) => `<option value="${escapeHtml(action)}">${escapeHtml(actionLabel(action))} · ${escapeHtml(action)}</option>`).join("")}</select></div>
           <div class="field"><label for="payload-${escapeHtml(item.inbox_id)}">动作参数（JSON）</label><textarea id="payload-${escapeHtml(item.inbox_id)}" name="payload" rows="4" spellcheck="false">{}</textarea><small>只填写当前动作需要的字段；无参数时保留 {}。</small></div>
-          <div class="field"><label for="actor-${escapeHtml(item.inbox_id)}">操作人 ID</label><input id="actor-${escapeHtml(item.inbox_id)}" name="actor_id" value="human_operator" pattern="[A-Za-z][A-Za-z0-9_-]{0,127}" required></div>
+          <div class="field"><label for="actor-${escapeHtml(item.inbox_id)}">操作人 ID</label><input id="actor-${escapeHtml(item.inbox_id)}" name="actor_id" value="human_operator" pattern="[A-Za-z][A-Za-z0-9_\\-]{0,127}" required></div>
           <div class="form-actions"><button class="button button--primary" type="submit" data-decision="APPROVED">批准并推进</button><button class="button button--danger" type="submit" data-decision="REJECTED">拒绝</button></div>
           <p class="form-feedback" role="status" aria-live="polite"></p>
         </form>`
