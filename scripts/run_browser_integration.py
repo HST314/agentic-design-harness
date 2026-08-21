@@ -59,7 +59,38 @@ class ProviderHandler(BaseHTTPRequestHandler):
                     "markdown_body": "# 创作任务书\n\n生成一张可追溯的最终视觉稿。\n",
                 }
             else:
-                payload = {"questions": []}
+                if not isinstance(self.server, ProviderServer):
+                    raise RuntimeError("deterministic Provider server type changed")
+                clarification_number = self.server.next_clarification_number()
+                payload = {
+                    "questions": [
+                        {
+                            "field": "browser_acceptance_tone",
+                            "question": "本次验收稿采用哪种视觉语气?",
+                            "options": [
+                                {
+                                    "option_id": "A",
+                                    "label": "清晰克制",
+                                    "description": "使用清晰克制的企业级视觉语气。",
+                                    "requires_free_text": False,
+                                },
+                                {
+                                    "option_id": "B",
+                                    "label": "鲜明活力",
+                                    "description": "使用鲜明活力的视觉语气。",
+                                    "requires_free_text": False,
+                                },
+                            ],
+                            "recommended_option_id": "A",
+                            "impact": "影响最终画面的视觉表达。",
+                            "evidence": "验收任务书未指定视觉语气。",
+                            "missing": True,
+                            "has_safe_default": False,
+                            "blocking": True,
+                            "semantic_fingerprint": "browser-acceptance-tone-v1",
+                        }
+                    ] if clarification_number == 0 else [],
+                }
             self._send_json({
                 "id": f"chatcmpl_browser_{time.time_ns()}",
                 "object": "chat.completion",
@@ -100,9 +131,22 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class ProviderServer(ThreadingHTTPServer):
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), ProviderHandler)
+        self._clarification_number = 0
+        self._clarification_lock = threading.Lock()
+
+    def next_clarification_number(self) -> int:
+        with self._clarification_lock:
+            number = self._clarification_number
+            self._clarification_number += 1
+            return number
+
+
 @contextmanager
 def provider() -> Iterator[str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), ProviderHandler)
+    server = ProviderServer()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

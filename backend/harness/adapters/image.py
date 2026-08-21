@@ -50,13 +50,13 @@ from .image_workflow import (
     normalized_capabilities as normalize_workflow_capabilities,
 )
 
-SUPPORTED_IMAGE_AGENT_REVISION = "2339550ab15ad05e0dde7f48e1386a5a1a0eb663"
-SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION = "1.8.1"
+SUPPORTED_IMAGE_AGENT_REVISION = "0e559d0153f479c8abefb14613804b8cde486282"
+SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION = "1.8.2"
 SUPPORTED_IMAGE_API_MAJOR = "1"
 _SUPPORTED_IMAGE_RUNTIME_ATTESTATIONS = {
     SUPPORTED_IMAGE_AGENT_REVISION: {
         "source_content_sha256": (
-            "c039156ae9c125e470cd38f436d9f9b0ff53e6f0bcec52805ddf3e80361c29a2"
+            "ade81f5bf339b4c8d16755876d49fccc1ba6c783434d7432294449fdc7ba10fb"
         ),
         "dependency_content_sha256": (
             "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb"

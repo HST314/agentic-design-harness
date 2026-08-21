@@ -17,6 +17,44 @@ _USAGE_BASES = frozenset({"tokens", "image_units", "mixed"})
 _TOKEN_FIELDS = frozenset(
     {"input_tokens", "output_tokens", "cached_input_tokens", "reasoning_tokens", "total_tokens"}
 )
+_RAW_USAGE_COUNTERS = frozenset(
+    {
+        "accepted_prediction_tokens",
+        "audio_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cached_input_tokens",
+        "cached_tokens",
+        "completion_tokens",
+        "image_tokens",
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "reasoning_tokens",
+        "rejected_prediction_tokens",
+        "text_tokens",
+        "total_tokens",
+    }
+)
+_RAW_USAGE_DETAIL_OBJECTS = frozenset(
+    {
+        "completion_tokens_details",
+        "input_tokens_details",
+        "output_tokens_details",
+        "prompt_tokens_details",
+    }
+)
+_RAW_USAGE_DETAIL_COUNTERS = frozenset(
+    {
+        "accepted_prediction_tokens",
+        "audio_tokens",
+        "cached_tokens",
+        "image_tokens",
+        "reasoning_tokens",
+        "rejected_prediction_tokens",
+        "text_tokens",
+    }
+)
 _SENSITIVE_KEYS = ("api_key", "apikey", "authorization", "access_token", "secret", "cookie")
 _SENSITIVE_VALUE = re.compile(
     r"(?:bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,})", re.I
@@ -108,9 +146,7 @@ def _map_usage_item(
         _protocol_error("The Image usage accounting type is malformed.")
     token_usage = _token_usage(item.get("token_usage"))
     billing_units = _billing_units(item.get("billing_units"))
-    raw_usage = item.get("raw_usage")
-    if not isinstance(raw_usage, dict) or not _safe_json(raw_usage):
-        _protocol_error("The Image raw usage observation is malformed.")
+    raw_usage = _raw_usage(item.get("raw_usage"))
     if usage_basis == "tokens" and (token_usage is None or billing_units):
         _protocol_error("The Image token usage basis is inconsistent.")
     if usage_basis == "image_units" and (token_usage is not None or not billing_units):
@@ -179,6 +215,30 @@ def _billing_units(value: Any) -> list[dict[str, Any]]:
             _protocol_error("The Image billing units are malformed.")
         units.append(item)
     return units
+
+
+def _raw_usage(value: Any) -> dict[str, Any]:
+    """Accept only the producer protocol's explicit accounting fields."""
+
+    if not isinstance(value, dict) or not set(value).issubset(
+        _RAW_USAGE_COUNTERS | _RAW_USAGE_DETAIL_OBJECTS
+    ):
+        _protocol_error("The Image raw usage observation is malformed.")
+    metrics: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in _RAW_USAGE_COUNTERS:
+            if type(item) is not int or item < 0:
+                _protocol_error("The Image raw usage observation is malformed.")
+            metrics[key] = item
+            continue
+        if (
+            not isinstance(item, dict)
+            or not set(item).issubset(_RAW_USAGE_DETAIL_COUNTERS)
+            or any(type(counter) is not int or counter < 0 for counter in item.values())
+        ):
+            _protocol_error("The Image raw usage observation is malformed.")
+        metrics[key] = dict(item)
+    return metrics
 
 
 def _safe_json(value: dict[str, Any]) -> bool:

@@ -2,6 +2,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 
 const taskId = "t_browser_real_stack";
 const instanceId = "i_browser_real_stack";
+const maxWorkflowAdvances = 12;
 
 async function jsonRequest(
   request: APIRequestContext,
@@ -153,12 +154,90 @@ async function seedRealWorkflow(request: APIRequestContext): Promise<void> {
   });
 }
 
-async function waitForApproval(request: APIRequestContext): Promise<Record<string, any>> {
+async function waitForBoundary(request: APIRequestContext): Promise<Record<string, any>> {
+  let latest: Record<string, any> | undefined;
   await expect.poll(async () => {
-    const detail = await jsonRequest(request, "get", `/api/v1/instances/${instanceId}`);
-    return detail.instance.status;
-  }, { timeout: 45_000 }).toBe("WAITING_APPROVAL");
-  return jsonRequest(request, "get", `/api/v1/instances/${instanceId}`);
+    latest = await jsonRequest(request, "get", `/api/v1/instances/${instanceId}`);
+    return ["WAITING_APPROVAL", "SUCCEEDED", "FAILED"].includes(
+      String(latest.instance.status),
+    );
+  }, { timeout: 90_000 }).toBe(true);
+  return latest as Record<string, any>;
+}
+
+function clarificationAnswers(context: Record<string, any>): Record<string, unknown> {
+  const card = context.question_card as Record<string, any> | undefined;
+  const questions = Array.isArray(card?.questions) ? card.questions : [];
+  if (!card?.question_card_id || questions.length === 0) {
+    throw new Error("The current clarification approval has no answerable question card");
+  }
+  return {
+    question_card_id: String(card.question_card_id),
+    answers: questions.map((question: Record<string, any>) => {
+      const options = Array.isArray(question.options) ? question.options : [];
+      const recommended = options.find(
+        (option: Record<string, any>) => option.option_id === question.recommended_option_id,
+      ) ?? options[0];
+      if (!recommended?.option_id) {
+        throw new Error(`Clarification question ${question.question_id} has no legal option`);
+      }
+      return {
+        question_id: String(question.question_id),
+        selected_option_id: String(recommended.option_id),
+        free_text: recommended.requires_free_text
+          ? "按已登记任务卡约束完成本次生产链路验收。"
+          : null,
+        skipped: false,
+      };
+    }),
+  };
+}
+
+function chooseApprovalAction(payload: Record<string, any>): string {
+  const actions = Array.isArray(payload.available_actions)
+    ? payload.available_actions.map(String)
+    : [];
+  const questionCard = payload.context?.question_card;
+  const hasQuestions = Array.isArray(questionCard?.questions) && questionCard.questions.length > 0;
+  const priority = [
+    ...(hasQuestions ? ["answer_clarification", "answer_taskbook_revision"] : []),
+    "apply_clarification_safe_defaults",
+    "continue_clarification_after_budget_change",
+    "apply_taskbook_scope_boundaries",
+    "regenerate_taskbook",
+    "approve_taskbook",
+    "approve_category_constraint",
+    "approve_skill_invocations",
+    "select_master",
+    "review_calibration",
+    "approve_final",
+    "start_category_match",
+    "start_clarification",
+    "build_taskbook",
+    "prepare_style_direction",
+    "render_candidates",
+    "choose_master",
+    "start_quality_inspection",
+    "open_final_approval",
+    "resume_quality_inspection",
+  ];
+  const action = priority.find((candidate) => actions.includes(candidate));
+  if (!action) throw new Error(`No supported action in current approval: ${actions.join(", ")}`);
+  return action;
+}
+
+function approvalPayload(action: string, context: Record<string, any>): Record<string, unknown> {
+  if (action === "answer_clarification" || action === "answer_taskbook_revision") {
+    return { clarification_answers: clarificationAnswers(context) };
+  }
+  if (action === "select_master") {
+    const candidate = context.candidates?.[0];
+    const selectedId = candidate?.id ?? candidate?.candidate_id;
+    if (!selectedId) throw new Error("Master selection approval has no candidate id");
+    return { selected_id: String(selectedId) };
+  }
+  if (action === "review_calibration") return { manual_action: "accept_current" };
+  return {};
 }
 
 async function approveInUi(
@@ -180,6 +259,7 @@ async function approveInUi(
 
 test("production build completes a real backend workflow without browser API mocks", async ({ page, request }) => {
   const deterministicProvider = process.env.HARNESS_BROWSER_REAL_PROVIDER !== "1";
+  test.setTimeout(deterministicProvider ? 120_000 : 600_000);
   const imageModel = process.env.HARNESS_BROWSER_IMAGE_MODEL ?? "browser-image";
   const failedRequests: string[] = [];
   page.on("requestfailed", (failed) => {
@@ -190,39 +270,37 @@ test("production build completes a real backend workflow without browser API moc
 
   await seedRealWorkflow(request);
 
-  let detail = await waitForApproval(request);
-  await approveInUi(page, detail.pending_approval.approval_id, "approve_taskbook", {});
-
-  detail = await waitForApproval(request);
-  const selection = await jsonRequest(
-    request,
-    "get",
-    `/api/v1/approvals/${detail.pending_approval.approval_id}`,
-  );
-  const selectedId = String(selection.payload.context.candidates[0].id);
-  await approveInUi(
-    page,
-    detail.pending_approval.approval_id,
-    "select_master",
-    { selected_id: selectedId },
-  );
-
-  detail = await waitForApproval(request);
-  await approveInUi(
-    page,
-    detail.pending_approval.approval_id,
-    "review_calibration",
-    { manual_action: "accept_current" },
-  );
-
-  await expect.poll(async () => {
-    const completed = await jsonRequest(request, "get", `/api/v1/instances/${instanceId}`);
-    return completed.instance.status;
-  }, { timeout: 45_000 }).toBe("SUCCEEDED");
+  const advancedActions: string[] = [];
+  let completed: Record<string, any> | undefined;
+  for (let advance = 0; advance < maxWorkflowAdvances; advance += 1) {
+    const detail = await waitForBoundary(request);
+    const status = String(detail.instance.status);
+    if (status === "SUCCEEDED") {
+      completed = detail;
+      break;
+    }
+    if (status === "FAILED") throw new Error(`Image workflow failed: ${JSON.stringify(detail)}`);
+    const approvalId = String(detail.pending_approval?.approval_id ?? "");
+    if (!approvalId) throw new Error("Waiting Image workflow has no pending approval");
+    const approval = await jsonRequest(request, "get", `/api/v1/approvals/${approvalId}`);
+    const action = chooseApprovalAction(approval.payload);
+    await approveInUi(page, approvalId, action, approvalPayload(action, approval.payload.context));
+    advancedActions.push(action);
+  }
+  expect(completed?.instance.status, {
+    message: `workflow did not succeed within ${maxWorkflowAdvances} advances: ${advancedActions.join(", ")}`,
+  }).toBe("SUCCEEDED");
+  if (deterministicProvider) expect(advancedActions).toContain("answer_clarification");
 
   const usage = await jsonRequest(request, "get", `/api/v1/tasks/${taskId}/usage`);
   expect(usage.completeness).toBe("COMPLETE");
-  expect(usage.tokens.total_tokens).toBeGreaterThan(0);
+  const textEvents = usage.events.filter(
+    (event: Record<string, any>) => event.call_type === "reasoning_llm",
+  );
+  expect(textEvents.length).toBeGreaterThan(0);
+  expect(textEvents.every((event: Record<string, any>) =>
+    event.usage_basis === "tokens" && event.total_tokens > 0,
+  )).toBe(true);
   const imageEvents = usage.events.filter(
     (event: Record<string, any>) => event.call_type === "text_to_image_model",
   );
@@ -234,6 +312,14 @@ test("production build completes a real backend workflow without browser API moc
       && event.billing_units[0].unit === "image"
       && event.billing_units[0].attributes.resolution === "2560x1440",
   )).toBe(true);
+  const vlmEvents = usage.events.filter(
+    (event: Record<string, any>) => event.call_type === "vision_language_model",
+  );
+  expect(vlmEvents.length).toBeGreaterThan(0);
+  expect(vlmEvents.every((event: Record<string, any>) =>
+    event.usage_basis === "tokens" && event.total_tokens > 0,
+  )).toBe(true);
+  expect(usage.tokens.total_tokens).toBeGreaterThan(0);
   expect(usage.cost.completeness).toBe("UNKNOWN");
 
   await page.goto(`/tasks/${taskId}/usage`);

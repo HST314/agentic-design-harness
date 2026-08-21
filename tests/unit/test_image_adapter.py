@@ -225,7 +225,13 @@ class ImageAdapterTests(unittest.TestCase):
                             "total_tokens": 10,
                         },
                         "billing_units": [],
-                        "raw_usage": {"prompt_tokens": 7, "completion_tokens": 3},
+                        "raw_usage": {
+                            "prompt_tokens": 7,
+                            "completion_tokens": 3,
+                            "total_tokens": 10,
+                            "prompt_tokens_details": {"cached_tokens": 1},
+                            "completion_tokens_details": {"reasoning_tokens": 2},
+                        },
                     }
                 ],
                 "next_cursor": 4,
@@ -273,6 +279,10 @@ class ImageAdapterTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["schema_version"], "1.1")
         self.assertEqual(events[0]["total_tokens"], 10)
+        self.assertEqual(
+            events[0]["raw_usage"]["completion_tokens_details"],
+            {"reasoning_tokens": 2},
+        )
         self.assertEqual(events[0]["occurred_at"], "2026-08-21T10:00:00.000000Z")
         self.assertEqual(events[1]["usage_basis"], "image_units")
         self.assertEqual(events[1]["total_tokens"], 0)
@@ -286,7 +296,7 @@ class ImageAdapterTests(unittest.TestCase):
         ):
             self.adapter.collect_usage("i_image_adapter", "provider_cursor")
 
-    def test_usage_collection_rejects_sensitive_raw_provider_fields(self) -> None:
+    def test_usage_collection_rejects_non_metering_raw_provider_fields(self) -> None:
         page = {
             "items": [
                 {
@@ -307,40 +317,44 @@ class ImageAdapterTests(unittest.TestCase):
                         "total_tokens": 2,
                     },
                     "billing_units": [],
-                    "raw_usage": {"api_key": "must-not-cross"},
+                    "raw_usage": {},
                 }
             ],
             "next_cursor": 1,
             "has_more": False,
         }
-        with (
-            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
-            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
-            patch.object(
-                self.store.instance,
-                "get",
-                return_value={"credential_pair_ref": "cred_test_01"},
-            ),
-            patch.object(self.adapter, "_request", return_value=page),
-            self.assertRaisesRegex(HarnessError, "raw usage"),
-        ):
-            self.adapter.collect_usage("i_image_adapter", None)
-
-        page["items"][0]["raw_usage"] = {
-            "note": "Bear" + "er sensitive-provider-value"
-        }
-        with (
-            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
-            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
-            patch.object(
-                self.store.instance,
-                "get",
-                return_value={"credential_pair_ref": "cred_test_01"},
-            ),
-            patch.object(self.adapter, "_request", return_value=page),
-            self.assertRaisesRegex(HarnessError, "raw usage"),
-        ):
-            self.adapter.collect_usage("i_image_adapter", None)
+        candidates = (
+            {"api_key": "must-not-cross"},
+            {"password": "plain-password-value"},
+            {"private_key": "plain-private-key-value"},
+            {"token": "plain-token-value"},
+            {"note": "ordinary-but-not-a-metering-field"},
+            {"prompt_tokens_details": {"password": "nested-value"}},
+            {"prompt_tokens": True},
+            {"prompt_tokens": -1},
+            {"prompt_tokens_details": {"cached_tokens": "1"}},
+        )
+        for raw_usage in candidates:
+            with self.subTest(raw_usage=raw_usage):
+                page["items"][0]["raw_usage"] = raw_usage
+                with (
+                    patch.object(
+                        self.adapter,
+                        "_task_id_for_instance",
+                        return_value="t_image_adapter",
+                    ),
+                    patch.object(
+                        self.adapter, "_base_url", return_value="http://127.0.0.1:1"
+                    ),
+                    patch.object(
+                        self.store.instance,
+                        "get",
+                        return_value={"credential_pair_ref": "cred_test_01"},
+                    ),
+                    patch.object(self.adapter, "_request", return_value=page),
+                    self.assertRaisesRegex(HarnessError, "raw usage"),
+                ):
+                    self.adapter.collect_usage("i_image_adapter", None)
 
     def test_usage_collection_rejects_a_nonadvancing_producer_page(self) -> None:
         with (
