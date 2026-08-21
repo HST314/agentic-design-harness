@@ -77,6 +77,52 @@ test.beforeEach(async ({ page }) => {
       }),
     });
   });
+  await page.route("**/api/v1/tasks/t_ui/events?*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        items: [
+          {
+            event_id: "evt_ui",
+            event_type: "OBJECT_COMMITTED",
+            object_type: "plan",
+            object_id: "t_ui",
+            revision: 2,
+            actor: { actor_type: "master", actor_id: "master_default" },
+            command: "save_plan",
+            result: "COMMITTED",
+            occurred_at: "2026-08-20T12:00:00Z",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/api/v1/tasks/t_ui/approvals?*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        items: [
+          {
+            approval_id: "ap_ui",
+            task_id: "t_ui",
+            instance_id: "i_ui",
+            step_id: "approve_taskbook",
+            kind: "WORKFLOW",
+            owner: "human",
+            status: approvalResolved ? "APPROVED" : "PENDING",
+            payload_ref: "approvals/ap_ui/request.json",
+            created_at: "2026-08-20T12:01:00Z",
+            sequence: 1,
+            revision: approvalResolved ? 2 : 1,
+          },
+        ],
+      }),
+    });
+  });
   await page.route("**/api/v1/tasks/t_ui/files?group=all", async (route) => {
     await route.fulfill({
       status: 200,
@@ -433,16 +479,38 @@ test("task and instance pages preserve the Image workbench boundary", async ({ p
   await page.getByRole("link", { name: "查看任务" }).click();
   await expect(page).toHaveURL(/\/tasks\/t_ui$/);
   await expect(page.getByRole("heading", { name: "阶段与实例" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "最近编排记录" })).toBeVisible();
+  await page.getByRole("link", { name: "资源", exact: true }).click();
+  await expect(page).toHaveURL(/\/tasks\/t_ui\/resources$/);
   await expect(page.getByRole("heading", { name: "任务文件" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "公共交付" })).toBeVisible();
+  await page.getByRole("link", { name: "Token", exact: true }).click();
+  await expect(page).toHaveURL(/\/tasks\/t_ui\/usage$/);
   await expect(page.getByRole("heading", { name: "用量观测" })).toBeVisible();
+  await expect(page.getByText("实例占比", { exact: true })).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "i_ui Token 占比" })).toHaveAttribute("aria-valuenow", "100");
   await expect(page.getByText("1,250", { exact: true }).first()).toBeVisible();
+  await page.getByRole("link", { name: "资源", exact: true }).click();
   await expect(page.getByRole("heading", { name: "final.png" })).toBeVisible();
+  await page.getByRole("link", { name: "概览", exact: true }).click();
   await page.getByRole("link", { name: /Image Agent/ }).click();
   await expect(page).toHaveURL(/\/instances\/i_ui$/);
   await expect(page.getByText("等待下一步决议")).toBeVisible();
   const workbench = page.getByRole("link", { name: "打开工作台" });
   await expect(workbench).toHaveAttribute("href", "http://127.0.0.1:18123/");
   await expect(workbench).toHaveAttribute("target", "_blank");
+});
+
+test("task detail exposes approvals, Token and read-only events as deep links", async ({ page }) => {
+  await page.goto("/tasks/t_ui/approvals");
+  await expect(page.getByRole("heading", { name: "审批记录" })).toBeVisible();
+  await expect(page.getByText("批准任务书")).toBeVisible();
+  await page.getByRole("link", { name: "事件", exact: true }).click();
+  await expect(page).toHaveURL(/\/tasks\/t_ui\/events$/);
+  await expect(page.getByRole("heading", { name: "任务事件" })).toBeVisible();
+  await expect(page.getByText("保存执行计划")).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "任务事件" })).toBeVisible();
 });
 
 test("settings keep credentials redacted and clear submitted secrets", async ({ page }) => {

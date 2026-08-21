@@ -13,6 +13,22 @@ export interface TaskSummary {
   title: string;
   updated_at: string;
   revision: number;
+  goal?: string;
+  start_policy?: string;
+  stage_count?: number;
+  instance_count?: number;
+  instance_status_counts?: Record<string, number>;
+  total_tokens?: number;
+  usage_completeness?: "COMPLETE" | "PARTIAL" | "NOT_REPORTED";
+  has_unavailable_ppt?: boolean;
+  latest_notification?: InboxItem | null;
+}
+
+export interface PageInfo {
+  limit: number;
+  order: "asc" | "desc";
+  has_more: boolean;
+  next_cursor: string | null;
 }
 
 export interface AgentInstance {
@@ -23,6 +39,8 @@ export interface AgentInstance {
   required: boolean;
   approval_mode: string;
   config_revision: number;
+  credential_pair_ref: string;
+  credential_pair_revision: number;
   ui_url: string | null;
   process: { pid: number; port: number; state: string; started_at: string } | null;
 }
@@ -32,6 +50,7 @@ export interface TaskPlan {
     stage_id: string;
     type: string;
     position: number;
+    depends_on: string[];
     status: string;
     required: boolean;
     instance_ids: string[];
@@ -44,6 +63,7 @@ export interface TaskDetailResponse {
   task: TaskSummary & { goal: string; start_policy: string; master_owner: string };
   task_revision: number;
   plan: TaskPlan | null;
+  recent_notifications?: InboxItem[];
 }
 
 export interface AdapterObservation {
@@ -66,6 +86,24 @@ export interface InstanceDetailResponse {
   instance: AgentInstance;
   observation: AdapterObservation | null;
   pending_approval: Approval | null;
+  credential: CredentialSummary | null;
+  config: {
+    config_revision: number;
+    restart_required: boolean;
+    config: Record<string, unknown>;
+  };
+}
+
+export interface AuditEvent {
+  event_id: string;
+  event_type: "OBJECT_COMMITTED";
+  object_type: string;
+  object_id: string;
+  revision: number;
+  actor: { actor_type: string; actor_id: string };
+  command: string;
+  result: "COMMITTED";
+  occurred_at: string;
 }
 
 export interface Approval {
@@ -236,7 +274,7 @@ export class ApiClient {
     return this.get<ReadyResponse>("/readyz", signal);
   }
 
-  tasks(signal?: AbortSignal): Promise<{ schema_version: string; items: TaskSummary[] }> {
+  tasks(signal?: AbortSignal): Promise<{ schema_version: string; items: TaskSummary[]; page?: PageInfo }> {
     return this.get("/api/v1/tasks", signal);
   }
 
@@ -254,6 +292,26 @@ export class ApiClient {
 
   inbox(signal?: AbortSignal): Promise<{ schema_version: string; items: InboxItem[] }> {
     return this.get("/api/v1/inbox?owner=human", signal);
+  }
+
+  taskApprovals(
+    taskId: string,
+    signal?: AbortSignal,
+  ): Promise<{ schema_version: string; items: Approval[]; page?: PageInfo }> {
+    return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/approvals?limit=200`, signal);
+  }
+
+  taskEvents(
+    taskId: string,
+    actorType?: "human" | "master" | "system" | "adapter",
+    signal?: AbortSignal,
+  ): Promise<{ schema_version: string; items: AuditEvent[]; page?: PageInfo }> {
+    const query = new URLSearchParams({ limit: "200" });
+    if (actorType) query.set("actor_type", actorType);
+    return this.get(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/events?${query.toString()}`,
+      signal,
+    );
   }
 
   taskFiles(
@@ -316,6 +374,41 @@ export class ApiClient {
       `/api/v1/instances/${encodeURIComponent(instanceId)}/approval-mode`,
       body,
     );
+  }
+
+  confirmTaskStart(taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.send("POST", `/api/v1/tasks/${encodeURIComponent(taskId)}/confirm-start`, body);
+  }
+
+  cancelTask(taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.send("POST", `/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, body);
+  }
+
+  instanceOperation(
+    instanceId: string,
+    operation: "start" | "restart" | "cancel" | "archive",
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.send(
+      "POST",
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/${operation}`,
+      body,
+    );
+  }
+
+  updateInstanceConfig(
+    instanceId: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.send("PUT", `/api/v1/instances/${encodeURIComponent(instanceId)}/config`, body);
+  }
+
+  async previewText(taskId: string, path: string): Promise<string> {
+    const response = await fetch(this.previewUrl(taskId, path), {
+      headers: { Accept: "text/plain, application/json, text/markdown" },
+    });
+    if (!response.ok) throw await this.error(response);
+    return response.text();
   }
 
   previewUrl(taskId: string, path: string): string {

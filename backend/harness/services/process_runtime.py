@@ -9,7 +9,7 @@ import socket
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, NoReturn
 
 from ..core.errors import HarnessError
 from ..storage.atomic import atomic_write_json, digest_json, read_json
@@ -358,7 +358,7 @@ def _artifact_relative_path(value: str) -> PurePosixPath:
     return candidate
 
 
-def _artifact_invalid(message: str) -> None:
+def _artifact_invalid(message: str) -> NoReturn:
     raise HarnessError("PROCESS_START_FAILED", message)
 
 

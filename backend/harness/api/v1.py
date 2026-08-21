@@ -1,7 +1,10 @@
-"""Versioned HTTP use cases through the G4 multi-instance and budget gate."""
+"""Versioned HTTP use cases for the Phase 1 product control plane."""
 
 from __future__ import annotations
 
+import base64
+import binascii
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, Query
@@ -14,7 +17,9 @@ from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
 from ..storage.atomic import read_json
 from ..storage.layout import validate_identifier
+from ..storage.ndjson import recover_records
 from ..storage.repository import Actor
+from .pagination import paginate
 
 if TYPE_CHECKING:
     from .app import Container
@@ -25,6 +30,27 @@ class StrictRequest(BaseModel):
 
 
 class CreateTaskRequest(StrictRequest):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "task_id": "task_campaign_01",
+                    "title": "Campaign visual",
+                    "goal": "Create three reviewable visual directions.",
+                    "master_owner": "master_default",
+                    "start_policy": "manual",
+                    "input_manifest": "inputs/manifests/input_rev_1.json",
+                    "envelope": {
+                        "idempotency_key": "create_task_campaign_01",
+                        "actor_type": "master",
+                        "actor_id": "master_default",
+                        "expected_revision": 0,
+                    },
+                }
+            ]
+        },
+    )
     task_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     title: str = Field(min_length=1, max_length=500)
     goal: str = Field(min_length=1, max_length=20_000)
@@ -49,6 +75,30 @@ class StartTaskRequest(StrictRequest):
 
 
 class InstanceOperationRequest(StrictRequest):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "operation_id": "instance_operation_01",
+                    "envelope": {
+                        "idempotency_key": "instance_operation_01",
+                        "actor_type": "human",
+                        "actor_id": "operator",
+                        "expected_revision": 3,
+                    },
+                }
+            ]
+        },
+    )
+    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
+class ImportAssetRequest(StrictRequest):
+    filename: str = Field(min_length=1, max_length=255)
+    content_base64: str = Field(min_length=1, max_length=30_000_000)
+    description: str = Field(default="", max_length=4000)
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     envelope: CommandEnvelope
 
@@ -157,12 +207,34 @@ def build_v1_router(container: Container) -> APIRouter:
         )
 
     @router.get("/tasks", tags=["tasks"])
-    async def list_tasks() -> dict[str, Any]:
+    async def list_tasks(
+        status: str | None = Query(default=None, max_length=64),
+        limit: int = Query(default=50, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+        order: Literal["asc", "desc"] = Query(default="desc"),
+    ) -> dict[str, Any]:
         def read_index() -> dict[str, Any]:
             index = read_json(
                 container.store.layout.control_root / "indexes" / "task-index.json"
             )
-            return {"schema_version": "1.0", "items": index["tasks"]}
+            items = [
+                item
+                for item in index["tasks"]
+                if status is None or item["status"] == status
+            ]
+            page = paginate(
+                items,
+                scope=f"tasks:{status or '*'}",
+                fields=("updated_at", "task_id"),
+                limit=limit,
+                cursor=cursor,
+                order=order,
+            )
+            page["items"] = [_task_summary(container, item) for item in page["items"]]
+            return {
+                "schema_version": "1.0",
+                **page,
+            }
 
         return await run_in_threadpool(read_index)
 
@@ -173,14 +245,59 @@ def build_v1_router(container: Container) -> APIRouter:
             task = container.store.task.get(task_id, task_id)
             if task is None:
                 raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
+            notifications = container.store.inbox.list(task_id)
+            notifications.sort(
+                key=lambda item: (item["created_at"], item["sequence"], item["inbox_id"]),
+                reverse=True,
+            )
             return {
                 "schema_version": "1.0",
                 "task": task,
                 "task_revision": container.store.task.revision(task_id, task_id),
                 "plan": container.store.plan.get(task_id, task_id),
+                "recent_notifications": notifications[:5],
             }
 
         return await run_in_threadpool(read_task)
+
+    @router.get("/tasks/{task_id}/events", tags=["audit"])
+    async def list_task_events(
+        task_id: str,
+        actor_type: Literal["human", "master", "system", "adapter"] | None = Query(
+            default=None
+        ),
+        limit: int = Query(default=100, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+        order: Literal["asc", "desc"] = Query(default="desc"),
+    ) -> dict[str, Any]:
+        def read_events() -> dict[str, Any]:
+            validate_identifier(task_id, "task_id")
+            if container.store.task.get(task_id, task_id) is None:
+                raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
+            path = container.store.layout.control_root / "tasks" / task_id / "events.ndjson"
+            events = [
+                _public_audit_event(item)
+                for item in recover_records(path)
+                if item.get("event_type") == "OBJECT_COMMITTED"
+                and (
+                    actor_type is None
+                    or (item.get("actor") or {}).get("actor_type") == actor_type
+                )
+            ]
+            return {
+                "schema_version": "1.0",
+                "task_id": task_id,
+                **paginate(
+                    events,
+                    scope=f"task-events:{task_id}:{actor_type or '*'}",
+                    fields=("occurred_at", "event_id"),
+                    limit=limit,
+                    cursor=cursor,
+                    order=order,
+                ),
+            }
+
+        return await run_in_threadpool(read_events)
 
     @router.put("/tasks/{task_id}/plan", tags=["tasks"])
     async def save_plan(task_id: str, body: SavePlanRequest) -> dict[str, Any]:
@@ -204,6 +321,16 @@ def build_v1_router(container: Container) -> APIRouter:
             envelope=body.envelope,
         )
 
+    @router.post("/tasks/{task_id}/cancel", tags=["tasks"])
+    async def cancel_task(task_id: str, body: InstanceOperationRequest) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.application.cancel_task,
+            task_id,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
+
     @router.get("/instances/{instance_id}", tags=["instances"])
     async def get_instance(
         instance_id: str,
@@ -221,24 +348,48 @@ def build_v1_router(container: Container) -> APIRouter:
             pending = container.approvals.list_approvals(
                 instance_id=instance_id, status="PENDING"
             )
+            credential = next(
+                (
+                    item
+                    for item in container.credentials.list_redacted()
+                    if item["credential_pair_id"] == instance["credential_pair_ref"]
+                    and item["revision"] == instance["credential_pair_revision"]
+                ),
+                None,
+            )
+            config = container.configuration.get_instance(task_id, instance_id)
             return {
                 "schema_version": "1.0",
                 "task_id": task_id,
                 "task_revision": container.store.task.revision(task_id, task_id),
                 "pending_approval": pending[0] if pending else None,
+                "credential": credential,
+                "config": config,
                 **result,
             }
 
         return await run_in_threadpool(read_instance)
 
     @router.get("/instances/{instance_id}/approvals", tags=["approvals"])
-    async def list_instance_approvals(instance_id: str) -> dict[str, Any]:
+    async def list_instance_approvals(
+        instance_id: str,
+        limit: int = Query(default=50, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+        order: Literal["asc", "desc"] = Query(default="desc"),
+    ) -> dict[str, Any]:
         def read_approvals() -> dict[str, Any]:
             task_id = _task_for_instance(container, instance_id)
             return {
                 "schema_version": "1.0",
                 "task_id": task_id,
-                "items": container.approvals.list_approvals(instance_id=instance_id),
+                **paginate(
+                    container.approvals.list_approvals(instance_id=instance_id),
+                    scope=f"instance-approvals:{instance_id}",
+                    fields=("created_at", "sequence", "approval_id"),
+                    limit=limit,
+                    cursor=cursor,
+                    order=order,
+                ),
             }
 
         return await run_in_threadpool(read_approvals)
@@ -286,6 +437,49 @@ def build_v1_router(container: Container) -> APIRouter:
             task_id,
             instance_id,
             operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", "instance": instance}
+
+    @router.post("/instances/{instance_id}/start", tags=["instances"])
+    async def start_instance(
+        instance_id: str, body: InstanceOperationRequest
+    ) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        result = await run_in_threadpool(
+            container.application.start_instance,
+            task_id,
+            instance_id,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
+
+    @router.post("/instances/{instance_id}/restart", tags=["instances"])
+    async def restart_instance(
+        instance_id: str, body: InstanceOperationRequest
+    ) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        result = await run_in_threadpool(
+            container.application.restart_instance,
+            task_id,
+            instance_id,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
+
+    @router.post("/instances/{instance_id}/archive", tags=["instances"])
+    async def archive_instance(
+        instance_id: str, body: InstanceOperationRequest
+    ) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        instance = await run_in_threadpool(
+            container.application.archive_instance_command,
+            task_id,
+            instance_id,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
         )
         return {"schema_version": "1.0", "instance": instance}
 
@@ -297,6 +491,34 @@ def build_v1_router(container: Container) -> APIRouter:
     async def get_approval(approval_id: str) -> dict[str, Any]:
         result = await run_in_threadpool(container.approvals.get_approval, approval_id)
         return {"schema_version": "1.0", **result}
+
+    @router.get("/tasks/{task_id}/approvals", tags=["approvals"])
+    async def list_task_approvals(
+        task_id: str,
+        status: Literal["PENDING", "APPROVED", "REJECTED", "CANCELLED"] | None = Query(
+            default=None
+        ),
+        limit: int = Query(default=50, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+        order: Literal["asc", "desc"] = Query(default="desc"),
+    ) -> dict[str, Any]:
+        items = await run_in_threadpool(
+            container.approvals.list_approvals,
+            task_id=task_id,
+            status=status,
+        )
+        return {
+            "schema_version": "1.0",
+            "task_id": task_id,
+            **paginate(
+                items,
+                scope=f"task-approvals:{task_id}:{status or '*'}",
+                fields=("created_at", "sequence", "approval_id"),
+                limit=limit,
+                cursor=cursor,
+                order=order,
+            ),
+        }
 
     @router.post("/approvals/{approval_id}/resolve", tags=["approvals"])
     async def resolve_approval(
@@ -328,15 +550,27 @@ def build_v1_router(container: Container) -> APIRouter:
     async def list_inbox(
         owner: Literal["human", "master"] = Query(default="human"),
         status: Literal["UNREAD", "READ", "HANDLED"] | None = Query(default=None),
-        limit: int = Query(default=100, ge=1, le=200),
+        limit: int = Query(default=50, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+        order: Literal["asc", "desc"] = Query(default="asc"),
     ) -> dict[str, Any]:
         items = await run_in_threadpool(
             container.approvals.list_inbox,
             owner=owner,
             status=status,
-            limit=limit,
+            limit=None,
         )
-        return {"schema_version": "1.0", "items": items}
+        return {
+            "schema_version": "1.0",
+            **paginate(
+                items,
+                scope=f"inbox:{owner}:{status or '*'}",
+                fields=("created_at", "sequence", "inbox_id"),
+                limit=limit,
+                cursor=cursor,
+                order=order,
+            ),
+        }
 
     @router.post("/inbox/{inbox_id}/status", tags=["inbox"])
     async def update_inbox_status(
@@ -354,10 +588,51 @@ def build_v1_router(container: Container) -> APIRouter:
     async def list_task_files(
         task_id: str,
         group: Literal["inputs", "shared", "instances", "all"] = Query(default="all"),
+        limit: int = Query(default=100, ge=1, le=200),
+        cursor: str | None = Query(default=None, max_length=2048),
+        order: Literal["asc", "desc"] = Query(default="asc"),
     ) -> dict[str, Any]:
         files = await run_in_threadpool(container.assets.list_files, task_id, group)
         assets = await run_in_threadpool(container.assets.list_assets, task_id)
-        return {"schema_version": "1.0", "items": files, "assets": assets}
+        page = paginate(
+            files,
+            scope=f"task-files:{task_id}:{group}",
+            fields=("relative_path",),
+            limit=limit,
+            cursor=cursor,
+            order=order,
+        )
+        return {"schema_version": "1.0", **page, "assets": assets}
+
+    @router.post("/tasks/{task_id}/assets", tags=["assets"])
+    async def import_task_asset(
+        task_id: str, body: ImportAssetRequest
+    ) -> dict[str, Any]:
+        if body.envelope.actor_type not in {"human", "master"}:
+            raise HarnessError(
+                "VALIDATION_ERROR", "Only a human or Master may import a task asset."
+            )
+        def decode_and_import() -> dict[str, Any]:
+            container.commands.validate_task_revision(
+                task_id, body.envelope.expected_revision
+            )
+            try:
+                content = base64.b64decode(body.content_base64, validate=True)
+            except (ValueError, binascii.Error):
+                raise HarnessError(
+                    "ASSET_VALIDATION_FAILED", "The asset content is not valid Base64."
+                ) from None
+            return container.assets.import_bytes(
+                task_id,
+                filename=body.filename,
+                content=content,
+                description=body.description,
+                source=f"api:{body.envelope.actor_type}:{body.envelope.actor_id}",
+                idempotency_key=body.envelope.idempotency_key,
+            )
+
+        manifest = await run_in_threadpool(decode_and_import)
+        return {"schema_version": "1.0", "manifest": manifest}
 
     @router.get("/tasks/{task_id}/files/preview", tags=["assets"])
     async def preview_task_file(task_id: str, path: str = Query(min_length=1)) -> Response:
@@ -623,6 +898,58 @@ def build_v1_router(container: Container) -> APIRouter:
         return {"schema_version": "1.0", **result}
 
     return router
+
+
+def _task_summary(container: Container, index_item: dict[str, Any]) -> dict[str, Any]:
+    task_id = index_item["task_id"]
+    task = container.store.task.get(task_id, task_id)
+    if task is None:
+        raise HarnessError("INTERNAL_ERROR", "The task index references a missing task.")
+    plan = container.store.plan.get(task_id, task_id)
+    instances = [] if plan is None else plan["instances"]
+    status_counts: dict[str, int] = {}
+    for instance in instances:
+        status_counts[instance["status"]] = status_counts.get(instance["status"], 0) + 1
+    usage = container.usage.summary(task_id)
+    notifications = container.store.inbox.list(task_id)
+    notifications.sort(
+        key=lambda item: (item["created_at"], item["sequence"], item["inbox_id"]),
+        reverse=True,
+    )
+    return {
+        **deepcopy(index_item),
+        "goal": task["goal"],
+        "start_policy": task["start_policy"],
+        "stage_count": 0 if plan is None else len(plan["stages"]),
+        "instance_count": len(instances),
+        "instance_status_counts": status_counts,
+        "total_tokens": usage["tokens"]["total_tokens"],
+        "usage_completeness": usage["completeness"],
+        "has_unavailable_ppt": any(
+            stage["type"] == "ppt" and stage["status"] in {"UNAVAILABLE", "PENDING"}
+            for stage in ([] if plan is None else plan["stages"])
+        ),
+        "latest_notification": deepcopy(notifications[0]) if notifications else None,
+    }
+
+
+def _public_audit_event(event: dict[str, Any]) -> dict[str, Any]:
+    candidate_actor = event.get("actor")
+    actor: dict[str, Any] = candidate_actor if isinstance(candidate_actor, dict) else {}
+    return {
+        "event_id": str(event["event_id"]),
+        "event_type": "OBJECT_COMMITTED",
+        "object_type": str(event["object_type"]),
+        "object_id": str(event["object_id"]),
+        "revision": int(event["revision"]),
+        "actor": {
+            "actor_type": str(actor.get("actor_type", "system")),
+            "actor_id": str(actor.get("actor_id", "unknown")),
+        },
+        "command": str(event.get("command", "unknown")),
+        "result": "COMMITTED",
+        "occurred_at": str(event["occurred_at"]),
+    }
 
 
 def _task_for_instance(container: Container, instance_id: str) -> str:

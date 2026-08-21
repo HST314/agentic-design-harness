@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NoReturn
 
 from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
@@ -723,7 +723,7 @@ class TaskCommandService:
                 command,
                 request_sha256,
             )
-            if committed != result:
+            if committed is None or committed != result:
                 raise RuntimeError("command returned without an authoritative result commit")
             return self.store.idempotency.remember_digest(
                 scope,
@@ -772,7 +772,7 @@ class TaskCommandService:
         return self.store.idempotency.request_digest(command, request)
 
     @staticmethod
-    def _raise_revision(expected: int, actual: int, kind: str, object_id: str) -> None:
+    def _raise_revision(expected: int, actual: int, kind: str, object_id: str) -> NoReturn:
         raise HarnessError(
             "REVISION_CONFLICT",
             "The object revision changed before this command committed.",

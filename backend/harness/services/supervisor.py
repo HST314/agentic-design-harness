@@ -118,6 +118,18 @@ class ProcessSupervisor:
                 self._enforce_code_identity(
                     task_id, instance_id, pinned_artifact.identity.digest
                 )
+                record_path = self._launch_path(launch_id)
+                if record_path.exists():
+                    existing = read_json(record_path)
+                    validate_launch_identity(
+                        existing,
+                        task_id,
+                        instance_id,
+                        attempt_id,
+                        spec,
+                        runtime_identity=pinned_artifact.identity,
+                    )
+                    return deepcopy(self._hydrate_launch_identity(existing))
                 current = self._active_launch_for_instance(task_id, instance_id)
                 if current is not None:
                     self._interrupt_model_calls(task_id, instance_id, "controlled_restart")
@@ -453,22 +465,36 @@ class ProcessSupervisor:
                 )
         return results
 
-    def cancel_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
+    def cancel_instance(
+        self, task_id: str, instance_id: str, *, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
         with self._instance_thread_lock(task_id, instance_id):
             self._instance(task_id, instance_id)
             active = self._active_launch_for_instance(task_id, instance_id)
             if active is not None:
                 self._interrupt_model_calls(task_id, instance_id, "cancelled")
                 self._stop_launch(active, "CANCELLED")
-            self._transition(task_id, instance_id, "CANCELLED", f"cancel-{instance_id}")
+            self._transition(
+                task_id,
+                instance_id,
+                "CANCELLED",
+                idempotency_key or f"cancel-{instance_id}",
+            )
             return deepcopy(self._instance(task_id, instance_id))
 
-    def archive_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
+    def archive_instance(
+        self, task_id: str, instance_id: str, *, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
         with self._instance_thread_lock(task_id, instance_id):
             active = self._active_launch_for_instance(task_id, instance_id)
             if active is not None:
                 self._stop_launch(active, "ARCHIVED")
-            self._transition(task_id, instance_id, "ARCHIVED", f"archive-{instance_id}")
+            self._transition(
+                task_id,
+                instance_id,
+                "ARCHIVED",
+                idempotency_key or f"archive-{instance_id}",
+            )
             root = self.store.layout.initialize_instance(task_id, instance_id)
             for path in sorted(root.rglob("*"), reverse=True):
                 if path.is_symlink():
@@ -783,7 +809,13 @@ class ProcessSupervisor:
         self, task_id: str, instance: dict[str, Any]
     ) -> None:
         plan = self.store.plan.get(task_id, task_id)
-        planned = plan is not None and any(
+        if plan is None:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "The instance stage and task are not authorized to start.",
+                {"task_status": None, "instance_status": instance["status"]},
+            )
+        planned = any(
             item["instance_id"] == instance["instance_id"] for item in plan["instances"]
         )
         if (
@@ -796,7 +828,7 @@ class ProcessSupervisor:
                 "INVALID_STATE_TRANSITION",
                 "The instance stage and task are not authorized to start.",
                 {
-                    "task_status": plan["task"]["status"] if plan else None,
+                    "task_status": plan["task"]["status"],
                     "instance_status": instance["status"],
                 },
             )
@@ -823,6 +855,8 @@ class ProcessSupervisor:
         )
         if not handshake_path.exists() or handshake_path.is_symlink():
             return record
+        wrapper_pid = child_pid = 0
+        wrapper_identity = child_identity = ""
         try:
             handshake = read_json(handshake_path)
             wrapper_pid = int(handshake["wrapper_pid"])

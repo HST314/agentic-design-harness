@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
 from ..core.errors import HarnessError
 
@@ -61,7 +62,7 @@ def resolve_task_path(
     return current
 
 
-def _outside(value: str) -> None:
+def _outside(value: str) -> NoReturn:
     raise HarnessError(
         "PATH_OUTSIDE_TASK_ROOT",
         "The path is not a safe task-relative path.",

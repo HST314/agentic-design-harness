@@ -7,7 +7,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from ..adapters import AdapterRegistry, PrepareRequest
 from ..core.errors import HarnessError
@@ -20,6 +20,7 @@ from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 from .approvals import ApprovalInboxService
 from .assets import AssetService
+from .configuration import ConfigurationService
 from .credentials import CredentialPoolService
 from .supervisor import ProcessSupervisor
 
@@ -38,6 +39,7 @@ class HarnessApplicationService:
         credentials: CredentialPoolService,
         supervisor: ProcessSupervisor,
         adapters: AdapterRegistry,
+        configuration: ConfigurationService | None = None,
     ) -> None:
         self.store = store
         self.commands = commands
@@ -46,6 +48,7 @@ class HarnessApplicationService:
         self.credentials = credentials
         self.supervisor = supervisor
         self.adapters = adapters
+        self.configuration = configuration
         self.intent_root = store.layout.control_root / "application-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -138,6 +141,8 @@ class HarnessApplicationService:
                             result = self._resume_save_plan(path, None)
                     elif intent["kind"] == "START_READY_INSTANCES":
                         result = self._resume_start(path, None)
+                    elif intent["kind"] in {"START_INSTANCE", "RESTART_INSTANCE"}:
+                        result = self._resume_instance_operation(path)
                     elif intent["kind"] == "RESOLVE_APPROVAL":
                         result = self._resume_approval(path, None)
                     else:
@@ -230,7 +235,37 @@ class HarnessApplicationService:
             return self._resume_start(intent_path, crash_hook)
 
     def cancel_instance(
-        self, task_id: str, instance_id: str, *, operation_id: str | None = None
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        operation_id: str | None = None,
+        envelope: CommandEnvelope | None = None,
+    ) -> dict[str, Any]:
+        if envelope is not None:
+            if envelope.actor_type not in {"human", "master"}:
+                raise HarnessError(
+                    "VALIDATION_ERROR", "Only a human or Master may cancel an instance."
+                )
+            with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds):
+                replayed = self._replayed_instance_transition(
+                    task_id, instance_id, "CANCELLED", envelope.idempotency_key
+                )
+                if replayed is not None:
+                    return replayed
+                self.commands.validate_task_revision(task_id, envelope.expected_revision)
+                return self._cancel_instance(
+                    task_id, instance_id, operation_id=operation_id, envelope=envelope
+                )
+        return self._cancel_instance(task_id, instance_id, operation_id=operation_id)
+
+    def _cancel_instance(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        operation_id: str | None,
+        envelope: CommandEnvelope | None = None,
     ) -> dict[str, Any]:
         instance = self._instance(task_id, instance_id)
         if instance["status"] == "CANCELLED":
@@ -247,13 +282,323 @@ class HarnessApplicationService:
                     "harness_instance_cancelled",
                     self._derived_id("stop", stop_operation, instance_id),
                 )
-        return self.supervisor.cancel_instance(task_id, instance_id)
+        return self.supervisor.cancel_instance(
+            task_id,
+            instance_id,
+            idempotency_key=None if envelope is None else envelope.idempotency_key,
+        )
+
+    def cancel_task(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Stop every cancellable child before committing the task cancellation."""
+
+        validate_identifier(operation_id, "operation_id")
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError(
+                "VALIDATION_ERROR", "Only a human or Master may cancel a task."
+            )
+        request = {"task_id": task_id}
+        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds):
+            replayed = self.store.idempotency.lookup(
+                task_id,
+                envelope.idempotency_key,
+                "cancel_task",
+                request,
+            )
+            if replayed is not None:
+                return replayed
+            self.commands.validate_task_revision(task_id, envelope.expected_revision)
+            plan = self.store.plan.get(task_id, task_id)
+            if plan is not None:
+                transitions = self.commands.machine.catalog["agent_instance"]["transitions"]
+                for instance in plan["instances"]:
+                    if "CANCELLED" not in transitions[instance["status"]]:
+                        continue
+                    self.cancel_instance(
+                        task_id,
+                        instance["instance_id"],
+                        operation_id=self._derived_id(
+                            "cancel", operation_id, instance["instance_id"]
+                        ),
+                    )
+            current_revision = self.store.task.revision(task_id, task_id)
+            return self.commands.cancel_task(
+                task_id,
+                CommandEnvelope(
+                    idempotency_key=envelope.idempotency_key,
+                    actor_type=envelope.actor_type,
+                    actor_id=envelope.actor_id,
+                    expected_revision=current_revision,
+                ),
+            )
+
+    def start_instance(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        operation_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Start one ready instance after the task-level start policy is active."""
+
+        return self._prepare_instance_operation(
+            "START_INSTANCE",
+            task_id,
+            instance_id,
+            operation_id=operation_id,
+            envelope=envelope,
+        )
+
+    def restart_instance(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        operation_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Restart a pinned runtime while preserving an already accepted Agent job."""
+
+        return self._prepare_instance_operation(
+            "RESTART_INSTANCE",
+            task_id,
+            instance_id,
+            operation_id=operation_id,
+            envelope=envelope,
+        )
+
+    def _prepare_instance_operation(
+        self,
+        kind: str,
+        task_id: str,
+        instance_id: str,
+        *,
+        operation_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        validate_identifier(operation_id, "operation_id")
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError(
+                "VALIDATION_ERROR", "Only a human or Master may control an instance."
+            )
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "envelope": envelope.model_dump(mode="json"),
+        }
+        request_sha256 = digest_json(request)
+        intent_path = self._intent_path(operation_id)
+        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds), FileLock(
+            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        ):
+            if intent_path.exists():
+                intent = read_json(intent_path)
+                if (
+                    intent.get("kind") != kind
+                    or intent.get("request_sha256") != request_sha256
+                ):
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The application operation id was reused for another request.",
+                        {"operation_id": operation_id},
+                    )
+                if intent["state"] == "COMMITTED":
+                    return deepcopy(intent["result"])
+                if intent["state"] == "ABORTED":
+                    self._raise_terminal_intent(intent)
+            else:
+                self.commands.validate_task_revision(task_id, envelope.expected_revision)
+                plan = self._plan(task_id)
+                instance = self._instance(task_id, instance_id)
+                if kind == "START_INSTANCE":
+                    if plan["task"]["status"] == "AWAITING_START_CONFIRMATION":
+                        raise HarnessError(
+                            "INVALID_STATE_TRANSITION",
+                            "Confirm the task start before starting an individual instance.",
+                        )
+                    allowed = {"READY"}
+                else:
+                    allowed = {
+                        "RUNNING",
+                        "WAITING_APPROVAL",
+                        "FAILED_TO_START",
+                        "FAILED",
+                        "CRASHED",
+                    }
+                if instance["status"] not in allowed:
+                    raise HarnessError(
+                        "INVALID_STATE_TRANSITION",
+                        "This instance state cannot execute the requested operation.",
+                        {"current": instance["status"], "operation": kind},
+                    )
+                intent = {
+                    "schema_version": "1.0",
+                    "kind": kind,
+                    "operation_id": operation_id,
+                    "request_sha256": request_sha256,
+                    "request": request,
+                    "state": "PREPARED",
+                    "prepared_at": utc_now(),
+                    "result": None,
+                }
+                atomic_write_json(intent_path, intent)
+            return self._resume_instance_operation(intent_path)
+
+    def _resume_instance_operation(self, intent_path: Path) -> dict[str, Any]:
+        intent = read_json(intent_path)
+        request = intent["request"]
+        task_id = request["task_id"]
+        instance_id = request["instance_id"]
+        operation_id = intent["operation_id"]
+        adapter, spec = self._prepare_instance(task_id, instance_id)
+        launch_prefix = "launch" if intent["kind"] == "START_INSTANCE" else "restart"
+        launch_id = self._derived_id(launch_prefix, operation_id, instance_id)
+        attempt_id = self._derived_id("attempt", operation_id, instance_id)
+        if intent["kind"] == "START_INSTANCE":
+            launch = self.supervisor.start_instance(
+                task_id,
+                instance_id,
+                spec,
+                launch_id=launch_id,
+                attempt_id=attempt_id,
+            )
+            recovery = adapter.recover(self._instance(task_id, instance_id))
+        else:
+            launch = self.supervisor.restart_instance(
+                task_id,
+                instance_id,
+                spec,
+                launch_id=launch_id,
+                attempt_id=attempt_id,
+            )
+            recovery = adapter.recover(self._instance(task_id, instance_id))
+        adapter_result: dict[str, Any]
+        if recovery.recovered:
+            adapter_result = {
+                "accepted": True,
+                "operation_id": attempt_id,
+                "details": {"mode": "recovered", **deepcopy(recovery.details)},
+            }
+        else:
+            started = adapter.start(instance_id, attempt_id)
+            if not started.accepted:
+                raise HarnessError(
+                    "PROCESS_START_FAILED",
+                    "The Agent adapter rejected the restart operation.",
+                )
+            adapter_result = {
+                "accepted": True,
+                "operation_id": started.operation_id,
+                "details": {"mode": "started", **deepcopy(started.details)},
+            }
+        if self.configuration is not None:
+            self.configuration.mark_restarted(task_id, instance_id)
+        result = {
+            "instance": self._instance(task_id, instance_id),
+            "launch": self._launch_summary(launch),
+            "adapter": adapter_result,
+        }
+        intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
+        atomic_write_json(intent_path, intent)
+        return deepcopy(result)
 
     def archive_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
+        return self._archive_instance(task_id, instance_id)
+
+    def archive_instance_command(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        operation_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        validate_identifier(operation_id, "operation_id")
+        if envelope.actor_type != "human":
+            raise HarnessError("VALIDATION_ERROR", "Only a human may archive an instance.")
+        with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds):
+            replayed = self._replayed_instance_transition(
+                task_id, instance_id, "ARCHIVED", envelope.idempotency_key
+            )
+            if replayed is not None:
+                return replayed
+            self.commands.validate_task_revision(task_id, envelope.expected_revision)
+            return self._archive_instance(
+                task_id, instance_id, idempotency_key=envelope.idempotency_key
+            )
+
+    def _archive_instance(
+        self, task_id: str, instance_id: str, *, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
         instance = self._instance(task_id, instance_id)
         if instance["status"] == "ARCHIVED":
             return instance
-        return self.supervisor.archive_instance(task_id, instance_id)
+        return self.supervisor.archive_instance(
+            task_id, instance_id, idempotency_key=idempotency_key
+        )
+
+    def _replayed_instance_transition(
+        self, task_id: str, instance_id: str, target_status: str, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        result = self.store.idempotency.lookup(
+            task_id,
+            idempotency_key,
+            "transition_instance",
+            {
+                "task_id": task_id,
+                "instance_id": instance_id,
+                "target_status": target_status,
+            },
+        )
+        if result is None:
+            return None
+        return next(
+            deepcopy(item)
+            for item in result["plan"]["instances"]
+            if item["instance_id"] == instance_id
+        )
+
+    def _prepare_instance(self, task_id: str, instance_id: str):
+        plan = self._plan(task_id)
+        instance = next(
+            (item for item in plan["instances"] if item["instance_id"] == instance_id),
+            None,
+        )
+        card = next(
+            (item for item in plan["task_cards"] if item["instance_id"] == instance_id),
+            None,
+        )
+        if instance is None or card is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        adapter = self.adapters.get(instance["agent_type"])
+        if not adapter.available:
+            raise HarnessError(
+                "ADAPTER_UNAVAILABLE", "The instance adapter is not available."
+            )
+        self._require_valid_card(adapter, card)
+        task_root = self.store.layout.workspace_root / "tasks" / task_id
+        return adapter, adapter.prepare(
+            PrepareRequest(
+                instance=deepcopy(instance),
+                task_card=deepcopy(card),
+                task_root=task_root,
+                config_ref=task_root
+                / "instances"
+                / instance_id
+                / "runtime"
+                / "runtime.yaml",
+                credential_ref=(
+                    instance["credential_pair_ref"],
+                    instance["credential_pair_revision"],
+                ),
+            )
+        )
 
     def observe_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
         """Poll one Agent and persist its deterministic domain-state projection."""
@@ -934,7 +1279,7 @@ class HarnessApplicationService:
         atomic_write_json(intent_path, intent)
 
     @staticmethod
-    def _raise_terminal_intent(intent: dict[str, Any]) -> None:
+    def _raise_terminal_intent(intent: dict[str, Any]) -> NoReturn:
         error = intent["error"]
         raise HarnessError(error["code"], error["message"], deepcopy(error["details"]))
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -231,8 +231,10 @@ class RetryBudgetService:
             updated["revision"] += 1
             updated["attempts"].append(attempt)
             if not gates:
+                if requested_tokens is None:
+                    raise RuntimeError("an allowed retry must reserve a token amount")
                 ledger = updated["retry_budget_ledger"]
-                ledger["retry_tokens_reserved"] += int(requested_tokens)
+                ledger["retry_tokens_reserved"] += requested_tokens
                 if estimated_cost_micros is not None:
                     ledger["retry_cost_micros_reserved"] += estimated_cost_micros
             updated["updated_at"] = now
@@ -829,7 +831,7 @@ class RetryBudgetService:
         )
 
     @staticmethod
-    def _raise_denied(result: dict[str, Any]) -> None:
+    def _raise_denied(result: dict[str, Any]) -> NoReturn:
         raise HarnessError(
             "BUDGET_GATE_DENIED",
             "The automatic retry requires a one-shot human budget approval.",
@@ -900,7 +902,7 @@ class RetryBudgetService:
             ) from None
 
     @staticmethod
-    def _revision_error(expected: int, actual: int) -> None:
+    def _revision_error(expected: int, actual: int) -> NoReturn:
         raise HarnessError(
             "REVISION_CONFLICT",
             "The retry budget revision changed before the command committed.",

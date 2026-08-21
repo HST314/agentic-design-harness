@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, NoReturn, cast
 from urllib.parse import quote
 
 from ..core.errors import HarnessError
@@ -162,7 +162,7 @@ class AssetService:
             return self._commit_import(
                 task_id,
                 filename=filename,
-                stream=staged,
+                stream=cast(BinaryIO, staged),
                 description=description,
                 source=source,
                 idempotency_key=idempotency_key,
@@ -1006,11 +1006,11 @@ class AssetService:
             )
 
     @staticmethod
-    def _invalid(message: str) -> None:
+    def _invalid(message: str) -> NoReturn:
         raise HarnessError("ASSET_VALIDATION_FAILED", message)
 
     @staticmethod
-    def _corrupted(asset_id: str) -> None:
+    def _corrupted(asset_id: str) -> NoReturn:
         raise HarnessError(
             "ASSET_CORRUPTED",
             "The asset no longer matches its committed manifest.",

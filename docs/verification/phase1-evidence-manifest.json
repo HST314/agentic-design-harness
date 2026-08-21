@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "acceptance_items": [
+    {"rfc_item": 1, "claim": "Create tasks and preserve multimodal input descriptions", "commands": ["make test"], "evidence_files": ["tests/integration/test_app.py", "tests/integration/test_assets.py"]},
+    {"rfc_item": 2, "claim": "Generate three Image cards and start under manual or auto policy", "commands": ["make g4-e2e"], "evidence_files": ["tests/e2e/test_g4_multi_image_agent.py"]},
+    {"rfc_item": 3, "claim": "Run three isolated Image processes, ports and workspaces", "commands": ["make g4-e2e"], "evidence_files": ["tests/e2e/test_g4_multi_image_agent.py", "tests/integration/test_supervisor.py"]},
+    {"rfc_item": 4, "claim": "Inspect and control every instance from the product UI", "commands": ["make frontend-e2e"], "evidence_files": ["frontend/e2e/shell.spec.ts", "frontend/src/main.ts"]},
+    {"rfc_item": 5, "claim": "Allocate complete credential pairs 1-2-3-1 and keep them sticky", "commands": ["make g4-e2e"], "evidence_files": ["tests/e2e/test_g4_multi_image_agent.py", "tests/integration/test_credentials.py"]},
+    {"rfc_item": 6, "claim": "Apply local configuration and force global overwrite", "commands": ["make g4-e2e"], "evidence_files": ["tests/e2e/test_g4_multi_image_agent.py", "tests/integration/test_configuration.py"]},
+    {"rfc_item": 7, "claim": "Enforce task, shared and private workspace boundaries", "commands": ["make test"], "evidence_files": ["tests/integration/test_assets.py", "tests/integration/test_supervisor.py"]},
+    {"rfc_item": 8, "claim": "Publish real delivery files and verified manifests", "commands": ["make g3-e2e"], "evidence_files": ["tests/e2e/test_g3_real_image_agent.py", "tests/integration/test_assets.py"]},
+    {"rfc_item": 9, "claim": "Browse, preview and download verified shared resources", "commands": ["make frontend-e2e"], "evidence_files": ["tests/integration/test_app.py", "frontend/e2e/shell.spec.ts"]},
+    {"rfc_item": 10, "claim": "Freeze approval owners and preserve FIFO inbox order", "commands": ["make test"], "evidence_files": ["tests/integration/test_approvals.py", "frontend/e2e/shell.spec.ts"]},
+    {"rfc_item": 11, "claim": "Show instance and task Token totals without treating missing data as zero", "commands": ["make frontend-e2e"], "evidence_files": ["tests/integration/test_usage_budget.py", "frontend/e2e/shell.spec.ts"]},
+    {"rfc_item": 12, "claim": "Create deep-link notifications for terminal and waiting states", "commands": ["make test"], "evidence_files": ["tests/integration/test_approvals.py", "tests/integration/test_application_service.py"]},
+    {"rfc_item": 13, "claim": "Survive process loss and control-plane restart without replay", "commands": ["make g4-e2e"], "evidence_files": ["tests/e2e/test_g4_multi_image_agent.py", "tests/crash/test_state_store_recovery.py"]},
+    {"rfc_item": 14, "claim": "Complete Image-only and represent unavailable PPT topology honestly", "commands": ["make g3-e2e", "make test"], "evidence_files": ["tests/e2e/test_g3_real_image_agent.py", "tests/integration/test_domain_commands.py"]},
+    {"rfc_item": 15, "claim": "Block required PPT until real delivery or authorized plan revision", "commands": ["make test"], "evidence_files": ["tests/integration/test_domain_commands.py", "tests/test_contracts.py"]},
+    {"rfc_item": 16, "claim": "Aggregate parallel running and waiting-approval states deterministically", "commands": ["make test"], "evidence_files": ["tests/integration/test_domain_commands.py", "tests/test_contracts.py"]},
+    {"rfc_item": 17, "claim": "Cancel one process while preserving peers and audit/workspace evidence", "commands": ["make g4-e2e"], "evidence_files": ["tests/e2e/test_g4_multi_image_agent.py", "tests/integration/test_supervisor.py"]},
+    {"rfc_item": 18, "claim": "Enforce concurrent retry count, Token and optional cost gates with human one-shot override", "commands": ["make test"], "evidence_files": ["tests/integration/test_usage_budget.py", "tests/integration/test_g4_api.py"]}
+  ]
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,10 @@ class ApplicationTests(unittest.TestCase):
                 self.assertEqual(invalid.status_code, 422)
                 self.assertEqual(invalid.json()["error"]["code"], "VALIDATION_ERROR")
                 self.assertNotIn("traceback", invalid.text.lower())
+                openapi = client.get("/openapi.json").json()
+                create_schema = openapi["components"]["schemas"]["CreateTaskRequest"]
+                self.assertTrue(create_schema["examples"])
+                self.assertIn("/api/v1/tasks/{task_id}/events", openapi["paths"])
             self.assertFalse(app.state.container.store.writer_lease.acquired)
 
     def test_g2_task_plan_and_instance_read_apis_use_application_boundary(self) -> None:
@@ -250,6 +255,127 @@ class ApplicationTests(unittest.TestCase):
                 )
                 self.assertEqual(download.content, b"# API brief\n")
                 self.assertEqual(download.headers["x-content-sha256"], brief["sha256"])
+
+                current_revision = container.store.task.revision("t_api_g2", "t_api_g2")
+                imported_via_api = client.post(
+                    "/api/v1/tasks/t_api_g2/assets",
+                    json={
+                        "filename": "api-note.txt",
+                        "content_base64": base64.b64encode(b"controlled API import").decode(),
+                        "description": "Imported through the versioned API",
+                        "operation_id": "import_api_note",
+                        "envelope": self._envelope("import-api-note", current_revision),
+                    },
+                )
+                self.assertEqual(imported_via_api.status_code, 200, imported_via_api.text)
+                self.assertTrue(
+                    imported_via_api.json()["manifest"]["relative_path"].endswith(
+                        "/api-note.txt"
+                    )
+                )
+                invalid_import = client.post(
+                    "/api/v1/tasks/t_api_g2/assets",
+                    json={
+                        "filename": "invalid.txt",
+                        "content_base64": "%%%not-base64%%%",
+                        "description": "invalid",
+                        "operation_id": "import_invalid_note",
+                        "envelope": self._envelope("import-invalid-note", current_revision),
+                    },
+                )
+                self.assertEqual(invalid_import.status_code, 422)
+                self.assertEqual(
+                    invalid_import.json()["error"]["code"], "ASSET_VALIDATION_FAILED"
+                )
+
+                task_approvals = client.get("/api/v1/tasks/t_api_g2/approvals")
+                self.assertEqual(task_approvals.status_code, 200, task_approvals.text)
+                self.assertEqual(task_approvals.json()["items"][0]["approval_id"], approval_id)
+                events = client.get("/api/v1/tasks/t_api_g2/events")
+                self.assertEqual(events.status_code, 200, events.text)
+                self.assertTrue(events.json()["items"])
+                serialized_events = events.text.lower()
+                for forbidden in ("snapshot", "idempotency_key", "api_key", "command_result"):
+                    self.assertNotIn(forbidden, serialized_events)
+                self.assertEqual(
+                    client.get("/api/v1/tasks?cursor=not-a-cursor").json()["error"]["code"],
+                    "VALIDATION_ERROR",
+                )
+
+                instance_detail = client.get("/api/v1/instances/i_api_g2?refresh=false")
+                self.assertEqual(instance_detail.json()["credential"]["key_tail"], "i-g2")
+                self.assertNotIn("not-a-secret-api-g2", instance_detail.text)
+
+                created_second = client.post(
+                    "/api/v1/tasks",
+                    json={
+                        "task_id": "t_api_g5_page",
+                        "title": "Pagination task",
+                        "goal": "Prove stable keyset pagination.",
+                        "master_owner": "master_default",
+                        "start_policy": "manual",
+                        "input_manifest": "inputs/manifests/input.json",
+                        "envelope": self._envelope("create-api-g5-page", 0),
+                    },
+                )
+                self.assertEqual(created_second.status_code, 200, created_second.text)
+                first_page = client.get("/api/v1/tasks?limit=1&order=asc").json()
+                self.assertTrue(first_page["page"]["has_more"])
+                second_page = client.get(
+                    "/api/v1/tasks",
+                    params={
+                        "limit": 1,
+                        "order": "asc",
+                        "cursor": first_page["page"]["next_cursor"],
+                    },
+                ).json()
+                self.assertNotEqual(
+                    first_page["items"][0]["task_id"], second_page["items"][0]["task_id"]
+                )
+
+                current_revision = container.store.task.revision("t_api_g2", "t_api_g2")
+                cancelled = client.post(
+                    "/api/v1/tasks/t_api_g2/cancel",
+                    json={
+                        "operation_id": "cancel_api_g5_task",
+                        "envelope": self._envelope("cancel-api-g5-task", current_revision),
+                    },
+                )
+                self.assertEqual(cancelled.status_code, 200, cancelled.text)
+                self.assertEqual(cancelled.json()["task"]["status"], "CANCELLED")
+                cancelled_replay = client.post(
+                    "/api/v1/tasks/t_api_g2/cancel",
+                    json={
+                        "operation_id": "cancel_api_g5_task",
+                        "envelope": self._envelope(
+                            "cancel-api-g5-task", current_revision
+                        ),
+                    },
+                )
+                self.assertEqual(cancelled_replay.status_code, 200, cancelled_replay.text)
+                self.assertEqual(cancelled_replay.json(), cancelled.json())
+                archived = client.post(
+                    "/api/v1/instances/i_api_g2/archive",
+                    json={
+                        "operation_id": "archive_api_g5_instance",
+                        "envelope": self._envelope(
+                            "archive-api-g5-instance", cancelled.json()["task_revision"]
+                        ),
+                    },
+                )
+                self.assertEqual(archived.status_code, 200, archived.text)
+                self.assertEqual(archived.json()["instance"]["status"], "ARCHIVED")
+                archived_replay = client.post(
+                    "/api/v1/instances/i_api_g2/archive",
+                    json={
+                        "operation_id": "archive_api_g5_instance",
+                        "envelope": self._envelope(
+                            "archive-api-g5-instance", cancelled.json()["task_revision"]
+                        ),
+                    },
+                )
+                self.assertEqual(archived_replay.status_code, 200, archived_replay.text)
+                self.assertEqual(archived_replay.json(), archived.json())
 
     @staticmethod
     def _envelope(key: str, expected_revision: int) -> dict[str, object]:

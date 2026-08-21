@@ -7,7 +7,7 @@ import re
 from copy import deepcopy
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -353,7 +353,7 @@ class ImageAgentAdapter:
             {"idempotency_key": operation_id},
             expected_statuses=(200, 202),
         )
-        self._require_job(job)
+        job = self._require_job(job)
         state.update(
             {
                 "operation_id": operation_id,
@@ -379,7 +379,7 @@ class ImageAgentAdapter:
         if isinstance(job_id, str):
             base_url = self._base_url(task_id, instance_id)
             current = self._request(base_url, "GET", f"/api/jobs/{job_id}")
-            self._require_job(current)
+            current = self._require_job(current)
             job_status = current["status"]
             if job_status in _ACTIVE_JOB_STATES:
                 cancelled = self._request(
@@ -388,7 +388,7 @@ class ImageAgentAdapter:
                     f"/api/jobs/{job_id}/cancel",
                     {},
                 )
-                self._require_job(cancelled)
+                cancelled = self._require_job(cancelled)
                 job_status = cancelled["status"]
         state.update(
             {
@@ -411,7 +411,7 @@ class ImageAgentAdapter:
         job = None
         if state.get("job_id"):
             job = self._request(base_url, "GET", f"/api/jobs/{state['job_id']}")
-            self._require_job(job)
+            job = self._require_job(job)
         timeline = self._request(
             base_url,
             "GET",
@@ -421,6 +421,8 @@ class ImageAgentAdapter:
         cursor = self._validate_timeline(timeline, int(state["timeline_cursor"]))
         state["timeline_cursor"] = cursor
         view = self._request(base_url, "GET", f"/api/projects/{instance_id}")
+        if view is None:
+            self._protocol_error("Image Agent returned an empty project response.")
         observation = self._observation(view, job, cursor, state.get("compatibility"))
         state["last_observation"] = {
             "status": observation.status,
@@ -458,7 +460,7 @@ class ImageAgentAdapter:
             request_payload,
             expected_statuses=(200, 202),
         )
-        self._require_job(job)
+        job = self._require_job(job)
         state = self._state(task_id, instance_id)
         state.update({"operation_id": operation_id, "job_id": job["job_id"]})
         self._write_state(task_id, instance_id, state)
@@ -753,7 +755,7 @@ class ImageAgentAdapter:
             )
         if job_status in _ACTIVE_JOB_STATES:
             return AdapterObservation(status="RUNNING", details=details)
-        if job_status in _FAILED_JOB_STATES:
+        if job is not None and job_status in _FAILED_JOB_STATES:
             details["error"] = deepcopy(job.get("error"))
             return AdapterObservation(status="FAILED", details=details)
         if failed_step:
@@ -901,7 +903,7 @@ class ImageAgentAdapter:
         return value
 
     @staticmethod
-    def _require_job(job: dict[str, Any] | None) -> None:
+    def _require_job(job: dict[str, Any] | None) -> dict[str, Any]:
         if (
             not isinstance(job, dict)
             or not isinstance(job.get("job_id"), str)
@@ -949,6 +951,7 @@ class ImageAgentAdapter:
                 ):
                     ImageAgentAdapter._protocol_error("Image Agent returned an invalid job record.")
                 previous_sequence = event["seq"]
+        return job
 
     @staticmethod
     def _validate_timeline(timeline: dict[str, Any] | None, previous: int) -> int:
@@ -970,7 +973,7 @@ class ImageAgentAdapter:
             ):
                 ImageAgentAdapter._protocol_error("Image Agent returned an invalid timeline page.")
             sequences.append(item["sequence"])
-        cursor = timeline.get("next_cursor")
+        cursor = timeline["next_cursor"]
         if (
             any(sequence <= previous for sequence in sequences)
             or any(current <= prior for prior, current in pairwise(sequences))
@@ -1066,5 +1069,5 @@ class ImageAgentAdapter:
         atomic_write_json(self._state_path(task_id, instance_id), state)
 
     @staticmethod
-    def _protocol_error(message: str) -> None:
+    def _protocol_error(message: str) -> NoReturn:
         raise HarnessError("VALIDATION_ERROR", message)
