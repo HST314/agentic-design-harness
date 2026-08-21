@@ -43,7 +43,7 @@ class JsonFormatter(logging.Formatter):
         fields = getattr(record, "fields", None)
         if isinstance(fields, dict):
             payload.update(redact(fields))
-        if record.exc_info:
+        if record.exc_info and record.exc_info[0] is not None:
             payload["exception_type"] = record.exc_info[0].__name__
         return json.dumps(redact(payload), ensure_ascii=False, separators=(",", ":"))
 

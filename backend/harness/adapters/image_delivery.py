@@ -6,14 +6,14 @@ import hashlib
 import os
 import stat
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ..core.errors import HarnessError
 
 
 def stage_final_delivery(
     project_root: Path,
-    relative: Path,
+    relative: PurePosixPath,
     destination: Path,
     *,
     expected_sha256: str,

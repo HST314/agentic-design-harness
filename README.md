@@ -3,10 +3,10 @@
 单机平面设计多智能体控制平面。系统由 Master Agent 与人工共同编排任务，
 通过稳定契约管理彼此隔离的 Image、PPT 及后续专业 Agent。
 
-当前 `main` 已完成 RFC v0.2 的 G4 用量、预算与多实例门禁：在 G3 人工介入和
-受控交付闭环上增加标准化 Token 用量、任务级自动重试预算、人工单次越权、
-Image 配置热应用/取消/恢复，以及 3 个真实离线 Image 进程联调。它仍不是完整
-Phase 1 产品；分页、完整六页产品界面、最终对抗验收和发布证据包属于 G5。
+当前 `main` 已完成 RFC v0.2 的 G5 产品与发布收口：在 G4 多实例、用量和预算门禁
+上补齐稳定游标分页、公开审计投影、OpenAPI 示例、Master 调用指南、任务及实例
+生命周期入口，以及概览、实例、资源、审批、Token、事件六个统一产品视图。最终
+门禁覆盖类型检查、依赖漏洞审计、浏览器验收、真实离线 Image 闭环和 18 条证据包。
 
 ## 当前能力
 
@@ -22,7 +22,7 @@ Phase 1 产品；分页、完整六页产品界面、最终对抗验收和发布
   TaskCard 映射/隔离启动/HTTP 观测，以及 PPT 不可运行契约占位；
 - `backend/harness/api`：任务/实例、审批/收件箱、资源、usage、retry-budget、
   config/key-pool 及实例取消接口；
-- `frontend/`：任务、实例、审批收件箱、资源、Token/费用/预算和脱敏配置管理，
+- `frontend/`：任务概览、实例、审批、资源、Token/费用/预算、事件和脱敏配置管理，
   含响应式布局、键盘操作、防重复提交和无障碍状态反馈；
 - `contracts/v1/`：Phase 0 冻结的跨模块事实源及 consumer-first TaskCard 1.1；
 - `tests/`：契约、单元、集成和崩溃注入测试，其中原 P0 46 条保持全绿。
@@ -43,6 +43,9 @@ npm ci
 cd ..
 
 make check
+
+# 包含 Pyright 与 Python/npm 依赖漏洞审计
+make verify
 ```
 
 `make check` 依次执行运行时及 P0 契约测试、Ruff、compileall、secret scan、
@@ -65,6 +68,9 @@ make g3-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 
 # G4 三进程、凭据轮转、配置覆盖、用量、取消与无重放恢复门禁
 make g4-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+
+# G5 全门禁：verify + G3/G4 真实离线进程 + Playwright + 18 条证据索引
+make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
 
 ## 启动空服务
@@ -96,6 +102,9 @@ make serve
   完整凭据对管理，响应不回显明文 Key；
 - `POST /api/v1/instances/{id}/cancel`：先请求 Adapter 停止活动 job，再以进程组作为
   权威取消边界。
+- `GET /api/v1/tasks/{id}/events`：只读公开审计投影，不暴露快照、命令载荷或幂等键；
+- 任务、审批、收件箱、资源和事件列表统一使用稳定游标分页；
+- 任务取消和实例 `start/restart/cancel/archive` 均要求 Actor、幂等键和 revision。
 
 可复制 `config/harness.example.yaml` 并通过 `HARNESS_CONFIG` 指定。运行状态写入
 `control-data/`，任务工作区写入 `workspace/tasks/`，二者均不会进入版本控制。
@@ -113,3 +122,6 @@ make serve
 
 完整范围、状态语义与 18 条 Phase 1 验收标准见 [RFC v0.2](docs/rfc-v0.2.md)，
 测试追踪见 [Phase 1 验收矩阵](docs/verification/phase1-traceability.md)。
+Master 调用方式见 [API 指南](docs/master-api-guide.md)，部署、备份、恢复与回滚见
+[运行手册](docs/operations.md)，G5 证据入口见
+[发布验收说明](docs/verification/g5-release.md)。

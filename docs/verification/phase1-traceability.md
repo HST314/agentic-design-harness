@@ -1,30 +1,30 @@
 # Phase 1 acceptance traceability
 
-This matrix maps RFC v0.2 section 19 to the work package and executable evidence
-that must close it. `G4 complete` means usage, retry budgets, Image runtime control
-and the real three-process gate are closed; it does not claim the final G5 product,
-adversarial and release evidence packages.
+This matrix maps RFC v0.2 section 19 to the work package and executable evidence.
+G5 closes the product UI, public API, adversarial/recovery suite and reproducible
+release-evidence package. The PPT Adapter remains honestly unavailable; no row
+claims a real PPT delivery.
 
 | RFC 19 | Work package | Evidence | Current status |
 | --- | --- | --- | --- |
-| 1 | P1-03/P1-04 | task/input command tests; `test_assets` import/selection tests | service complete; UI pending |
-| 2 | P1-03/P1-07/P1-08 | plan tests plus G2 and G4 real offline Image launches | G4 multi-instance complete |
-| 3 | P1-07/P1-14 | supervisor isolation tests plus `test_g4_multi_image_agent` | G4 real three-process gate complete |
-| 4 | P1-07/P1-12 | instance API, G2 real-Agent gate and Playwright task→instance→workbench flow | G3 single-instance complete |
-| 5 | P1-05/P1-13 | credential service tests plus G4 real `1→2→3→1` allocation | G4 gate complete; final security audit pending |
-| 6 | P1-06 | configuration service tests plus G4 real local→global hot-apply overwrite | G4 gate complete |
+| 1 | P1-03/P1-04 | task/input commands, controlled asset import and task-panel browser tests | G5 complete |
+| 2 | P1-03/P1-07/P1-08 | plan tests plus G2 and G4 real offline Image launches | G5 complete |
+| 3 | P1-07/P1-14 | supervisor isolation tests plus `test_g4_multi_image_agent` | G5 complete |
+| 4 | P1-07/P1-12 | instance API and Playwright task→instance→workbench/deep-link flow | G5 complete |
+| 5 | P1-05/P1-13 | credential adversarial tests, redacted UI and real `1→2→3→1` allocation | G5 complete |
+| 6 | P1-06 | configuration tests, revision UI and real local→global overwrite | G5 complete |
 | 7 | P1-02/P1-04 | layout plus traversal/symlink/browser-boundary tests | complete |
 | 8 | P1-04 | publication visibility, forged-file/manifest, crash and corruption tests | complete |
 | 9 | P1-11/P1-12 | Asset Service safe list/preview/download tests; API and resource-browser E2E | complete |
 | 10 | P1-09 | owner freeze, monotonic sequence, revision/idempotency and restart-dedupe tests | complete |
-| 11 | P1-08/P1-10/P1-12 | `test_usage_budget`, G4 API and Playwright usage UI | G4 gate complete |
+| 11 | P1-08/P1-10/P1-12 | `test_usage_budget`, G4 API and Playwright usage UI | G5 complete |
 | 12 | P1-09 | unread/handled reducer, notification dedupe and approval deep-link browser tests | complete |
-| 13 | P1-02/P1-07/P1-13 | launch/attempt tests plus G4 control-plane restart with stable real job IDs | G4 recovery gate complete; crash-kill final E2E pending |
-| 14 | P1-03/P1-08 | topology replacement/recovery tests, typed unavailable Adapter and real Image E2E | G2 single-instance complete |
+| 13 | P1-02/P1-07/P1-13 | crash-window tests plus G4 control-plane restart with stable real job IDs | G5 complete |
+| 14 | P1-03/P1-08 | topology recovery, typed unavailable PPT Adapter and real Image E2E | G5 complete |
 | 15 | P1-03 | delayed required-PPT blocking tests | complete |
 | 16 | P1-03/P1-09 | aggregation priority tests | complete |
-| 17 | P1-07/P1-08 | process-group tests plus real Adapter job cancellation with surviving peers | G4 gate complete |
-| 18 | P1-10/P1-13 | concurrent/replay/replacement/unknown-cost budget adversarial tests | G4 gate complete |
+| 17 | P1-07/P1-08 | process-group tests plus real Adapter job cancellation with surviving peers | G5 complete |
+| 18 | P1-10/P1-13 | concurrent/replay/replacement/unknown-cost budget adversarial tests | G5 complete |
 
 ## P1-00 fixtures
 
@@ -87,3 +87,17 @@ adversarial and release evidence packages.
 - Exit gate: `make g4-e2e` launches three pinned real Image processes offline, proves isolated
   PIDs/ports/directories, `1→2→3→1` credential allocation, local-to-global config overwrite,
   explicit unreported usage, restart recovery with unchanged job IDs, and independent cancel.
+
+## G5 gate evidence
+
+- Public API: stable opaque keyset pagination, controlled asset import, task-scoped approvals,
+  redacted audit events and task/instance lifecycle routes run blocking work off the event loop.
+- Product UI: Playwright covers task overview, instance, resources, approvals, Token and event
+  views, including keyboard navigation, 375px/landscape overflow, async disabling and error recovery.
+- Release quality: `make verify` adds full-project Pyright and Python/npm vulnerability audits;
+  startup fails closed when Linux/POSIX process primitives are unavailable.
+- Operations: `docs/operations.md` specifies installation, backup, restore, log redaction,
+  upgrade/rollback and single-machine limits. `docs/master-api-guide.md` freezes the Master-facing
+  command, revision, pagination, error and secret-handling conventions.
+- Evidence: `make evidence` validates exactly RFC items 1–18 and produces a commit-bound file hash
+  index from `docs/verification/phase1-evidence-manifest.json`.

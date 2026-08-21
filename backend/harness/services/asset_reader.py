@@ -7,7 +7,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, NoReturn
 
 from ..core.errors import HarnessError
 from .asset_browser import committed_browser_event
@@ -115,7 +115,7 @@ def _open_beneath(root: Path, parts: tuple[str, ...], asset_id: str) -> BinaryIO
             os.close(current_fd)
 
 
-def _corrupted(asset_id: str) -> None:
+def _corrupted(asset_id: str) -> NoReturn:
     raise HarnessError(
         "ASSET_CORRUPTED",
         "The asset no longer matches its committed manifest.",

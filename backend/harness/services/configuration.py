@@ -8,7 +8,7 @@ from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -124,7 +124,9 @@ class ImageModelConfig(BaseModel):
 def offline_image_model_config() -> ImageModelConfig:
     """Return a complete, role-correct routing table for offline Image runs."""
 
-    roles = {
+    roles: dict[
+        str, Literal["reasoning_llm", "text_to_image_model", "vision_language_model"]
+    ] = {
         "intake_clarify": "reasoning_llm",
         "confirmation_build": "reasoning_llm",
         "initial_candidate_generation": "text_to_image_model",
@@ -764,7 +766,7 @@ class ConfigurationService:
         return instance["status"] in {"STARTING", "RUNNING", "WAITING_APPROVAL"}
 
     @staticmethod
-    def _revision_error(expected: int, actual: int) -> None:
+    def _revision_error(expected: int, actual: int) -> NoReturn:
         raise HarnessError(
             "REVISION_CONFLICT",
             "The configuration revision changed before this command committed.",

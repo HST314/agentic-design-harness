@@ -171,11 +171,16 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                             detail["observation"]["details"]["job_id"],
                             recovered_job_ids[instance_id],
                         )
+                    task_revision = recovered_client.get(
+                        f"/api/v1/tasks/{self.task_id}"
+                    ).json()["task_revision"]
                     cancelled = recovered_client.post(
                         f"/api/v1/instances/{self.instance_ids[1]}/cancel",
                         json={
                             "operation_id": "cancel-g4-image-2",
-                            "envelope": self._envelope("cancel-g4-image-2-envelope", 0),
+                            "envelope": self._envelope(
+                                "cancel-g4-image-2-envelope", task_revision
+                            ),
                         },
                     )
                     self.assertEqual(cancelled.status_code, 200, cancelled.text)

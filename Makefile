@@ -6,13 +6,16 @@ IMAGE_AGENT_ROOT ?= ../image_agent_mvp
 IMAGE_AGENT_DEPS ?= .runtime/image-agent-deps
 IMAGE_AGENT_ENV_STAMP := $(IMAGE_AGENT_DEPS)/.requirements-installed
 
-.PHONY: test test-env lint compile secret-scan boundary-check check serve frontend-check image-agent-env g2-e2e g3-e2e g4-e2e
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit boundary-check check verify serve frontend-check frontend-e2e image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
 
 lint: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash tests/e2e
+
+typecheck: test-env
+	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m pyright backend/harness
 
 compile:
 	$(PYTHON) -m compileall -q backend/harness scripts tests
@@ -23,11 +26,22 @@ secret-scan:
 boundary-check:
 	$(PYTHON) scripts/check_agent_import_boundary.py backend/harness
 
+dependency-audit: test-env
+	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m pip_audit \
+		-r requirements-runtime.txt --disable-pip --no-deps --progress-spinner off \
+		--cache-dir "$(TEST_DEPS)/.pip-audit-cache"
+	npm --prefix frontend audit --omit=dev --audit-level=high
+
 frontend-check:
 	npm --prefix frontend run check
 	npm --prefix frontend run build
 
+frontend-e2e:
+	npm --prefix frontend run test:e2e
+
 check: test lint compile secret-scan boundary-check frontend-check
+
+verify: check typecheck dependency-audit
 
 serve: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m harness
@@ -61,6 +75,11 @@ g4-e2e: test-env image-agent-env
 	HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT="$(abspath $(IMAGE_AGENT_DEPS))" \
 	PYTHONPATH="$(PYTHONPATH_VALUE):tests" \
 	$(PYTHON) -m unittest tests.e2e.test_g4_multi_image_agent -v
+
+g5-e2e: verify g3-e2e g4-e2e frontend-e2e evidence
+
+evidence:
+	$(PYTHON) scripts/generate_phase1_evidence.py
 
 test-env: $(TEST_ENV_STAMP)
 

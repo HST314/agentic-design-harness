@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
@@ -65,5 +65,5 @@ def validate_plan(contracts: ContractRegistry, plan: dict[str, Any]) -> None:
         _invalid("Every instance requires one task card.")
 
 
-def _invalid(message: str) -> None:
+def _invalid(message: str) -> NoReturn:
     raise HarnessError("VALIDATION_ERROR", message)
