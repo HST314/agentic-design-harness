@@ -943,8 +943,11 @@ class AssetService:
                         "mime_type": mime_type,
                         "size_bytes": size,
                         "sha256": sha256,
-                        "previewable": mime_type.startswith("image/")
-                        or mime_type in SAFE_PREVIEW_MIME,
+                        "previewable": size <= self.preview_limit_bytes
+                        and (
+                            mime_type.startswith("image/")
+                            or mime_type in SAFE_PREVIEW_MIME
+                        ),
                     }
                 )
         return entries

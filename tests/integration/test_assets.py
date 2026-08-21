@@ -140,6 +140,27 @@ class AssetServiceTests(unittest.TestCase):
             target.unlink()
             backup.rename(target)
 
+    def test_file_listing_does_not_offer_a_preview_that_the_endpoint_rejects(self) -> None:
+        self.assets.preview_limit_bytes = 8
+        imported = self.assets.import_bytes(
+            "t_assets",
+            filename="large-preview.md",
+            content=b"# larger than preview limit\n",
+            description="Preview contract boundary",
+            source="user_upload",
+            idempotency_key="large-preview-boundary",
+        )
+
+        file_entry = next(
+            item
+            for item in self.assets.list_files("t_assets", "inputs")
+            if item["relative_path"] == imported["relative_path"]
+        )
+        self.assertFalse(file_entry["previewable"])
+        with self.assertRaises(HarnessError) as rejected:
+            self.assets.preview("t_assets", imported["relative_path"])
+        self.assertEqual(rejected.exception.code, "ASSET_VALIDATION_FAILED")
+
     def test_path_traversal_symlinks_and_unknown_mime_are_rejected(self) -> None:
         with self.assertRaises(HarnessError) as absolute:
             self.assets.preview("t_assets", "/etc/passwd")
