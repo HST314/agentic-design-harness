@@ -1,89 +1,98 @@
-# Phase 1 安装、恢复与发布运行手册
+# 运行手册
 
-本文面向已完成本地安装的开发者和单机运维人员。首次启动、Windows CMD/PowerShell 区别与双终端说明见[安装与启动指南](getting-started.md)；常见启动错误见[问题排查](troubleshooting.md)。
+本文面向单机运维和发布人员。首次安装使用 [QUICKSTART](../QUICKSTART.md)；Ark 凭据与模型使用[配置指南](configuration.md)；稳定错误签名见[故障排查](troubleshooting.md)。
 
-## 运行前置
+## 支持边界与启动
 
-本版本支持 Linux 与 Windows 单机运行。Linux 后端使用 `/proc`、POSIX 文件锁和进程组；Windows 后端使用 Win32 字节锁、进程组和带 `KILL_ON_JOB_CLOSE` 的 Job Object。两者都会校验进程创建身份以避免 PID 复用，并在取消或 Harness 异常退出时终止完整 Agent 进程树；能力检查失败时拒绝启动。
-
-最低环境：Python 3.10+、Node.js 22+、npm，以及可执行的固定 Image Agent 源码与依赖目录。默认只绑定 `127.0.0.1:18080`；如需跨主机访问，应在受信反向代理后部署并另行配置网络访问控制，不能直接把控制面暴露到公网。
+支持 Windows 与 Linux 的单进程、单写者、本地文件系统部署。Linux 使用文件锁、`fsync` 和进程组；Windows 使用字节锁、刷新写入、原子替换和 Job Object。两者都校验进程创建身份、防止 PID 复用，并在取消或 Harness 退出时终止完整 Agent 进程树。
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
-.venv/bin/python -m pip install --no-deps -e .
-npm --prefix frontend ci
-make PYTHON=.venv/bin/python verify
-make PYTHON=.venv/bin/python g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+python3 scripts/dev.py doctor
+python3 scripts/dev.py start
 ```
 
-CI 在 Windows/Linux 的 Python 3.10 与 3.13 上执行同一组后端门禁，并在两个系统上执行前端单测、构建和 Chromium 回归；Linux 发布作业再连接固定 Image 运行时执行真实进程浏览器闭环。`make verify` 还会严格校验
-Python 锁文件哈希、生成并校验 `build/sbom/` 下的 Python/npm CycloneDX SBOM，
-以及执行单机存储/恢复 CI 基准。资格环境的容量 SLO 与完整基准命令见
-`docs/single-machine-capacity-slo.md`。
+默认只绑定 `127.0.0.1`。当前没有登录、RBAC 或多租户隔离；不得直接监听公网。确需跨主机访问时，应放在受信反向代理、身份认证和网络 ACL 后，并把这些控制视为部署方责任。
 
-Windows CMD 和 PowerShell 不需要 GNU Make：
+## 健康与生命周期
 
-```bat
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m pip install --no-deps -e .
-npm --prefix frontend ci
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m harness
-```
+| 探针 | 含义 | 自动化使用 |
+| --- | --- | --- |
+| `/healthz` | 后端进程存活 | 只用于判断进程是否响应 |
+| `/readyz` | 契约已加载且持有唯一 writer lease | 前端、业务调用和流量切换的唯一就绪依据 |
 
-复制 `config/harness.example.yaml`，通过 `HARNESS_CONFIG` 指向配置文件。凭据只能由受控 API 写入 `control-data/secrets/`，不得写入 YAML、环境样例、Git 或任务工作区。
+后端根路径 `/` 返回 404 是正常行为。进程管理器应发送正常终止信号，等待 Harness 停止监管线程、回收 Agent 进程树并释放 writer lease；不要以强制结束作为日常关闭方式。
 
-## 启动与健康
+## 状态与文件布局
 
-```bash
-make serve
-curl --fail http://127.0.0.1:18080/healthz
-curl --fail http://127.0.0.1:18080/readyz
-```
+- `control-data/`：事件日志、快照、索引、审批、配置投影、恢复意图和权限受限的密钥池。
+- `workspace/tasks/`：输入资产、实例私有工作目录、交付候选、共享资产与 manifests。
+- `.runtime/`：可重建的 Image Agent 隔离依赖和只读运行时制品，不属于业务备份。
+- `agents/image-agent.lock.json`：运行时代码与依赖身份；必须与备份记录的主仓提交配套。
 
-`healthz` 只表示进程存活；只有 `readyz=ready` 才表示契约注册和唯一写者租约已就绪。生产运行器应在收到终止信号后允许 Harness 关闭监管线程并释放 writer lease。
-
-`http://127.0.0.1:18080/` 是未定义的后端根路由，返回 404 不表示服务异常。交互式 API 文档位于 `/docs`。需要 Web 控制台时，还必须在第二个常驻终端运行 `npm --prefix frontend run dev`，然后访问 `http://127.0.0.1:18180/`。
+禁止直接编辑上述业务状态。公开资产是否可见由 manifest 和 publication batch commit 决定，不能靠预置文件或伪造索引恢复。
 
 ## 备份与恢复
 
 一致备份必须同时覆盖 `control-data/` 与 `workspace/tasks/`。
 
-1. 停止新写入，正常退出 Harness；确认 `readyz` 已不可用。
-2. 使用支持权限和符号链接语义的工具复制两个根目录到同一备份 revision。
-3. 保存当前 Git commit、配置文件（不含密钥）和 Image runtime revision。
-4. 恢复到空目录；Linux 保持所有者与 `0700/0600` 权限，Windows 保持目录仅对运行账户和管理员可写。
-5. 使用完全相同的代码、依赖和 Image runtime revision 启动。
-6. 启动恢复会截断不完整 NDJSON 尾部、重建投影/索引、恢复凭据游标和 usage 状态，并对活动实例做不重放对账。
-7. 检查 `recovery-warnings.ndjson`、`readyz`、任务事件和 Agent job ID；不得以重新提交 start/advance 的方式“修复”恢复。
+1. 停止新写入并正常关闭 Harness，确认 `/readyz` 不再可用。
+2. 在同一备份 revision 中复制两个根目录，保留权限、符号链接语义和时间信息。
+3. 记录主仓 commit、Image Agent lock 摘要、非敏感配置和 `delivery_bundle_migration_mode`。
+4. 恢复到空目录，并使用匹配的代码、依赖和 Image lock 启动。
+5. 启动会截断不完整 NDJSON 尾部、重建投影与索引、恢复配置/凭据/usage cursor、对账 publication intent，并观察活动 Agent，而不重放副作用命令。
+6. 检查 `recovery-warnings.ndjson`、`readyz`、任务事件、实例 job ID 和 BundleManifest 可见性。
 
-## 故障排查
+不要通过重新发送 start、advance、approval 或 delivery confirm 来“修复”恢复；这可能制造重复副作用。恢复 warning 需要先定位数据与代码身份，再决定恢复备份或使用专用幂等入口。
 
-启动、终端和前端代理问题的详细诊断命令见[常见问题排查](troubleshooting.md)。运维侧还应检查：
+## 容量与磁盘
 
-- writer lease 冲突：确认没有第二个 Harness 进程使用相同 `control_root`。
-- 端口冲突/健康超时：检查实例事件、固定端口范围和 Agent readiness；不要杀死未通过 PID 身份校验的进程。
-- 代码 identity 不一致：恢复固定源码/依赖 artifact，或创建替代实例；不能让旧实例静默换代码。
-- 资产损坏：校验 manifest、最终文件 SHA-256 和磁盘状态。伪造 manifest 或预置公共文件不能恢复可见性。
-- Token 未上报：这是数据完整性状态，不是 0；检查 Adapter usage 源与 cursor。
-- PPT 必需节点阻塞：一期的正确状态是 `BLOCKED_UNAVAILABLE`，除非授权修订计划，否则不能强制完成。
+容量承诺只覆盖本地 SSD、一个控制面进程和参考机器 4 个独占 x86_64 vCPU / 16 GiB 内存。`config/single-machine-capacity-slo.json` 是阈值事实源：最多 1,000 个保留任务、每任务 25 个控制事件、100 个活动任务、30 个并发专业 Agent 实例、10 GiB 控制面元数据。
 
-## 日志与泄漏控制
+参考包络内的门槛：任务创建与更新 P95 各不超过 500 ms，任务索引读取 P95 不超过 250 ms，干净关闭后的冷恢复不超过 30 s，控制面元数据平均不超过 1 MiB/任务。任务资产受独立文件/任务大小限制，不计入存储基准。
 
-日志、异常、事件和 API 响应不得包含 Authorization、Cookie、API Key、Base URL/Key 完整组合或 Agent stdout/stderr 中的密钥。发布前执行 `make verify`；secret scan、稳定错误响应、脱敏凭据测试和依赖漏洞审计均为硬门禁。共享日志时仍需人工复核路径、用户材料和 Provider 返回内容。
+CI 回归：
 
-## 升级与回滚
+```bash
+make capacity-benchmark
+```
 
-升级前完成一致备份和 `make g5-e2e`。先在恢复副本上运行新版本，验证 `readyz`、Phase 1 的 18 项证据、工作台的 15 项证据与一个离线 Image 闭环，再切换正式目录。
+参考机器资格测试：
 
-回滚只能回到与备份格式、契约 major、Image artifact 相匹配的 commit。若新版本已经提交了旧版本无法识别的事件，不可直接在原目录降级；应恢复升级前备份。禁止用 Git 回滚替代状态目录回滚。
+```bash
+PYTHONPATH=backend:.test-deps python scripts/benchmark_storage_recovery.py --profile qualification --output build/capacity-qualification.json
+```
+
+资格测试使用空的本地 SSD 目录并关闭其他高 I/O 负载。超过支持包络或连续两次资格失败时，应先优化增量索引与事件查找；仍不满足再评估数据库、对象存储和持久队列，不得把单机 SLO 外推为多机承诺。
+
+## 发布门禁与 CI 证据
+
+最低发布候选检查：
+
+```bash
+make check
+make typecheck
+make verify
+```
+
+GitHub Actions 在 Windows/Linux 运行后端、前端和启动器矩阵，在 Linux 对固定 Image runtime 执行真实进程闭环，并生成 SBOM 与文档检查报告。报告、浏览器结果和发布证据作为 CI artifact 保存，不手工提交到 `docs/`。
+
+真实 Ark 验收必须独立执行零费用预检、显式费用确认和一次最小生成；日志与证据不能包含 Key、完整 Base URL、请求/响应正文或图片临时 URL。未提供凭据导致的 skip 不是通过。
+
+## 升级、迁移与回滚
+
+升级前完成一致备份、`make verify`、适用的 Image E2E，并确认 submodule/lock 成对。先在恢复副本运行新版本，验证 ready、TaskCard revision、受管实例、至少两个分支候选、双资产原子发布和幂等重放，再切换正式目录。
+
+交付迁移顺序固定为 `legacy_only → dual_write → bundle_only`。在 `dual_write` 期间对账对象数量、摘要、branch/checkpoint、TaskCard revision 和 publication batch；只有 Windows/Linux 真实验收均通过后才可切换默认值。回滚默认路径或 UI 入口不能删除新 Bundle 数据，旧版本应保留只读能力或恢复升级前备份。
+
+代码回滚必须匹配状态格式、契约 major、主仓 commit 和 Image lock。若新版本已提交旧代码无法识别的事件，禁止直接在原状态目录降级；恢复升级前备份。Git 回滚不能替代数据回滚。
+
+## 日志与安全
+
+- 日志、事件、异常和 API 响应不得包含 Authorization、Cookie、API Key、Key/Base URL 完整组合或 Agent stdout/stderr 中的凭据。
+- `control-data/secrets` 权限只授予运行账户；备份、工单和聊天中同样按秘密处理。
+- 共享诊断材料前删除用户素材、Provider 返回内容、完整本机路径和临时下载 URL。
+- 发布前运行 `python scripts/secret_scan.py .`；发现疑似泄漏时先吊销 Provider Key，再修订凭据池和受影响实例。
 
 ## 已知限制
 
-- 单机、单写者、文件存储；没有数据库、对象存储或多机调度。
-- 无多租户、RBAC、SSO、邮件/IM 通知；部署边界必须由受信网络保证。
-- PPT Agent 一期不运行，只保留契约与诚实的不可用状态。
-- 前端使用轮询，没有 WebSocket；专业 Image 工作流仍通过隔离工作台深链。
-- “无 Harness 人为并发上限”不代表宿主机或 Provider 资源无限。
+当前为文件存储、单写者、前端轮询的本地控制面；无数据库、对象存储、多机调度、高可用、RBAC、SSO 或外部通知。PPT Agent 尚未接入运行时，必需 PPT 节点应保持 `BLOCKED_UNAVAILABLE`，不能强制伪造完成。
