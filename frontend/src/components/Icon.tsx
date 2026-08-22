@@ -1,27 +1,30 @@
-type IconName =
-  | "archive"
-  | "board"
-  | "chevron-left"
-  | "close"
-  | "history"
-  | "file"
-  | "file-check"
-  | "external-link"
-  | "inbox"
-  | "menu"
-  | "message"
-  | "more"
-  | "panel-right"
-  | "plan"
-  | "pin"
-  | "plus"
-  | "search"
-  | "rename"
-  | "retry"
-  | "settings"
-  | "status"
-  | "trash"
-  | "upload";
+export const ICON_NAMES = [
+  "archive",
+  "board",
+  "chevron-left",
+  "close",
+  "history",
+  "file",
+  "file-check",
+  "external-link",
+  "inbox",
+  "menu",
+  "message",
+  "more",
+  "panel-right",
+  "plan",
+  "pin",
+  "plus",
+  "search",
+  "rename",
+  "retry",
+  "settings",
+  "status",
+  "trash",
+  "upload",
+] as const;
+
+export type IconName = (typeof ICON_NAMES)[number];
 
 const iconPaths: Record<IconName, React.JSX.Element> = {
   archive: <><path d="M3 6h18M5 6v14h14V6M9 10h6" /><path d="M4 3h16v3H4z" /></>,

@@ -45,7 +45,12 @@ jobs:
         run: test "$BACKEND_MATRIX_RESULT" = success
 
   frontend:
-    runs-on: ubuntu-latest
+    name: frontend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -57,14 +62,49 @@ jobs:
         working-directory: frontend
       - run: npm run check
         working-directory: frontend
+      - run: npm run test:unit
+        working-directory: frontend
       - run: npm run build
         working-directory: frontend
       - run: npm audit --omit=dev --audit-level=high
         working-directory: frontend
-      - run: npx playwright install --with-deps chromium
+      - name: Install Chromium and Linux browser dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Install Chromium
+        if: runner.os == 'Windows'
+        run: npx playwright install chromium
         working-directory: frontend
       - run: npm run test:e2e
         working-directory: frontend
+
+  workbench-real-image:
+    name: workbench real Image closure
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: HST314/image_agent_mvp
+          ref: 0e559d0153f479c8abefb14613804b8cde486282
+          path: .runtime/image-agent-source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Run production workbench against pinned Image runtime
+        run: make frontend-integration IMAGE_AGENT_ROOT=.runtime/image-agent-source
 
   supply-chain:
     runs-on: ubuntu-latest
@@ -87,3 +127,21 @@ jobs:
         with:
           name: cyclonedx-sbom
           path: build/sbom/*.cdx.json
+
+  release-gate:
+    name: release gate
+    if: ${{ always() }}
+    needs: [backend, frontend, workbench-real-image, supply-chain]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every release job to pass
+        env:
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          REAL_IMAGE_RESULT: ${{ needs.workbench-real-image.result }}
+          SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
+        run: |
+          test "$BACKEND_RESULT" = success
+          test "$FRONTEND_RESULT" = success
+          test "$REAL_IMAGE_RESULT" = success
+          test "$SUPPLY_CHAIN_RESULT" = success

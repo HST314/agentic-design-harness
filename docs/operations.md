@@ -17,7 +17,7 @@ make PYTHON=.venv/bin/python verify
 make PYTHON=.venv/bin/python g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
 
-CI 在 Windows/Linux 的 Python 3.10 与 3.13 上执行同一组后端门禁。`make verify` 还会严格校验
+CI 在 Windows/Linux 的 Python 3.10 与 3.13 上执行同一组后端门禁，并在两个系统上执行前端单测、构建和 Chromium 回归；Linux 发布作业再连接固定 Image 运行时执行真实进程浏览器闭环。`make verify` 还会严格校验
 Python 锁文件哈希、生成并校验 `build/sbom/` 下的 Python/npm CycloneDX SBOM，
 以及执行单机存储/恢复 CI 基准。资格环境的容量 SLO 与完整基准命令见
 `docs/single-machine-capacity-slo.md`。
@@ -76,7 +76,7 @@ curl --fail http://127.0.0.1:18080/readyz
 
 ## 升级与回滚
 
-升级前完成一致备份和 `make g5-e2e`。先在恢复副本上运行新版本，验证 `readyz`、18 项证据索引与一个离线 Image 闭环，再切换正式目录。
+升级前完成一致备份和 `make g5-e2e`。先在恢复副本上运行新版本，验证 `readyz`、Phase 1 的 18 项证据、工作台的 15 项证据与一个离线 Image 闭环，再切换正式目录。
 
 回滚只能回到与备份格式、契约 major、Image artifact 相匹配的 commit。若新版本已经提交了旧版本无法识别的事件，不可直接在原目录降级；应恢复升级前备份。禁止用 Git 回滚替代状态目录回滚。
 

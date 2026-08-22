@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ EXPECTED_GATE_STAGES = [
     ("g3-real-closure", "make g3-e2e"),
     ("g4-multi-instance", "make g4-e2e"),
     ("frontend-browser", "make frontend-e2e"),
+    ("workbench-real-stack", "make frontend-integration"),
 ]
 
 
@@ -32,12 +34,20 @@ def validate_gate_evidence(
     actual_stages = [
         (item.get("name"), item.get("command")) for item in stages
     ]
+    dependencies = gate_result.get("dependencies")
+    image_baseline = (
+        dependencies.get("image_agent") if isinstance(dependencies, dict) else None
+    )
     valid_gate = (
         gate_result.get("verification_command") == "make g5-e2e"
         and gate_result.get("commit") == commit
         and gate_result.get("status") == "PASSED"
         and actual_stages == EXPECTED_GATE_STAGES
         and all(item.get("exit_code") == 0 for item in stages)
+        and isinstance(image_baseline, dict)
+        and isinstance(image_baseline.get("commit"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", image_baseline["commit"]) is not None
+        and image_baseline.get("worktree_clean") is True
     )
     if not valid_gate:
         raise SystemExit("the G5 gate result is failed, incomplete or for another commit")
@@ -104,6 +114,7 @@ def main() -> None:
             "started_at": gate_result["started_at"],
             "completed_at": gate_result["completed_at"],
             "stages": gate_result["stages"],
+            "dependencies": gate_result["dependencies"],
         },
         "gate_log": {
             "path": "build/g5-gate.log",

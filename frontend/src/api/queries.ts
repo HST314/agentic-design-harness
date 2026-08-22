@@ -34,8 +34,13 @@ export const masterSessionQuery = (taskId: string) => queryOptions({
   retry: false,
 });
 
-function visiblePollInterval(interval: number | undefined): number | false {
-  if (typeof document !== "undefined" && document.visibilityState === "hidden") return false;
+export function visiblePollInterval(
+  interval: number | undefined,
+  visibilityState: DocumentVisibilityState | undefined = (
+    typeof document === "undefined" ? undefined : document.visibilityState
+  ),
+): number | false {
+  if (visibilityState === "hidden") return false;
   return interval ?? 5_000;
 }
 
