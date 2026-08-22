@@ -725,6 +725,7 @@ class SchemaTests(unittest.TestCase):
             "task-navigation-metadata.json": "task-navigation-metadata.schema.json",
             "token-usage.json": "token-usage-event.schema.json",
             "work-item.json": "work-item.schema.json",
+            "work-item-projection.json": "work-item-projection.schema.json",
         }
         self.assertEqual(
             {path.name for path in OBJECT_EXAMPLES.glob("*.json")},

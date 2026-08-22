@@ -18,6 +18,7 @@ ROOT_TYPES = (
     ("main-task.schema.json", "ContractMainTask"),
     ("stage.schema.json", "ContractStage"),
     ("work-item.schema.json", "ContractWorkItem"),
+    ("work-item-projection.schema.json", "ContractWorkItemProjection"),
     ("task-intake.schema.json", "ContractTaskIntake"),
     ("master-message.schema.json", "ContractMasterMessage"),
     ("master-thread.schema.json", "ContractMasterThread"),

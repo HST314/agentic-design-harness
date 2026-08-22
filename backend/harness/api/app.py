@@ -33,6 +33,7 @@ from ..services.retry_budget import RetryBudgetService
 from ..services.supervisor import ProcessSupervisor
 from ..services.task_intakes import TaskIntakeService
 from ..services.usage import UsageService
+from ..services.work_item_projections import WorkItemProjectionService
 from ..storage.atomic import read_json
 from ..storage.store import FileStateStore
 from .v1 import build_v1_router
@@ -56,6 +57,7 @@ class Container:
     application: HarnessApplicationService
     task_intakes: TaskIntakeService
     master_threads: MasterThreadService
+    work_items: WorkItemProjectionService
 
 
 class ContractValidationRequest(BaseModel):
@@ -147,6 +149,13 @@ def build_container(settings: HarnessSettings) -> Container:
         adapters,
         master_gateway,
     )
+    work_items = WorkItemProjectionService(
+        store,
+        approvals,
+        assets,
+        retry_budgets,
+        adapters,
+    )
     return Container(
         settings=settings,
         contracts=contracts,
@@ -164,6 +173,7 @@ def build_container(settings: HarnessSettings) -> Container:
         application=application,
         task_intakes=task_intakes,
         master_threads=master_threads,
+        work_items=work_items,
     )
 
 

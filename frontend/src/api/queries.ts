@@ -33,3 +33,24 @@ export const masterSessionQuery = (taskId: string) => queryOptions({
   refetchIntervalInBackground: false,
   retry: false,
 });
+
+function visiblePollInterval(interval: number | undefined): number | false {
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return false;
+  return interval ?? 5_000;
+}
+
+export const workItemsQuery = (taskId: string) => queryOptions({
+  queryKey: ["work-items", taskId],
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.workItems(taskId, signal),
+  refetchInterval: (query) => visiblePollInterval(query.state.data?.refresh_after_ms),
+  refetchIntervalInBackground: false,
+  retry: false,
+});
+
+export const workItemDetailQuery = (taskId: string, workItemId: string) => queryOptions({
+  queryKey: ["work-items", taskId, workItemId],
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.workItem(taskId, workItemId, signal),
+  refetchInterval: (query) => visiblePollInterval(query.state.data?.refresh_after_ms),
+  refetchIntervalInBackground: false,
+  retry: false,
+});

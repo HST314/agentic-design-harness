@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, File, Form, Query, UploadFile
+from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
@@ -339,6 +340,27 @@ def build_v1_router(container: Container) -> APIRouter:
             "task_revision": session["task_revision"],
             "thread_revision": session["thread_revision"],
         }
+
+    @router.get("/tasks/{task_id}/work-items", tags=["tasks"])
+    async def list_work_items(task_id: str, request: Request) -> Response:
+        result = await run_in_threadpool(container.work_items.list, task_id)
+        etag = f'"{result["projection_revision"]}"'
+        headers = {"ETag": etag, "Cache-Control": "no-cache"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(
+            content=json.dumps(
+                result,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            media_type="application/json",
+            headers=headers,
+        )
+
+    @router.get("/tasks/{task_id}/work-items/{work_item_id}", tags=["tasks"])
+    async def get_work_item(task_id: str, work_item_id: str) -> dict[str, Any]:
+        return await run_in_threadpool(container.work_items.get, task_id, work_item_id)
 
     @router.post(
         "/tasks/{task_id}/plan-proposals/{proposal_revision}/confirm",

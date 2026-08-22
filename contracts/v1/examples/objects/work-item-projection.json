@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "work_item_id": "work_kv_direction_a",
+  "task_id": "task_launch_campaign",
+  "title": "KV 方向 A",
+  "agent_type": "image",
+  "required": true,
+  "depends_on": [],
+  "stage": {
+    "stage_id": "stage_image",
+    "position": 1,
+    "type": "image",
+    "status": "RUNNING",
+    "depends_on": [],
+    "available": true
+  },
+  "business_status": "RUNNING",
+  "raw_status": "RUNNING",
+  "current_instance": {
+    "instance_id": "instance_kv_a_01",
+    "status": "RUNNING",
+    "approval_mode": "human",
+    "process_state": "RUNNING",
+    "restart_required": false,
+    "created_at": "2026-08-22T10:00:00Z"
+  },
+  "instance_ids": ["instance_kv_a_01"],
+  "attempts": [],
+  "pending_approvals": [],
+  "delivery_count": 0,
+  "alerts": [],
+  "updated_at": "2026-08-22T10:05:00Z"
+}

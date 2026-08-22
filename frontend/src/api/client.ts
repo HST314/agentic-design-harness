@@ -11,6 +11,7 @@ import type {
   ContractTaskIntake,
   ContractTaskNavigationMetadata,
   ContractTokenUsageEvent,
+  ContractWorkItemProjection,
 } from "./generated-contracts";
 
 export interface HealthResponse {
@@ -111,6 +112,35 @@ export interface ConfirmPlanResponse {
   plan_result: Record<string, unknown>;
   start_result: Record<string, unknown>;
   session: MasterSessionResponse;
+}
+
+export interface WorkItemStageProjection {
+  stage_id: string;
+  position: number;
+  type: "image" | "ppt";
+  required: boolean;
+  depends_on: string[];
+  status: string;
+  available: boolean;
+  work_item_ids: string[];
+}
+
+export interface WorkItemListResponse {
+  schema_version: string;
+  task: ContractMainTask;
+  stages: WorkItemStageProjection[];
+  items: ContractWorkItemProjection[];
+  summary: Record<ContractWorkItemProjection["business_status"], number>;
+  refresh_after_ms: 3000 | 5000;
+  projection_revision: string;
+}
+
+export interface WorkItemDetailResponse {
+  schema_version: string;
+  task: ContractMainTask;
+  item: ContractWorkItemProjection;
+  refresh_after_ms: 3000 | 5000;
+  projection_revision: string;
 }
 
 export interface PageInfo {
@@ -406,6 +436,21 @@ export class ApiClient {
       "POST",
       `/api/v1/tasks/${encodeURIComponent(taskId)}/plan-proposals/${proposalRevision}/confirm`,
       body,
+    );
+  }
+
+  workItems(taskId: string, signal?: AbortSignal): Promise<WorkItemListResponse> {
+    return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/work-items`, signal);
+  }
+
+  workItem(
+    taskId: string,
+    workItemId: string,
+    signal?: AbortSignal,
+  ): Promise<WorkItemDetailResponse> {
+    return this.get(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}`,
+      signal,
     );
   }
 

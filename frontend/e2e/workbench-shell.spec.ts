@@ -46,6 +46,33 @@ test.beforeEach(async ({ page }) => {
       body: JSON.stringify({ error: { message: "The requested task intake does not exist." } }),
     });
   });
+  await page.route("**/api/v1/tasks/task_launch_campaign/work-items", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        task: {
+          schema_version: "1.0",
+          task_id: "task_launch_campaign",
+          title: "秋季发布会主视觉",
+          goal: "完成主视觉",
+          master_owner: "master_default",
+          start_policy: "manual",
+          status: "RUNNING",
+          created_at: "2026-08-22T09:00:00Z",
+          updated_at: "2026-08-22T09:00:00Z",
+          input_manifest: "inputs/manifests/input.json",
+          plan_revision: 1,
+        },
+        stages: [],
+        items: [],
+        summary: { TODO: 0, RUNNING: 0, WAITING_APPROVAL: 0, COMPLETED: 0, EXCEPTION: 0 },
+        refresh_after_ms: 5000,
+        projection_revision: "shell-empty",
+      }),
+    });
+  });
   await page.route("**/api/v1/tasks/task_launch_campaign/master/messages", async (route) => {
     await route.fulfill({
       status: 200,
