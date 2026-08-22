@@ -1,8 +1,21 @@
 # Agentic Design Harness
 
+[![quality](https://github.com/HST314/agentic-design-harness/actions/workflows/quality.yml/badge.svg)](https://github.com/HST314/agentic-design-harness/actions/workflows/quality.yml)
+
 面向平面设计工作流的多智能体控制平面：统一编排专业 Agent，管理人工审批、隔离进程、受控资产、用量预算和可恢复状态。
 
 > 当前版本：`0.2.0`（Phase 1）。已完成 Image Agent 的单机闭环；PPT 任务可以建模和展示，但 PPT Agent 尚未接入实际运行。当前版本适合本地开发、单用户验证与方案集成，不是多租户生产平台。
+
+## 从这里开始
+
+| 目标 | 推荐入口 |
+| --- | --- |
+| 第一次在本机启动 | [快速开始](#快速开始)，遇到问题再看[安装与启动指南](docs/getting-started.md) |
+| 浏览器打不开或命令报错 | [常见问题排查](docs/troubleshooting.md) |
+| 通过 API 编排任务 | [Master API 调用指南](docs/master-api-guide.md) |
+| 备份、恢复、升级或回滚 | [运行手册](docs/operations.md) |
+| 参与开发 | [贡献指南](CONTRIBUTING.md) |
+| 查找全部文档 | [文档中心](docs/README.md) |
 
 ## 项目概览
 
@@ -58,6 +71,8 @@ Linux 使用 `/proc`、文件锁和 POSIX 进程组；Windows 使用 Win32 文�
 
 ## 快速开始
 
+下面的流程只启动本地控制平面，不需要先安装 Image Agent。所有命令都在仓库根目录执行。
+
 ### 1. 获取代码
 
 ```bash
@@ -71,29 +86,64 @@ Linux：
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --require-hashes -r requirements-dev.txt
-python -m pip install --no-deps -e .
-
-# 也可使用仓库内隔离目录快捷方式：make test-env
-
-# 前端依赖
+.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+.venv/bin/python -m pip install --no-deps -e .
 npm --prefix frontend ci
 ```
 
-Windows PowerShell：
+Windows CMD 或 PowerShell：
 
-```powershell
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --require-hashes -r requirements-dev.txt
-python -m pip install --no-deps -e .
-
-# 前端依赖
+```bat
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
 npm --prefix frontend ci
 ```
 
-### 3. 配置后端（可选）
+这里特意直接调用 `.venv` 中的 Python，不要求激活虚拟环境，因此 CMD 和 PowerShell 可以使用同一组命令，也不会误装到其他 Python 环境。需要激活方式或 Python 环境自检时，请看[安装与启动指南](docs/getting-started.md)。
+
+### 3. 启动两个服务
+
+本地 Web 控制台由两个必须同时常驻的进程组成：
+
+| 终端 | 服务 | 端口 | 职责 |
+| --- | --- | --- | --- |
+| 终端一 | Python/FastAPI 后端 | `18080` | API、任务状态、审批、资产和 Agent 调度 |
+| 终端二 | Node/Vite 前端 | `18180` | 浏览器界面，并把 `/api`、`/healthz`、`/readyz` 代理到后端 |
+
+先在终端一启动后端，并保持终端开启。
+
+Linux：
+
+```bash
+.venv/bin/python -m harness
+```
+
+Windows CMD 或 PowerShell：
+
+```bat
+.\.venv\Scripts\python.exe -m harness
+```
+
+再打开终端二，进入同一个仓库根目录并启动前端：
+
+```bash
+npm --prefix frontend run dev
+```
+
+最后打开 **<http://127.0.0.1:18180/>**。不要把后端根地址 `http://127.0.0.1:18080/` 当作 Web 页面；该路径返回 `404 Not Found` 是预期行为。
+
+| 地址 | 用途 | 正常结果 |
+| --- | --- | --- |
+| <http://127.0.0.1:18180/> | Web 控制台 | 显示任务与实例界面 |
+| <http://127.0.0.1:18080/healthz> | 后端存活检查 | HTTP 200 |
+| <http://127.0.0.1:18080/readyz> | 后端就绪检查 | HTTP 200 且状态为 `ready` |
+| <http://127.0.0.1:18080/docs> | Swagger API 文档 | 显示交互式接口文档 |
+| <http://127.0.0.1:18080/> | 后端未定义的根路由 | HTTP 404（正常） |
+
+如果前端显示“服务不可达”或终端二出现 `ECONNREFUSED`，通常是终端一未运行。按[排障文档](docs/troubleshooting.md)逐项检查。
+
+### 4. 配置后端（可选）
 
 默认配置可以直接启动空控制平面。需要自定义数据目录、监听地址或 Image Agent 路径时：
 
@@ -102,7 +152,7 @@ cp config/harness.example.yaml config/harness.local.yaml
 export HARNESS_CONFIG=config/harness.local.yaml
 ```
 
-Windows PowerShell 使用 `Copy-Item config/harness.example.yaml config/harness.local.yaml`，再执行 `$env:HARNESS_CONFIG = "config/harness.local.yaml"`。
+Windows PowerShell 使用 `Copy-Item config/harness.example.yaml config/harness.local.yaml`，再执行 `$env:HARNESS_CONFIG = "config/harness.local.yaml"`；Windows CMD 使用 `copy config\harness.example.yaml config\harness.local.yaml`，再执行 `set HARNESS_CONFIG=config\harness.local.yaml`。
 
 常用环境变量会覆盖 YAML 中的同名配置：
 
@@ -117,32 +167,6 @@ Windows PowerShell 使用 `Copy-Item config/harness.example.yaml config/harness.
 | `HARNESS_IMAGE_AGENT_REVISION` | 固定提交 | 允许启动的 Image Agent 版本 |
 
 凭据不能写入 YAML 或 `.env` 后提交到 Git。请通过受控的 `/api/v1/key-pool` 接口写入，公开响应只会返回 Key ID、尾号和 Base URL 提示。
-
-### 4. 启动控制平面
-
-终端一：
-
-```bash
-python -m harness
-```
-
-Linux/macOS 开发者也可以使用等价快捷命令 `make serve`。
-
-启动后可访问：
-
-- API：<http://127.0.0.1:18080>
-- 健康检查：<http://127.0.0.1:18080/healthz>
-- 就绪检查：<http://127.0.0.1:18080/readyz>
-- Swagger UI：<http://127.0.0.1:18080/docs>
-- OpenAPI：<http://127.0.0.1:18080/openapi.json>
-
-终端二：
-
-```bash
-npm --prefix frontend run dev
-```
-
-浏览器打开 <http://127.0.0.1:18180>。Vite 会把 `/api`、`/healthz` 和 `/readyz` 代理到本地后端；如后端地址不同，启动前设置 `HARNESS_BACKEND_URL`。
 
 ### 5. 创建第一个任务
 
@@ -217,7 +241,7 @@ make real-provider-smoke \
 
 `make test` 在未提供合格 Image Agent 环境时会按设计跳过真实 Agent 用例；这不等同于真实链路已通过。发布前应根据目标范围执行对应的 G2–G5 门禁。
 
-Windows 不要求安装 GNU Make。激活虚拟环境并完成 `pip install --no-deps -e .` 后，可直接运行 `python -m unittest discover -s tests -v`、`python -m ruff check backend/harness scripts tests`、`python -m pyright backend/harness` 和 `npm --prefix frontend run check`。GitHub Actions 会在真实 `windows-latest` 内核上执行完整后端测试矩阵。
+Windows 不要求安装 GNU Make。可直接使用 `.\.venv\Scripts\python.exe` 运行测试、Ruff 和 Pyright，并使用 `npm --prefix frontend run check` 检查前端；完整命令见[贡献指南](CONTRIBUTING.md#本地验证)。GitHub Actions 会在真实 `windows-latest` 内核上执行完整后端测试矩阵。
 
 ## 数据、安全与恢复
 
@@ -244,6 +268,9 @@ docs/              当前仍有效的 API、运维、契约、容量与发布验
 
 ## 关键文档
 
+- [文档中心](docs/README.md)：按首次使用、开发、集成和运维场景查找文档。
+- [安装与启动指南](docs/getting-started.md)：Linux、Windows CMD 与 PowerShell 的完整步骤。
+- [常见问题排查](docs/troubleshooting.md)：404、模块缺失、前端 500、端口冲突和环境问题。
 - [Master API 调用指南](docs/master-api-guide.md)：命令信封、标准流程、分页和错误处理。
 - [运行手册](docs/operations.md)：安装、备份、恢复、升级、回滚和故障排查。
 - [契约版本规则](docs/contract-versioning.md)：Schema 兼容边界和升级流程。

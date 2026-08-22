@@ -1,5 +1,7 @@
 # Phase 1 安装、恢复与发布运行手册
 
+本文面向已完成本地安装的开发者和单机运维人员。首次启动、Windows CMD/PowerShell 区别与双终端说明见[安装与启动指南](getting-started.md)；常见启动错误见[问题排查](troubleshooting.md)。
+
 ## 运行前置
 
 本版本支持 Linux 与 Windows 单机运行。Linux 后端使用 `/proc`、POSIX 文件锁和进程组；Windows 后端使用 Win32 字节锁、进程组和带 `KILL_ON_JOB_CLOSE` 的 Job Object。两者都会校验进程创建身份以避免 PID 复用，并在取消或 Harness 异常退出时终止完整 Agent 进程树；能力检查失败时拒绝启动。
@@ -7,10 +9,12 @@
 最低环境：Python 3.10+、Node.js 22+、npm，以及可执行的固定 Image Agent 源码与依赖目录。默认只绑定 `127.0.0.1:18080`；如需跨主机访问，应在受信反向代理后部署并另行配置网络访问控制，不能直接把控制面暴露到公网。
 
 ```bash
-python3 -m pip install --require-hashes -r requirements-dev.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+.venv/bin/python -m pip install --no-deps -e .
 npm --prefix frontend ci
-make verify
-make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+make PYTHON=.venv/bin/python verify
+make PYTHON=.venv/bin/python g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
 
 CI 在 Windows/Linux 的 Python 3.10 与 3.13 上执行同一组后端门禁。`make verify` 还会严格校验
@@ -18,16 +22,15 @@ Python 锁文件哈希、生成并校验 `build/sbom/` 下的 Python/npm Cyclone
 以及执行单机存储/恢复 CI 基准。资格环境的容量 SLO 与完整基准命令见
 `docs/single-machine-capacity-slo.md`。
 
-Windows PowerShell 不需要 GNU Make：
+Windows CMD 和 PowerShell 不需要 GNU Make：
 
-```powershell
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --require-hashes -r requirements-dev.txt
-python -m pip install --no-deps -e .
+```bat
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
 npm --prefix frontend ci
-python -m unittest discover -s tests -v
-python -m harness
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m harness
 ```
 
 复制 `config/harness.example.yaml`，通过 `HARNESS_CONFIG` 指向配置文件。凭据只能由受控 API 写入 `control-data/secrets/`，不得写入 YAML、环境样例、Git 或任务工作区。
@@ -42,6 +45,8 @@ curl --fail http://127.0.0.1:18080/readyz
 
 `healthz` 只表示进程存活；只有 `readyz=ready` 才表示契约注册和唯一写者租约已就绪。生产运行器应在收到终止信号后允许 Harness 关闭监管线程并释放 writer lease。
 
+`http://127.0.0.1:18080/` 是未定义的后端根路由，返回 404 不表示服务异常。交互式 API 文档位于 `/docs`。需要 Web 控制台时，还必须在第二个常驻终端运行 `npm --prefix frontend run dev`，然后访问 `http://127.0.0.1:18180/`。
+
 ## 备份与恢复
 
 一致备份必须同时覆盖 `control-data/` 与 `workspace/tasks/`。
@@ -55,6 +60,8 @@ curl --fail http://127.0.0.1:18080/readyz
 7. 检查 `recovery-warnings.ndjson`、`readyz`、任务事件和 Agent job ID；不得以重新提交 start/advance 的方式“修复”恢复。
 
 ## 故障排查
+
+启动、终端和前端代理问题的详细诊断命令见[常见问题排查](troubleshooting.md)。运维侧还应检查：
 
 - writer lease 冲突：确认没有第二个 Harness 进程使用相同 `control_root`。
 - 端口冲突/健康超时：检查实例事件、固定端口范围和 Agent readiness；不要杀死未通过 PID 身份校验的进程。
