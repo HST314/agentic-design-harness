@@ -523,7 +523,7 @@ test("shell has no horizontal overflow on phone and landscape", async ({ page })
       scrollWidth: document.documentElement.scrollWidth,
     }));
     expect(settingsDimensions.scrollWidth).toBe(settingsDimensions.clientWidth);
-    await expect(page.getByRole("heading", { name: "运行配置与凭据池" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Ark 与 Image Agent 设置" })).toBeVisible();
   }
 });
 
@@ -762,7 +762,7 @@ test("task detail exposes approvals, Token and read-only events as deep links", 
 
 test("settings keep credentials redacted and clear submitted secrets", async ({ page }) => {
   await page.goto("/settings");
-  await expect(page.getByRole("heading", { name: "运行配置与凭据池" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Ark 与 Image Agent 设置" })).toBeVisible();
   await expect(page.getByText("-1234", { exact: true })).toBeVisible();
   const secret = "browser-only-secret";
   const keyPool = page.getByLabel("替换凭据池（JSON 数组）");
