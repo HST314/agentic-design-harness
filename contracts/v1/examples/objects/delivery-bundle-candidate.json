@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "bundle_id": "bundle_image_main_01",
+  "task_id": "task_launch_campaign",
+  "work_item_id": "work_visual_01",
+  "instance_id": "instance_image_01",
+  "task_card_revision": 2,
+  "branch_id": "branch_main",
+  "checkpoint_id": "checkpoint_final_01",
+  "image": {
+    "private_relative_path": "instances/instance_image_01/outputs/final.png",
+    "mime_type": "image/png",
+    "size_bytes": 245760,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "width": 1920,
+    "height": 1080
+  },
+  "design_note": {
+    "private_relative_path": "instances/instance_image_01/outputs/design-note.md",
+    "mime_type": "text/markdown",
+    "size_bytes": 4096,
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "status": "PENDING_CONFIRMATION",
+  "created_at": "2026-08-22T15:00:00Z",
+  "decided_at": null,
+  "actor": null,
+  "publication_batch_id": null
+}

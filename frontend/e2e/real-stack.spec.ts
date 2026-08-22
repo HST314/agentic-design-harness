@@ -278,6 +278,7 @@ async function redactedFailureDiagnostics(
   request: APIRequestContext,
   phase: GatePhase,
   advancedActions: string[],
+  lastApprovalActions: string[],
   lastStatus: string,
   browserErrors: BrowserErrorDiagnostics,
 ): Promise<Record<string, unknown>> {
@@ -309,6 +310,7 @@ async function redactedFailureDiagnostics(
   return {
     phase,
     action_sequence: advancedActions.slice(0, maxWorkflowAdvances),
+    last_approval_actions: lastApprovalActions.slice(0, maxWorkflowAdvances),
     last_status: status,
     usage_counts: usageCounts,
     usage_available: usageAvailable,
@@ -391,6 +393,7 @@ async function persistRedactedEvidence(
   usage: Record<string, any>,
   delivery: Record<string, any>,
   deliveryStatus: string,
+  publicDeliveryCount: number,
   advancedActions: string[],
   browserErrors: BrowserErrorCounts,
   startedAtMs: number,
@@ -436,7 +439,7 @@ async function persistRedactedEvidence(
         text_to_image_model: usageCallEvidence(usage, "text_to_image_model"),
         vision_language_model: usageCallEvidence(usage, "vision_language_model"),
       },
-      public_delivery_count: 1,
+      public_delivery_count: publicDeliveryCount,
       public_delivery: {
         mime_type: String(delivery.mime_type),
         sha256: String(delivery.sha256),
@@ -510,6 +513,7 @@ function chooseApprovalAction(payload: Record<string, any>): string {
     "select_master",
     "review_calibration",
     "approve_final",
+    "publish_bundle",
     "start_category_match",
     "start_clarification",
     "build_taskbook",
@@ -586,6 +590,7 @@ test("production build completes a real backend workflow without browser API moc
   const consoleErrorCodes: string[] = [];
   const pageErrorCodes: string[] = [];
   const httpErrorRoutes: string[] = [];
+  let lastApprovalActions: string[] = [];
   let consoleErrorCount = 0;
   let pageErrorCount = 0;
   let phase: GatePhase = "seed_workflow";
@@ -640,6 +645,9 @@ test("production build completes a real backend workflow without browser API moc
         undefined,
         workflowDeadlineMs,
       );
+      lastApprovalActions = Array.isArray(approval.payload.available_actions)
+        ? approval.payload.available_actions.map(String)
+        : [];
       const action = chooseApprovalAction(approval.payload);
       phase = "advance_approval";
       await approveInUi(
@@ -723,10 +731,10 @@ test("production build completes a real backend workflow without browser API moc
       timeout: remainingWorkflowBudget(workflowDeadlineMs),
     });
     const shared = page.locator("section.resource-group").filter({ hasText: "公共交付" });
-    await expect(shared.locator("article.resource-card")).toHaveCount(1, {
+    await expect(shared.locator("article.resource-card")).toHaveCount(2, {
       timeout: remainingWorkflowBudget(workflowDeadlineMs),
     });
-    await expect(shared.getByText("VERIFIED", { exact: true })).toBeVisible({
+    await expect(shared.getByText("VERIFIED", { exact: true })).toHaveCount(2, {
       timeout: remainingWorkflowBudget(workflowDeadlineMs),
     });
     const sharedFiles = await jsonRequest(
@@ -739,11 +747,24 @@ test("production build completes a real backend workflow without browser API moc
     const publicAssets = sharedFiles.assets.filter(
       (asset: Record<string, any>) => asset?.manifest?.producer_instance_id === instanceId,
     );
-    expect(publicAssets).toHaveLength(1);
-    expect(publicAssets[0].integrity_status).toBe("VERIFIED");
+    expect(publicAssets).toHaveLength(2);
+    expect(publicAssets.every(
+      (asset: Record<string, any>) => asset.integrity_status === "VERIFIED",
+    )).toBe(true);
+    expect(new Set(publicAssets.map(
+      (asset: Record<string, any>) => String(asset.manifest.role),
+    ))).toEqual(new Set(["final_artwork", "design_note"]));
+    const artworkAsset = publicAssets.find(
+      (asset: Record<string, any>) => asset.manifest.role === "final_artwork",
+    );
+    const designNoteAsset = publicAssets.find(
+      (asset: Record<string, any>) => asset.manifest.role === "design_note",
+    );
+    expect(artworkAsset?.manifest.mime_type).toBe("image/png");
+    expect(designNoteAsset?.manifest.mime_type).toBe("text/markdown");
     const delivery = sharedFiles.items.find(
       (item: Record<string, any>) =>
-        item?.relative_path === publicAssets[0].manifest.relative_path,
+        item?.relative_path === artworkAsset?.manifest.relative_path,
     );
     expect(delivery).toBeDefined();
     const browserErrors: BrowserErrorCounts = {
@@ -761,7 +782,8 @@ test("production build completes a real backend workflow without browser API moc
     await persistRedactedEvidence(
       usage,
       delivery,
-      String(publicAssets[0].integrity_status),
+      String(artworkAsset?.integrity_status),
+      publicAssets.length,
       advancedActions,
       browserErrors,
       startedAtMs,
@@ -771,6 +793,7 @@ test("production build completes a real backend workflow without browser API moc
       request,
       phase,
       advancedActions,
+      lastApprovalActions,
       lastStatus,
       {
         failed_requests: failedRequests.length,

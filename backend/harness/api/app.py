@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
 from ..adapters import AdapterRegistry, ImageAgentAdapter, PptAgentContractAdapter
+from ..adapters.image_lock import load_image_agent_lock
 from ..contracts import ContractRegistry
 from ..core.config import HarnessSettings, load_settings
 from ..core.errors import ErrorCatalog, HarnessError
@@ -31,6 +32,7 @@ from ..services.credentials import CredentialPoolService
 from ..services.master_gateway import HttpMasterGateway, UnavailableMasterGateway
 from ..services.master_threads import MasterThreadService
 from ..services.retry_budget import RetryBudgetService
+from ..services.settings_diagnostics import SettingsDiagnosticsService
 from ..services.supervisor import ProcessSupervisor
 from ..services.task_intakes import TaskIntakeService
 from ..services.usage import UsageService
@@ -60,6 +62,7 @@ class Container:
     master_threads: MasterThreadService
     work_items: WorkItemProjectionService
     agent_workbench: AgentWorkbenchService
+    settings_diagnostics: SettingsDiagnosticsService
 
 
 class ContractValidationRequest(BaseModel):
@@ -68,6 +71,15 @@ class ContractValidationRequest(BaseModel):
 
 
 def build_container(settings: HarnessSettings) -> Container:
+    image_release_lock = load_image_agent_lock(settings.image_agent_lock_path)
+    if (
+        settings.image_agent_revision is not None
+        and settings.image_agent_revision != image_release_lock.revision
+    ):
+        raise HarnessError(
+            "SCHEMA_VERSION_UNSUPPORTED",
+            "The legacy Image Agent revision override differs from the release lock.",
+        )
     contracts = ContractRegistry(settings.contracts_root)
     errors = ErrorCatalog(settings.contracts_root / "catalogs" / "error-codes.json")
     store = FileStateStore(
@@ -100,6 +112,7 @@ def build_container(settings: HarnessSettings) -> Container:
                 source_root=settings.image_agent_root,
                 interpreter=settings.image_agent_python,
                 dependency_root=settings.image_agent_dependency_root,
+                release_lock=image_release_lock,
                 revision=settings.image_agent_revision,
                 host=settings.host,
             ),
@@ -131,6 +144,7 @@ def build_container(settings: HarnessSettings) -> Container:
         supervisor,
         adapters,
         configuration,
+        settings.delivery_bundle_write_targets,
     )
     task_intakes = TaskIntakeService(store, commands, assets)
     master_gateway = (
@@ -159,6 +173,11 @@ def build_container(settings: HarnessSettings) -> Container:
         adapters,
     )
     agent_workbench = AgentWorkbenchService(store, adapters, work_items)
+    settings_diagnostics = SettingsDiagnosticsService(
+        configuration,
+        credentials,
+        settings.control_root,
+    )
     return Container(
         settings=settings,
         contracts=contracts,
@@ -178,6 +197,7 @@ def build_container(settings: HarnessSettings) -> Container:
         master_threads=master_threads,
         work_items=work_items,
         agent_workbench=agent_workbench,
+        settings_diagnostics=settings_diagnostics,
     )
 
 

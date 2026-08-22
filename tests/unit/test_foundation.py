@@ -68,6 +68,53 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             HarnessSettings(log_level="verbose")
 
+    def test_image_agent_path_defaults_to_embedded_without_legacy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            embedded = root / "agents" / "image_agent_mvp"
+            external = root / "external_image_agent"
+            embedded.mkdir(parents=True)
+            external.mkdir()
+            selected = load_settings(root, {})
+            self.assertEqual(selected.image_agent_path_mode, "embedded_only")
+            self.assertEqual(selected.image_agent_root, embedded)
+
+            embedded.rmdir()
+            no_fallback = load_settings(root, {})
+            self.assertEqual(no_fallback.image_agent_root, embedded)
+
+            external_only = load_settings(
+                root,
+                {
+                    "HARNESS_IMAGE_AGENT_PATH_MODE": "external_only",
+                    "HARNESS_IMAGE_AGENT_ROOT": "external_image_agent",
+                },
+            )
+            self.assertEqual(external_only.image_agent_root, external)
+            with self.assertRaisesRegex(ValueError, "explicit image_agent_root"):
+                load_settings(root, {"HARNESS_IMAGE_AGENT_PATH_MODE": "external_only"})
+
+    def test_delivery_bundle_migration_modes_expose_explicit_write_targets(self) -> None:
+        self.assertEqual(HarnessSettings().delivery_bundle_write_targets, (False, True))
+        self.assertEqual(
+            HarnessSettings(
+                delivery_bundle_migration_mode="legacy_only"
+            ).delivery_bundle_write_targets,
+            (True, False),
+        )
+        self.assertEqual(
+            HarnessSettings(
+                delivery_bundle_migration_mode="dual_write"
+            ).delivery_bundle_write_targets,
+            (True, True),
+        )
+        self.assertEqual(
+            HarnessSettings(
+                delivery_bundle_migration_mode="bundle_only"
+            ).delivery_bundle_write_targets,
+            (False, True),
+        )
+
     def test_runtime_preflight_accepts_supported_host_and_rejects_unknown_kernel(self) -> None:
         validate_runtime_platform()
         with patch("harness.runtime.sys.platform", "darwin"), self.assertRaisesRegex(

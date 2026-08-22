@@ -1,59 +1,80 @@
 # 贡献指南
 
-感谢你改进 Agentic Design Harness。提交变更前，请先阅读项目的[当前边界](README.md#当前边界与路线)和相关设计文档，避免把未支持能力描述为已完成。
+提交变更前先用 [QUICKSTART](QUICKSTART.md) 完成一键安装，并阅读与变更相关的现行文档。不要从历史提交中的 RFC 推断当前行为；代码、契约、测试和本目录中的现行文档才是事实来源。
 
 ## 开发环境
 
-按[安装与启动指南](docs/getting-started.md)创建 `.venv` 并安装 Python、前端依赖。开发依赖使用带哈希的 `requirements-dev.txt`，前端依赖使用锁定的 `frontend/package-lock.json`；不要手工修改生成的锁文件。
+```bash
+python3 scripts/dev.py setup
+python3 scripts/dev.py doctor
+```
 
-## 变更原则
+Windows 将 `python3` 替换为 `py -3`。依赖由 `requirements-dev.txt`、Image Agent lock/依赖清单和 `frontend/package-lock.json` 固定；不要手工编辑安装目录或用未锁定的安装结果替代 lock 更新。
 
-- 一个提交或 PR 解决一个清晰问题，避免混入无关重构。
-- 后端依赖方向保持 `API → application/domain → storage/adapters`。
-- Harness 不导入专业 Agent 的内部包，跨边界只使用稳定契约、HTTP、进程和受控文件。
-- 新增或修改公开结构时先更新 `contracts/v1`，再生成前端类型并补充兼容测试。
-- 不提交 API Key、Cookie、Provider 凭据、用户素材、运行状态或本机配置。
-- 文档必须区分“当前已支持”“需要额外配置”和“路线规划”，示例命令应从仓库根目录可执行。
+## 代码边界
+
+- 后端依赖方向保持 `api → services/domain → storage/adapters`，`core` 只承载稳定横切能力。
+- Harness 不 import 专业 Agent 内部模块；跨边界只能使用稳定契约、HTTP、隔离进程和受控文件。
+- API 层只处理协议、认证边界、错误序列化和生命周期；领域不直接拼 HTTP 或任意文件路径。
+- 所有持久化写入必须可恢复，带 Actor、revision 和幂等语义；禁止原地修改已发布资产或已确认修订。
+- 前端使用 React Router、TanStack Query 和生成契约类型；后端仍是权限、revision、文件完整性和费用门禁的最终裁决者。
+- UI 变更必须覆盖键盘、可见焦点、加载状态、`role=alert`/`aria-live`、错误恢复以及 light/dark 主题。
+
+## 契约优先
+
+修改公开对象时按以下顺序：
+
+1. 更新 `contracts/v1/schemas`、catalog 或示例，并明确兼容性影响。
+2. 补充正反例和跨对象不变量测试。
+3. 运行 `python scripts/generate_frontend_contracts.py` 更新生成类型。
+4. 更新生产者、消费者和文档。
+5. 运行 `python scripts/generate_frontend_contracts.py --check` 确认无漂移。
+
+契约版本采用精确支持列表；不要让消费者“猜测兼容”未知 minor。完整规则见[契约指南](docs/contracts.md)。
+
+## Image Agent 双仓提交
+
+Image Agent 功能先在 `agents/image_agent_mvp` 对应独立仓库形成提交并通过其测试，再在主仓更新 submodule 指针和 `agents/image-agent.lock.json` 的 revision、源码摘要及依赖摘要。
+
+一次升级必须在 PR 中同时记录 Image Agent commit 与主仓 commit。禁止直接复制源码、让 submodule 跟随浮动分支、只改摘要或只提交主仓 gitlink。升级和回滚步骤见 [Image Agent 集成](docs/image-agent-integration.md)。
 
 ## 本地验证
 
-Linux 开发者可运行：
+日常完整检查：
 
 ```bash
 make check
+make typecheck
+git diff --check
 ```
 
-完整发布前门禁为：
+`make check` 覆盖 Python 测试、Ruff、compileall、密钥扫描、Agent import 边界、Image lock、文档/示例、前端契约、前端类型、单测和生产构建。发布候选再运行：
 
 ```bash
 make verify
 ```
 
-Windows 不要求 GNU Make。使用项目虚拟环境执行：
+按变更范围追加：
 
-```bat
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m ruff check backend/harness scripts tests
-.\.venv\Scripts\python.exe -m pyright backend/harness
-.\.venv\Scripts\python.exe -m compileall -q backend/harness scripts tests
-.\.venv\Scripts\python.exe scripts\secret_scan.py .
-.\.venv\Scripts\python.exe scripts\check_agent_import_boundary.py backend\harness
-.\.venv\Scripts\python.exe scripts\generate_frontend_contracts.py --check
-npm --prefix frontend run check
-npm --prefix frontend run test:unit
-npm --prefix frontend run build
-npm --prefix frontend run test:e2e
-```
+| 范围 | 命令 |
+| --- | --- |
+| React 浏览器交互 | `npm --prefix frontend run test:e2e` |
+| 受管 Image 真实进程 | `make g2-e2e` |
+| 分支双资产交付 | `make g3-e2e` |
+| 多实例、配置、凭据、预算 | `make g4-e2e` |
+| 完整离线发布门禁 | `make g5-e2e` |
+| 真实 Provider | 先预检，再按[配置指南](docs/configuration.md)显式授权费用 |
 
-浏览器命令需要先安装锁定 Playwright 对应的 Chromium。真实 Agent 和 Provider 门禁需要额外环境，按[运行手册](docs/operations.md)选择 G2–G5 范围。不要把真实链路的跳过结果描述为通过。
+Windows 不要求 GNU Make；CI 会在 Windows/Linux 执行后端、前端和启动器矩阵。本机若只运行了部分命令或真实链路因环境跳过，必须在 PR 中如实说明，不能把 skip 描述为通过。
 
-## 提交说明
+## 文档与安全
 
-提交标题使用简短、祈使式描述，例如 `docs: clarify local startup`。PR 描述至少说明：
+- README 只保留定位、能力、架构、成熟度和入口；安装放在 `QUICKSTART.md`，配置放在 `docs/configuration.md`。
+- 新文档必须进入 `docs/README.md` 的受众导航，使用相对链接并从仓库根目录给出命令。
+- JSON 不在文档和代码各维护一份；可执行示例放入 `config/examples` 或 `contracts/v1/examples` 并由测试读取。
+- 不提交 API Key、Cookie、Authorization、完整敏感 URL、用户素材、本机状态、测试报告或人工生成的发布证据。
+- `python scripts/check_docs.py` 校验文档集合、本地链接、JSON、命令入口与版本；CI 证据由 workflow 生成并上传 artifact。
 
-- 变更解决的问题；
-- 用户可观察到的行为；
-- 执行过的验证命令及结果；
-- 未覆盖的真实 Agent 或外部 Provider 范围。
+## 提交与 PR
 
-提交 PR 前确认工作树只包含预期文件、所有链接有效、生成文件已同步，并且没有敏感信息。
+保持变更聚焦，提交标题使用简短祈使式描述，例如 `docs: consolidate operator guidance`。PR 至少写明问题、用户可见结果、代码/契约迁移影响、验证命令和未覆盖范围。提交前确认工作树只包含预期文件，submodule 状态可追溯，生成文件已同步且没有敏感信息。

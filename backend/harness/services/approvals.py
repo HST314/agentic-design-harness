@@ -123,6 +123,106 @@ class ApprovalInboxService:
             "notification": notification,
         }
 
+    def ensure_delivery_review_approval(
+        self,
+        task_id: str,
+        instance_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create the human-only decision gate for one immutable branch bundle."""
+
+        validate_identifier(task_id, "task_id")
+        validate_identifier(instance_id, "instance_id")
+        instance = self.store.instance.get(task_id, instance_id)
+        if instance is None or instance.get("task_id") != task_id:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        self.store.contracts.validate("delivery-bundle-candidate", candidate)
+        if (
+            candidate["task_id"] != task_id
+            or candidate["instance_id"] != instance_id
+            or candidate["status"] != "PENDING_CONFIRMATION"
+        ):
+            raise HarnessError(
+                "VALIDATION_ERROR", "The delivery review candidate has an invalid owner or state."
+            )
+        bundle_id = candidate["bundle_id"]
+        approval_id = f"ap_{digest_json({'kind': 'DELIVERY_REVIEW', 'bundle_id': bundle_id})[:24]}"
+        step_id = f"delivery_{digest_json(bundle_id)[:24]}"
+        approval_lock = self.store.layout.control_root / "locks" / f"approval-{task_id}.lock"
+        with FileLock(approval_lock, self.store.lock_timeout_seconds):
+            existing = self.store.approval.get(task_id, approval_id)
+            if existing is None:
+                now = utc_now()
+                payload_ref = f"approvals/{approval_id}/request.json"
+                workspace = self.store.layout.initialize_task(task_id)[1]
+                approvals_root = resolve_task_path(
+                    workspace,
+                    "approvals",
+                    allowed_prefixes=("approvals",),
+                )
+                approval_dir = approvals_root / approval_id
+                approval_dir.mkdir(exist_ok=True, mode=0o700)
+                atomic_write_json(
+                    approval_dir / "request.json",
+                    {
+                        "schema_version": "1.0",
+                        "approval_id": approval_id,
+                        "task_id": task_id,
+                        "instance_id": instance_id,
+                        "step_id": step_id,
+                        "kind": "DELIVERY_REVIEW",
+                        "bundle_id": bundle_id,
+                        "available_actions": ["publish_bundle"],
+                        "context": {"candidate": deepcopy(candidate)},
+                        "created_at": now,
+                    },
+                    mode=0o640,
+                )
+                existing = {
+                    "schema_version": "1.0",
+                    "approval_id": approval_id,
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "step_id": step_id,
+                    "kind": "DELIVERY_REVIEW",
+                    "owner": "human",
+                    "status": "PENDING",
+                    "payload_ref": payload_ref,
+                    "created_at": now,
+                    "sequence": self._next_sequence(),
+                    "revision": 1,
+                }
+                self.store.approval.put(
+                    task_id,
+                    approval_id,
+                    existing,
+                    expected_revision=0,
+                    actor=Actor("adapter", f"{instance['agent_type']}_adapter"),
+                    command="ensure_delivery_review_approval",
+                    idempotency_key=f"ensure-{approval_id}",
+                )
+            elif existing["kind"] != "DELIVERY_REVIEW":
+                raise HarnessError(
+                    "IDEMPOTENCY_CONFLICT",
+                    "The deterministic delivery approval id belongs to another request.",
+                )
+        notification = self.ensure_notification(
+            task_id,
+            kind="DELIVERY_REVIEW_REQUIRED",
+            owner="human",
+            title="分支交付包等待确认",
+            message=f"实例 {instance_id} 的分支 {candidate['branch_id']} 已冻结图片与设计说明。",
+            deep_link=f"tasks/{task_id}/deliveries?bundle_id={bundle_id}",
+            dedupe_key=f"delivery-review:{bundle_id}",
+            instance_id=instance_id,
+            approval_id=approval_id,
+        )
+        return {
+            "approval": deepcopy(existing),
+            "approval_revision": self.store.approval.revision(task_id, approval_id),
+            "notification": notification,
+        }
+
     def ensure_budget_approval(
         self,
         task_id: str,

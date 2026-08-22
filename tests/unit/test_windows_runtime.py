@@ -9,10 +9,35 @@ from harness.core.errors import HarnessError
 from harness.runtime import validate_runtime_platform
 from harness.services.process_control import process_start_identity
 from harness.storage.locks import FileLock
+from harness.storage.safe_open import open_regular_readonly
+
+
+class PortableSafeOpenTests(unittest.TestCase):
+    def test_resolved_nested_asset_stays_beneath_an_equivalent_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nested = root / "instances" / "image" / "outputs"
+            nested.mkdir(parents=True)
+            asset = nested / "preview.png"
+            asset.write_bytes(b"private-image")
+
+            descriptor = open_regular_readonly(
+                asset.resolve(strict=True), trusted_root=root
+            )
+            os.close(descriptor)
 
 
 @unittest.skipUnless(os.name == "nt", "requires a real Windows kernel")
 class WindowsRuntimeTests(unittest.TestCase):
+    def test_executable_path_and_handle_metadata_share_one_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "runtime-launcher.exe"
+            executable.write_bytes(b"not-executed")
+
+            descriptor = open_regular_readonly(executable, trusted_root=root)
+            os.close(descriptor)
+
     def test_native_runtime_preflight_and_process_identity(self) -> None:
         validate_runtime_platform()
         self.assertIsNotNone(process_start_identity(os.getpid()))

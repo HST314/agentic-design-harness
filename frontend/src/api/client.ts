@@ -114,6 +114,11 @@ export interface ConfirmPlanResponse {
   session: MasterSessionResponse;
 }
 
+export type EditableTaskCard = Pick<
+  ContractPlanProposal["execution_cards"][number],
+  "objective" | "instructions" | "input_assets" | "expected_deliveries" | "parameters"
+>;
+
 export interface WorkItemStageProjection {
   stage_id: string;
   position: number;
@@ -331,7 +336,37 @@ export interface RetryBudget {
 
 export interface GlobalConfigResponse {
   schema_version: string;
-  config: Record<string, unknown> & { revision: number };
+  config: GlobalConfig;
+}
+
+export type ImageModelRole = "reasoning_llm" | "text_to_image_model" | "vision_language_model";
+
+export interface ImageModelBinding {
+  state: string;
+  model_role: ImageModelRole;
+  provider: string;
+  model: string;
+  parameters: Record<string, string | number | boolean>;
+  fallback_model: string | null;
+}
+
+export interface GlobalConfig extends Record<string, unknown> {
+  schema_version: "1.0";
+  revision: number;
+  image_provider: string;
+  image_model_config: {
+    model_config_id: string;
+    state_bindings: ImageModelBinding[];
+  };
+  image_runtime_policy: Record<string, unknown> & {
+    question_preference: "proactive" | "blocking_only";
+    candidate_concurrency: number;
+    default_output_size: string;
+    response_format: "url" | "b64_json";
+    watermark: boolean;
+    offline_mode: boolean;
+  };
+  supervisor: Record<string, unknown>;
 }
 
 export interface CredentialSummary {
@@ -342,6 +377,91 @@ export interface CredentialSummary {
   base_url_hint: string;
   revision: number;
   enabled: boolean;
+}
+
+export interface DeliveryBundleFile {
+  private_relative_path: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export interface DeliveryBundleCandidate {
+  schema_version: string;
+  bundle_id: string;
+  task_id: string;
+  work_item_id: string;
+  instance_id: string;
+  task_card_revision: number;
+  branch_id: string;
+  checkpoint_id: string;
+  image: DeliveryBundleFile & { width: number; height: number };
+  design_note: DeliveryBundleFile;
+  status: "PENDING_CONFIRMATION" | "PUBLISHED" | "REJECTED" | "CORRUPTED";
+  created_at: string;
+  decided_at: string | null;
+  actor: { type: string; id: string } | null;
+  publication_batch_id: string | null;
+}
+
+export interface BundleManifest {
+  schema_version: string;
+  bundle_id: string;
+  task_id: string;
+  work_item_id: string;
+  instance_id: string;
+  task_card_revision: number;
+  branch_id: string;
+  checkpoint_id: string;
+  publication_batch_id: string;
+  image_asset: MasterAssetReference;
+  design_note_asset: MasterAssetReference;
+  actor: { type: string; id: string };
+  created_at: string;
+  published_at: string;
+}
+
+export interface DeliveryReview {
+  bundle_id: string;
+  approval: Approval;
+  approval_revision: number;
+}
+
+export interface DeliveryBundlesResponse {
+  schema_version: string;
+  candidates: DeliveryBundleCandidate[];
+  manifests: BundleManifest[];
+  reviews: DeliveryReview[];
+}
+
+export interface SettingsPreflight {
+  schema_version: string;
+  status: "READY" | "BLOCKED";
+  config_revision: number;
+  provider: string;
+  model_config_id: string;
+  credential_pairs: CredentialSummary[];
+  checks: Array<{
+    check_id: string;
+    status: "PASS" | "BLOCKED";
+    message: string;
+    recovery: string | null;
+  }>;
+  paid_request_performed: false;
+  checked_at: string;
+}
+
+export interface PaidSmokeResult {
+  schema_version: string;
+  status: "PASSED";
+  config_revision: number;
+  provider: "ark";
+  model: string;
+  credential_pair: CredentialSummary;
+  generated_count: number;
+  duration_ms: number;
+  paid_request_performed: true;
+  completed_at: string;
 }
 
 export class ApiError extends Error {
@@ -444,11 +564,32 @@ export class ApiClient {
   confirmPlanProposal(
     taskId: string,
     proposalRevision: number,
-    body: { task_expected_revision: number; envelope: CommandEnvelope },
+    body: {
+      task_expected_revision: number;
+      expected_card_revisions: Record<string, number>;
+      envelope: CommandEnvelope;
+    },
   ): Promise<ConfirmPlanResponse> {
     return this.send(
       "POST",
       `/api/v1/tasks/${encodeURIComponent(taskId)}/plan-proposals/${proposalRevision}/confirm`,
+      body,
+    );
+  }
+
+  updatePlanTaskCard(
+    taskId: string,
+    proposalRevision: number,
+    cardId: string,
+    body: EditableTaskCard & {
+      expected_proposal_revision: number;
+      expected_card_revision: number;
+      envelope: CommandEnvelope;
+    },
+  ): Promise<MasterSessionResponse> {
+    return this.send(
+      "PATCH",
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/plan-proposals/${proposalRevision}/task-cards/${encodeURIComponent(cardId)}`,
       body,
     );
   }
@@ -578,6 +719,30 @@ export class ApiClient {
     return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/files?group=all`, signal);
   }
 
+  deliveryBundles(taskId: string, signal?: AbortSignal): Promise<DeliveryBundlesResponse> {
+    return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/delivery-bundles`, signal);
+  }
+
+  async previewDeliveryMarkdown(taskId: string, bundleId: string, signal?: AbortSignal): Promise<string> {
+    const response = await fetch(this.deliveryPreviewUrl(taskId, bundleId, "design_note"), {
+      headers: { Accept: "text/markdown" },
+      signal,
+    });
+    if (!response.ok) throw await this.error(response);
+    return response.text();
+  }
+
+  deliveryPreviewUrl(
+    taskId: string,
+    bundleId: string,
+    asset: "image" | "design_note",
+    nonce?: number,
+  ): string {
+    const query = new URLSearchParams({ asset });
+    if (nonce !== undefined) query.set("retry", String(nonce));
+    return `${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/delivery-bundles/${encodeURIComponent(bundleId)}/preview?${query.toString()}`;
+  }
+
   taskUsage(taskId: string, signal?: AbortSignal): Promise<UsageSummary> {
     return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/usage`, signal);
   }
@@ -609,6 +774,22 @@ export class ApiClient {
 
   updateKeyPool(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.send("PUT", "/api/v1/key-pool", body);
+  }
+
+  preflightSettings(expectedConfigRevision: number): Promise<SettingsPreflight> {
+    return this.send("POST", "/api/v1/config/diagnostics/preflight", {
+      expected_config_revision: expectedConfigRevision,
+    });
+  }
+
+  runPaidSmoke(body: {
+    credential_pair_id: string;
+    credential_pair_revision: number;
+    cost_confirmation: true;
+    operation_id: string;
+    envelope: CommandEnvelope;
+  }): Promise<PaidSmokeResult> {
+    return this.send("POST", "/api/v1/config/diagnostics/paid-smoke", body);
   }
 
   resolveApproval(

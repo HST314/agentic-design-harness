@@ -23,8 +23,8 @@ from .image_workflow import (
     normalized_capabilities as normalize_workflow_capabilities,
 )
 
-SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION = "1.8.2"
 SUPPORTED_IMAGE_API_MAJOR = "1"
+MANAGED_ADAPTER_HEADER = "X-Harness-Adapter-Key"
 _JOB_ID = re.compile(r"^job_[A-Za-z0-9]+$")
 _JOB_STATES = frozenset(
     {"queued", "running", "cancelling", "succeeded", "failed", "cancelled", "interrupted"}
@@ -35,8 +35,10 @@ _REQUIRED_ROUTES = frozenset(
     {
         "/api/health",
         "/api/jobs/{job_id}",
+        "/api/managed/projects",
         "/api/projects",
         "/api/projects/{project_id}",
+        "/api/projects/{project_id}/delivery/candidates/finalize",
         "/api/projects/{project_id}/delivery/finalize",
         "/api/projects/{project_id}/jobs",
         "/api/projects/{project_id}/policy",
@@ -49,8 +51,10 @@ _REQUIRED_ROUTE_METHODS = (
     ("/api/health", "get"),
     ("/api/jobs/{job_id}", "get"),
     ("/api/jobs/{job_id}/cancel", "post"),
+    ("/api/managed/projects", "post"),
     ("/api/projects", "post"),
     ("/api/projects/{project_id}", "get"),
+    ("/api/projects/{project_id}/delivery/candidates/finalize", "post"),
     ("/api/projects/{project_id}/delivery/finalize", "post"),
     ("/api/projects/{project_id}/jobs", "post"),
     ("/api/projects/{project_id}/policy", "post"),
@@ -246,7 +250,7 @@ class ImageObservationMixin:
         return {
             "api_version": api_version,
             "source_revision": self.revision,
-            "package_version": SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION,
+            "package_version": self.package_version,
         }
 
     def _request(
@@ -258,13 +262,20 @@ class ImageObservationMixin:
         *,
         expected_statuses: tuple[int, ...] = (200,),
         allow_404: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request_headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if headers:
+            request_headers.update(headers)
         request = Request(
             f"{base_url}{path}",
             data=data,
             method=method,
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            headers=request_headers,
         )
         try:
             with urlopen(request, timeout=self.request_timeout_seconds) as response:

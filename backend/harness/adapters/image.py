@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import secrets
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, NoReturn
@@ -28,11 +31,13 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
-from .image_delivery import normalize_image_delivery, stage_final_delivery
-from .image_observation import (
-    SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION,
-    ImageObservationMixin,
+from .image_delivery import image_dimensions, normalize_image_delivery, stage_final_delivery
+from .image_lock import (
+    ImageAgentReleaseLock,
+    default_image_agent_lock_path,
+    load_image_agent_lock,
 )
+from .image_observation import MANAGED_ADAPTER_HEADER, ImageObservationMixin
 from .image_runtime import (
     IMAGE_ENTRYPOINT,
     IMAGE_WEB_REQUIREMENTS,
@@ -43,22 +48,35 @@ from .image_workflow import (
     HARNESS_CAPABILITIES,
     map_advance_payload,
 )
-from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
-
-SUPPORTED_IMAGE_AGENT_REVISION = "0e559d0153f479c8abefb14613804b8cde486282"
-_SUPPORTED_IMAGE_RUNTIME_ATTESTATIONS = {
-    SUPPORTED_IMAGE_AGENT_REVISION: {
-        "source_content_sha256": (
-            "ade81f5bf339b4c8d16755876d49fccc1ba6c783434d7432294449fdc7ba10fb"
-        ),
-        "dependency_content_sha256": (
-            "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb"
-        ),
-    }
-}
+from .types import (
+    AgentInstanceSnapshot,
+    DeliveryBundleCandidate,
+    DeliveryCandidate,
+    TaskCard,
+    UsageEvent,
+)
 
 _PACKAGE_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 _ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
+
+
+def image_dependency_pythonpath_entries(
+    artifact_root: Path, *, os_name: str | None = None
+) -> tuple[Path, ...]:
+    """Return import roots required by a pip --target dependency artifact."""
+
+    dependencies = artifact_root / "_dependencies"
+    selected_os = os.name if os_name is None else os_name
+    if selected_os == "nt":
+        # pip --target does not process pywin32.pth. These are the same
+        # locked directories that the wheel's .pth file would add.
+        return (
+            dependencies,
+            dependencies / "win32",
+            dependencies / "win32" / "lib",
+            dependencies / "pythonwin",
+        )
+    return (dependencies,)
 
 
 class ImageAgentAdapter(ImageObservationMixin):
@@ -77,7 +95,8 @@ class ImageAgentAdapter(ImageObservationMixin):
         source_root: Path,
         interpreter: Path,
         dependency_root: Path,
-        revision: str = SUPPORTED_IMAGE_AGENT_REVISION,
+        release_lock: ImageAgentReleaseLock | None = None,
+        revision: str | None = None,
         host: str = "127.0.0.1",
         request_timeout_seconds: float = 5.0,
     ) -> None:
@@ -88,17 +107,20 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.source_root = source_root
         self.interpreter = interpreter
         self.dependency_root = dependency_root
-        self.revision = revision
+        self.release_lock = release_lock or load_image_agent_lock(
+            default_image_agent_lock_path()
+        )
+        self.revision = revision or self.release_lock.revision
+        self.package_version = self.release_lock.package_version
         self.host = host
         self.request_timeout_seconds = request_timeout_seconds
-        attestation = _SUPPORTED_IMAGE_RUNTIME_ATTESTATIONS.get(revision, {})
         self.runtime_builder = ImageRuntimeBuilder(
             source_root,
             dependency_root,
-            revision=revision,
-            package_version=SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION,
-            source_content_sha256=attestation.get("source_content_sha256", ""),
-            dependency_content_sha256=attestation.get("dependency_content_sha256", ""),
+            revision=self.revision,
+            package_version=self.package_version,
+            source_content_sha256=self.release_lock.source_content_sha256,
+            dependency_content_sha256=self.release_lock.runtime_dependency_tree_sha256,
         )
 
     def validate_task_card(self, card: TaskCard) -> ValidationResult:
@@ -142,12 +164,42 @@ class ImageAgentAdapter(ImageObservationMixin):
         runtime_root = instance_root / "runtime"
         atomic_write_json(runtime_root / "image-task-card.json", image_card, mode=0o640)
         state_path = self._state_path(task_id, instance_id)
+        control_path = runtime_root / "managed-control.json"
+        if control_path.exists():
+            control = read_json(control_path)
+        elif state_path.exists():
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The prepared Image runtime lost its managed control file.",
+                {"instance_id": instance_id},
+            )
+        else:
+            control = {
+                "schema_version": "1.0",
+                "instance_id": instance_id,
+                "request_key": secrets.token_urlsafe(32),
+            }
+            atomic_write_json(control_path, control, mode=0o600)
+        managed_request_key = control.get("request_key")
+        if (
+            control.get("instance_id") != instance_id
+            or not isinstance(managed_request_key, str)
+            or len(managed_request_key) < 32
+        ):
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The Image runtime managed control file is invalid.",
+                {"instance_id": instance_id},
+            )
         expected_state = {
             "schema_version": "1.0",
             "task_id": task_id,
             "instance_id": instance_id,
             "task_card_sha256": digest_json(image_card),
             "source_revision": self.revision,
+            "managed_request_key_sha256": hashlib.sha256(
+                managed_request_key.encode("utf-8")
+            ).hexdigest(),
             "project_created": False,
             "operation_id": None,
             "job_id": None,
@@ -155,7 +207,13 @@ class ImageAgentAdapter(ImageObservationMixin):
         }
         if state_path.exists():
             current = read_json(state_path)
-            immutable = ("task_id", "instance_id", "task_card_sha256", "source_revision")
+            immutable = (
+                "task_id",
+                "instance_id",
+                "task_card_sha256",
+                "source_revision",
+                "managed_request_key_sha256",
+            )
             if any(current.get(key) != expected_state[key] for key in immutable):
                 raise HarnessError(
                     "IDEMPOTENCY_CONFLICT",
@@ -190,7 +248,12 @@ class ImageAgentAdapter(ImageObservationMixin):
             public_environment={
                 "IMAGE_AGENT_FRONT_PROJECTS_ROOT": str(instance_root / "work"),
                 "IMAGE_AGENT_MODEL_LIBRARY": str(artifact_root / "configs" / "model_library.yaml"),
-                "PYTHONPATH": str(artifact_root / "_dependencies"),
+                "IMAGE_AGENT_MANAGED_MODE": "1",
+                "IMAGE_AGENT_MANAGED_PROJECT_ID": instance_id,
+                "IMAGE_AGENT_CONTROL_FILE": str(control_path),
+                "PYTHONPATH": os.pathsep.join(
+                    str(path) for path in image_dependency_pythonpath_entries(artifact_root)
+                ),
             },
             health_path="/api/health",
             readiness_path="/api/health",
@@ -299,10 +362,22 @@ class ImageAgentAdapter(ImageObservationMixin):
                 base_url, "GET", f"/api/projects/{instance_id}", allow_404=True
             )
             if existing is None:
+                control = read_json(
+                    self.store.layout.initialize_instance(task_id, instance_id)
+                    / "runtime"
+                    / "managed-control.json"
+                )
+                managed_request_key = control.get("request_key")
+                if not isinstance(managed_request_key, str) or len(managed_request_key) < 32:
+                    raise HarnessError(
+                        "PROCESS_START_FAILED",
+                        "The Image runtime managed control file is invalid.",
+                        {"instance_id": instance_id},
+                    )
                 self._request(
                     base_url,
                     "POST",
-                    "/api/projects",
+                    "/api/managed/projects",
                     {
                         "project_id": instance_id,
                         "task_card": card,
@@ -310,6 +385,7 @@ class ImageAgentAdapter(ImageObservationMixin):
                         "defer_run": True,
                     },
                     expected_statuses=(201,),
+                    headers={MANAGED_ADAPTER_HEADER: managed_request_key},
                 )
             state["project_created"] = True
             self._write_state(task_id, instance_id, state)
@@ -539,6 +615,195 @@ class ImageAgentAdapter(ImageObservationMixin):
             },
         )
 
+    def collect_delivery_bundles(self, instance_id: str) -> list[DeliveryBundleCandidate]:
+        """Stage and validate every immutable branch candidate exposed by Image Agent."""
+
+        task_id = self._task_id_for_instance(instance_id)
+        base_url = self._base_url(task_id, instance_id)
+        response = self._request(
+            base_url,
+            "POST",
+            f"/api/projects/{instance_id}/delivery/candidates/finalize",
+        )
+        raw_candidates = None if response is None else response.get("candidates")
+        if not isinstance(raw_candidates, list):
+            self._protocol_error("Image Agent returned an invalid delivery candidate list.")
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            raise HarnessError("VALIDATION_ERROR", "The Image instance has no task plan.")
+        card = next(
+            (item for item in plan["task_cards"] if item["instance_id"] == instance_id),
+            None,
+        )
+        if card is None:
+            raise HarnessError("VALIDATION_ERROR", "The Image instance has no task card.")
+        expected = [
+            item
+            for item in card["expected_deliveries"]
+            if item["required"] and item["kind"] == "image"
+        ]
+        if len(expected) != 1:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "The Image delivery cannot be mapped to one required final image role.",
+            )
+        instance_root = self.store.layout.initialize_instance(task_id, instance_id)
+        project_root = instance_root / "work" / instance_id
+        candidates: list[DeliveryBundleCandidate] = []
+        seen: set[str] = set()
+        for marker in raw_candidates:
+            if not isinstance(marker, dict):
+                self._protocol_error("Image Agent returned a malformed delivery candidate.")
+            bundle_id = marker.get("bundle_id")
+            checkpoint_id = marker.get("checkpoint_id")
+            raw_branch_id = marker.get("branch_id")
+            files = marker.get("files")
+            image_descriptor = marker.get("image")
+            note_descriptor = marker.get("design_note")
+            if (
+                not isinstance(bundle_id, str)
+                or not isinstance(checkpoint_id, str)
+                or not isinstance(raw_branch_id, str)
+                or not isinstance(files, dict)
+                or not isinstance(image_descriptor, dict)
+                or not isinstance(note_descriptor, dict)
+                or bundle_id in seen
+            ):
+                self._protocol_error("Image Agent returned a malformed delivery candidate.")
+            validate_identifier(bundle_id, "bundle_id")
+            validate_identifier(checkpoint_id, "checkpoint_id")
+            branch_id = (
+                raw_branch_id
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,127}", raw_branch_id)
+                else f"branch_{hashlib.sha256(raw_branch_id.encode('utf-8')).hexdigest()[:24]}"
+            )
+            image_relative = normalized_relative_path(str(files.get("image", "")))
+            note_relative = normalized_relative_path(str(files.get("markdown", "")))
+            if (
+                len(image_relative.parts) != 2
+                or image_relative.parts[0] != "delivery"
+                or len(note_relative.parts) != 2
+                or note_relative.parts[0] != "delivery"
+            ):
+                self._protocol_error("Image Agent delivery path escaped its delivery directory.")
+            image_sha256 = image_descriptor.get("sha256")
+            note_sha256 = note_descriptor.get("sha256")
+            if (
+                not isinstance(image_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", image_sha256) is None
+                or not isinstance(note_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", note_sha256) is None
+            ):
+                self._protocol_error("Image Agent returned an invalid candidate digest.")
+            image_output = instance_root / "outputs" / f"{bundle_id}-image{image_relative.suffix}"
+            note_output = instance_root / "outputs" / f"{bundle_id}-design-note.md"
+            stage_final_delivery(
+                project_root,
+                image_relative,
+                image_output,
+                expected_sha256=image_sha256,
+            )
+            stage_final_delivery(
+                project_root,
+                note_relative,
+                note_output,
+                expected_sha256=note_sha256,
+            )
+            normalized = normalize_image_delivery(
+                image_output,
+                accepted_mime_types=tuple(expected[0]["accepted_mime_types"]),
+            )
+            image_candidate = self.assets.inspect_delivery(
+                task_id,
+                instance_id,
+                source_relative_path=(
+                    f"instances/{instance_id}/"
+                    f"{normalized['path'].relative_to(instance_root).as_posix()}"
+                ),
+                role=expected[0]["role"],
+                description=f"Image Agent branch {raw_branch_id} final artwork.",
+                expected_sha256=normalized["sha256"],
+                derivation=normalized["derivation"],
+            )
+            note_candidate = self.assets.inspect_delivery(
+                task_id,
+                instance_id,
+                source_relative_path=(
+                    f"instances/{instance_id}/"
+                    f"{note_output.relative_to(instance_root).as_posix()}"
+                ),
+                role="design_note",
+                description=f"Image Agent branch {raw_branch_id} Markdown design note.",
+                expected_sha256=note_sha256,
+            )
+            if note_candidate["mime_type"] != "text/markdown":
+                self._protocol_error("Image Agent candidate note is not Markdown.")
+            width, height = image_dimensions(normalized["path"])
+            candidate: DeliveryBundleCandidate = {
+                "schema_version": "1.0",
+                "bundle_id": bundle_id,
+                "task_id": task_id,
+                "work_item_id": self._work_item_id(task_id, plan, card),
+                "instance_id": instance_id,
+                "task_card_revision": card["revision"],
+                "branch_id": branch_id,
+                "checkpoint_id": checkpoint_id,
+                "image": {
+                    "private_relative_path": image_candidate["source_relative_path"],
+                    "mime_type": image_candidate["mime_type"],
+                    "size_bytes": image_candidate["size_bytes"],
+                    "sha256": image_candidate["sha256"],
+                    "width": width,
+                    "height": height,
+                },
+                "design_note": {
+                    "private_relative_path": note_candidate["source_relative_path"],
+                    "mime_type": "text/markdown",
+                    "size_bytes": note_candidate["size_bytes"],
+                    "sha256": note_candidate["sha256"],
+                },
+                "status": "PENDING_CONFIRMATION",
+                "created_at": str(marker.get("created_at", "")),
+                "decided_at": None,
+                "actor": None,
+                "publication_batch_id": None,
+            }
+            self.contracts.validate("delivery-bundle-candidate", candidate)
+            seen.add(bundle_id)
+            candidates.append(candidate)
+        return sorted(
+            candidates,
+            key=lambda item: (item["branch_id"], item["checkpoint_id"], item["bundle_id"]),
+        )
+
+    def _work_item_id(
+        self,
+        task_id: str,
+        plan: dict[str, Any],
+        card: TaskCard,
+    ) -> str:
+        confirmed = [
+            item
+            for item in self.store.plan_proposal.list(task_id)
+            if item["status"] == "CONFIRMED"
+            and item["revision"] == plan["task"]["plan_revision"]
+        ]
+        for proposal in sorted(confirmed, key=lambda item: item["updated_at"], reverse=True):
+            match = next(
+                (
+                    item
+                    for item in proposal["work_items"]
+                    if card["instance_id"] in item.get("instance_ids", [])
+                    or item.get("current_instance_id") == card["instance_id"]
+                    or card["card_id"] in item.get("task_card_ids", [])
+                ),
+                None,
+            )
+            if match is not None:
+                return str(match["work_item_id"])
+        identity = hashlib.sha256(card["card_id"].encode("utf-8")).hexdigest()[:24]
+        return f"work_{identity}"
+
     def collect_deliveries(self, instance_id: str) -> list[DeliveryCandidate]:
         task_id = self._task_id_for_instance(instance_id)
         base_url = self._base_url(task_id, instance_id)
@@ -707,7 +972,7 @@ class ImageAgentAdapter(ImageObservationMixin):
 
 
     def _validate_runtime_source(self) -> None:
-        if self.revision != SUPPORTED_IMAGE_AGENT_REVISION:
+        if self.revision != self.release_lock.revision:
             raise HarnessError(
                 "SCHEMA_VERSION_UNSUPPORTED",
                 "The configured Image Agent revision is not supported by this Harness build.",
@@ -731,7 +996,7 @@ class ImageAgentAdapter(ImageObservationMixin):
             match = _PACKAGE_VERSION.search(pyproject.read_text(encoding="utf-8"))
         except OSError:
             match = None
-        if match is None or match.group(1) != SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION:
+        if match is None or match.group(1) != self.package_version:
             raise HarnessError(
                 "SCHEMA_VERSION_UNSUPPORTED",
                 "The configured Image Agent package version is unsupported.",

@@ -18,6 +18,9 @@ jobs:
         python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -29,6 +32,7 @@ jobs:
       - run: python -m compileall -q backend/harness scripts tests
       - run: python scripts/secret_scan.py .
       - run: python scripts/check_agent_import_boundary.py backend/harness
+      - run: python scripts/verify_image_agent_lock.py
       - run: python scripts/generate_frontend_contracts.py --check
       - run: python scripts/benchmark_storage_recovery.py --profile ci
       - run: python -m pip_audit -r requirements-runtime.txt --require-hashes --disable-pip --progress-spinner off
@@ -79,17 +83,18 @@ jobs:
       - run: npm run test:e2e
         working-directory: frontend
 
-  workbench-real-image:
-    name: workbench real Image closure
-    needs: [backend, frontend]
-    runs-on: ubuntu-latest
+  launcher:
+    name: launcher (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
         with:
-          repository: HST314/image_agent_mvp
-          ref: 0e559d0153f479c8abefb14613804b8cde486282
-          path: .runtime/image-agent-source
+          fetch-depth: 0
+          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -99,12 +104,100 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - run: python scripts/dev.py setup
+      - run: python scripts/dev.py doctor
+      - run: python scripts/dev.py start --check --timeout 60
+
+  p6_platform_acceptance:
+    name: P6 acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: python scripts/dev.py setup
+      - name: Run P6 platform acceptance without paid Provider calls
+        run: >-
+          python scripts/run_p6_platform_acceptance.py
+          --output build/p6-platform-${{ runner.os }}.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p6-platform-${{ runner.os }}
+          path: build/p6-platform-${{ runner.os }}.json
+          if-no-files-found: error
+
+  documentation:
+    name: documentation and examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check document set, links, JSON, commands and versions
+        run: python scripts/check_docs.py --report build/documentation-check.json
+      - name: Check documented launcher commands
+        run: |
+          python scripts/dev.py --help
+          python scripts/dev.py setup --help
+          python scripts/dev.py doctor --help
+          python scripts/dev.py start --help
+      - name: Check contracts and generated types
+        run: python scripts/generate_frontend_contracts.py --check
+      - name: Check pinned Image version and content
+        run: python scripts/verify_image_agent_lock.py
+      - name: Scan source and documentation for secrets
+        run: python scripts/secret_scan.py .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: documentation-evidence
+          path: build/documentation-check.json
+
+  workbench-real-image:
+    name: workbench real Image closure
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Verify locked Image source and dependency manifests
+        run: python scripts/verify_image_agent_lock.py
       - run: npm ci
         working-directory: frontend
       - run: npx playwright install --with-deps chromium
         working-directory: frontend
       - name: Run production workbench against pinned Image runtime
-        run: make frontend-integration IMAGE_AGENT_ROOT=.runtime/image-agent-source
+        run: make frontend-integration
 
   supply-chain:
     runs-on: ubuntu-latest
@@ -131,17 +224,23 @@ jobs:
   release-gate:
     name: release gate
     if: ${{ always() }}
-    needs: [backend, frontend, workbench-real-image, supply-chain]
+    needs: [backend, frontend, launcher, p6_platform_acceptance, documentation, workbench-real-image, supply-chain]
     runs-on: ubuntu-latest
     steps:
       - name: Require every release job to pass
         env:
           BACKEND_RESULT: ${{ needs.backend.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          LAUNCHER_RESULT: ${{ needs.launcher.result }}
+          P6_PLATFORM_RESULT: ${{ needs.p6_platform_acceptance.result }}
+          DOCUMENTATION_RESULT: ${{ needs.documentation.result }}
           REAL_IMAGE_RESULT: ${{ needs.workbench-real-image.result }}
           SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
         run: |
           test "$BACKEND_RESULT" = success
           test "$FRONTEND_RESULT" = success
+          test "$LAUNCHER_RESULT" = success
+          test "$P6_PLATFORM_RESULT" = success
+          test "$DOCUMENTATION_RESULT" = success
           test "$REAL_IMAGE_RESULT" = success
           test "$SUPPLY_CHAIN_RESULT" = success

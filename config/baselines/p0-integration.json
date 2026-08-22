@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "baseline_id": "p0-integration-2026-08-22",
+  "repositories": {
+    "harness": {
+      "repository": "https://github.com/HST314/agentic-design-harness.git",
+      "revision": "5fddb81c6008377e0f0bfc3640563a7085c789e3",
+      "git_tree": "c35feb40080a311fb4db4b2dbeaf46e3d96f504a",
+      "source_content_sha256": "ca900b8348fc1dead6875d09b16972df23dfaf8458cbcc5267489507549ac566",
+      "dependency_lock_set_sha256": "f963f7fa228ecd288c1b563e7dd23d4028cda886ec35e4b3155b3e3ff2b42420",
+      "dependency_files": [
+        {
+          "path": "frontend/package-lock.json",
+          "sha256": "4b0765616be69a0b86df0490089749cdf07260e05334658311244d40b238455a"
+        },
+        {
+          "path": "pyproject.toml",
+          "sha256": "3931f2c29c142c60530f07d577c67aec850d4a3c97fd0ac4a2de917adfb8967a"
+        },
+        {
+          "path": "requirements-dev.txt",
+          "sha256": "1c447203d2002e83435a68aaa88a39f78054cd93255a1bc91e66cd192fe33658"
+        },
+        {
+          "path": "requirements-runtime.txt",
+          "sha256": "5c537d37a1f416e2b8bdcb1a08ba293f82cdea6d3650fb30595f326d326d46e1"
+        },
+        {
+          "path": "requirements/image-agent-web.in",
+          "sha256": "383b7f348f75f5843fdf10b1530f0be489f17c321de8153f89e8a1d64af06728"
+        }
+      ],
+      "gate_result": {
+        "status": "PASSED",
+        "command": "make g5-e2e",
+        "evidence": [
+          ".github/workflows/quality.yml",
+          "scripts/run_g5_gate.py"
+        ]
+      }
+    },
+    "image_agent": {
+      "repository": "https://github.com/HST314/image_agent_mvp.git",
+      "revision": "8f26bda6eff4fa9c2c5b20498755b329ac7995b5",
+      "git_tree": "91589d58b1e2e9eae8a55e7e15b75d4118b3ab43",
+      "source_content_sha256": "0c6360f36db8a46ef0e009992feb026a069be62e18abf5d8a4e6f1cfedbbb978",
+      "dependency_lock_set_sha256": "e2f66966ed45fe0a1df6f6323f38875a9f5db4e5f4030aee7e74875765e5b17d",
+      "runtime_dependency_tree_sha256": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
+      "gate_result": {
+        "status": "PASSED",
+        "command": "quality / workbench real Image closure",
+        "accepted_by_harness_revision": "5fddb81c6008377e0f0bfc3640563a7085c789e3",
+        "evidence": [
+          ".github/workflows/quality.yml",
+          "scripts/run_browser_integration.py"
+        ]
+      }
+    }
+  },
+  "migration_defaults": {
+    "image_agent_path_mode": "prefer_embedded",
+    "delivery_bundle_migration_mode": "legacy_only",
+    "legacy_path_compatibility": "one_release"
+  }
+}

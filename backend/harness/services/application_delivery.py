@@ -45,9 +45,14 @@ class ApplicationDeliveryMixin:
             )
         if observation.details.get("completed") is True:
             try:
-                delivery = self._collect_publish_and_complete(
-                    task_id, instance_id, adapter, observation
-                )
+                if self.delivery_bundle_write_targets[1]:
+                    delivery = self._collect_bundles_and_request_review(
+                        task_id, instance_id, adapter, observation
+                    )
+                else:
+                    delivery = self._collect_publish_and_complete(
+                        task_id, instance_id, adapter, observation
+                    )
             except HarnessError as exc:
                 if exc.code not in _DELIVERY_REJECTION_CODES:
                     raise
@@ -226,9 +231,11 @@ class ApplicationDeliveryMixin:
                     "request": request,
                     "task_id": task_id,
                     "instance_id": approval["instance_id"],
+                    "approval_kind": approval["kind"],
                     "state": "PREPARED",
                     "prepared_at": utc_now(),
                     "advance": None,
+                    "publication": None,
                     "result": None,
                 }
                 atomic_write_json(intent_path, intent)
@@ -337,6 +344,8 @@ class ApplicationDeliveryMixin:
 
     def _resume_approval(self, intent_path: Path, crash_hook: CrashHook | None) -> dict[str, Any]:
         intent = read_json(intent_path)
+        if intent.get("approval_kind") == "DELIVERY_REVIEW":
+            return self._resume_delivery_review_approval(intent_path, crash_hook)
         request = intent["request"]
         envelope = CommandEnvelope.model_validate(request["envelope"])
         task_id = intent["task_id"]
@@ -445,6 +454,427 @@ class ApplicationDeliveryMixin:
             "advance": deepcopy(intent["advance"]),
         }
         intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
+        atomic_write_json(intent_path, intent)
+        return result
+
+    def list_delivery_bundle_candidates(
+        self,
+        task_id: str,
+        *,
+        instance_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        validate_identifier(task_id, "task_id")
+        if instance_id is not None:
+            validate_identifier(instance_id, "instance_id")
+        root = (
+            self.store.layout.initialize_task(task_id)[1]
+            / "deliveries"
+            / "candidates"
+        )
+        candidates: list[dict[str, Any]] = []
+        for path in sorted(root.glob("*.json")):
+            candidate = read_json(path)
+            self.store.contracts.validate("delivery-bundle-candidate", candidate)
+            if (
+                candidate["task_id"] != task_id
+                or path.name != f"{candidate['bundle_id']}.json"
+            ):
+                raise HarnessError(
+                    "ASSET_VALIDATION_FAILED", "A delivery candidate has an invalid owner."
+                )
+            if instance_id is None or candidate["instance_id"] == instance_id:
+                candidates.append(candidate)
+        return sorted(
+            candidates,
+            key=lambda item: (item["created_at"], item["branch_id"], item["bundle_id"]),
+        )
+
+    def _candidate_path(self, task_id: str, bundle_id: str) -> Path:
+        validate_identifier(bundle_id, "bundle_id")
+        return (
+            self.store.layout.initialize_task(task_id)[1]
+            / "deliveries"
+            / "candidates"
+            / f"{bundle_id}.json"
+        )
+
+    def _persist_delivery_bundle_candidate(
+        self, candidate: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.store.contracts.validate("delivery-bundle-candidate", candidate)
+        path = self._candidate_path(candidate["task_id"], candidate["bundle_id"])
+        if path.exists():
+            existing = read_json(path)
+            self.store.contracts.validate("delivery-bundle-candidate", existing)
+            immutable = (
+                "schema_version",
+                "bundle_id",
+                "task_id",
+                "work_item_id",
+                "instance_id",
+                "task_card_revision",
+                "branch_id",
+                "checkpoint_id",
+                "image",
+                "design_note",
+                "created_at",
+            )
+            if any(existing[key] != candidate[key] for key in immutable):
+                raise HarnessError(
+                    "IDEMPOTENCY_CONFLICT",
+                    "The delivery bundle identity was reused for different private outputs.",
+                    {"bundle_id": candidate["bundle_id"]},
+                )
+            return existing
+        atomic_write_json(path, candidate, mode=0o640)
+        return deepcopy(candidate)
+
+    def _decide_delivery_bundle_candidate(
+        self,
+        task_id: str,
+        bundle_id: str,
+        *,
+        status: str,
+        actor: dict[str, str],
+        decided_at: str,
+        publication_batch_id: str | None,
+    ) -> dict[str, Any]:
+        path = self._candidate_path(task_id, bundle_id)
+        if not path.exists():
+            raise HarnessError("VALIDATION_ERROR", "The delivery candidate does not exist.")
+        candidate = read_json(path)
+        if candidate["status"] != "PENDING_CONFIRMATION":
+            expected = {
+                "status": status,
+                "actor": actor,
+                "decided_at": decided_at,
+                "publication_batch_id": publication_batch_id,
+            }
+            if any(candidate.get(key) != value for key, value in expected.items()):
+                raise HarnessError(
+                    "IDEMPOTENCY_CONFLICT",
+                    "The delivery candidate already has another terminal decision.",
+                    {"bundle_id": bundle_id},
+                )
+            return candidate
+        updated = {
+            **candidate,
+            "status": status,
+            "actor": deepcopy(actor),
+            "decided_at": decided_at,
+            "publication_batch_id": publication_batch_id,
+        }
+        self.store.contracts.validate("delivery-bundle-candidate", updated)
+        atomic_write_json(path, updated, mode=0o640)
+        return updated
+
+    def _collect_bundles_and_request_review(
+        self,
+        task_id: str,
+        instance_id: str,
+        adapter,
+        observation,
+    ) -> dict[str, Any]:
+        collector = getattr(adapter, "collect_delivery_bundles", None)
+        if not callable(collector):
+            raise HarnessError(
+                "VALIDATION_ERROR", "The owning Agent adapter cannot collect delivery bundles."
+            )
+        raw_collected = collector(instance_id)
+        if not isinstance(raw_collected, list) or any(
+            not isinstance(item, dict) for item in raw_collected
+        ):
+            raise HarnessError(
+                "VALIDATION_ERROR", "The Agent adapter returned malformed delivery bundles."
+            )
+        collected: list[dict[str, Any]] = raw_collected
+        if not collected:
+            raise HarnessError(
+                "VALIDATION_ERROR", "A completed Image Agent did not expose a delivery bundle."
+            )
+        candidates = [self._persist_delivery_bundle_candidate(item) for item in collected]
+        instance = self._instance(task_id, instance_id)
+        transition = None
+        if instance["status"] == "RUNNING":
+            transition = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "WAITING_APPROVAL",
+                CommandEnvelope(
+                    idempotency_key=(
+                        f"delivery-review-{instance_id}-"
+                        f"{digest_json(sorted(item['bundle_id'] for item in candidates))[:24]}"
+                    ),
+                    actor_type="adapter",
+                    actor_id=f"{instance['agent_type']}_adapter",
+                    expected_revision=self.store.task.revision(task_id, task_id),
+                ),
+            )
+            instance = next(
+                item
+                for item in transition["plan"]["instances"]
+                if item["instance_id"] == instance_id
+            )
+        elif instance["status"] != "WAITING_APPROVAL":
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A delivery review candidate requires a running or waiting instance.",
+            )
+        approvals = [
+            self.approvals.ensure_delivery_review_approval(task_id, instance_id, candidate)
+            for candidate in candidates
+            if candidate["status"] == "PENDING_CONFIRMATION"
+        ]
+        return {
+            "status": "PENDING_CONFIRMATION",
+            "instance": deepcopy(instance),
+            "candidates": deepcopy(candidates),
+            "approvals": approvals,
+            "approval": approvals[0] if approvals else None,
+            "transition": transition,
+            "observation": {
+                "step_id": observation.step_id,
+                "details": deepcopy(observation.details),
+            },
+        }
+
+    def _publish_delivery_bundle(
+        self,
+        candidate: dict[str, Any],
+        *,
+        actor: dict[str, str],
+        published_at: str,
+        crash_hook: CrashHook | None,
+    ) -> dict[str, Any]:
+        task_id = candidate["task_id"]
+        instance_id = candidate["instance_id"]
+        plan = self._plan(task_id)
+        card = next(
+            item for item in plan["task_cards"] if item["instance_id"] == instance_id
+        )
+        expected_images = [
+            item
+            for item in card["expected_deliveries"]
+            if item["required"] and item["kind"] == "image"
+        ]
+        if len(expected_images) != 1:
+            raise HarnessError(
+                "VALIDATION_ERROR", "A delivery bundle requires one final image contract."
+            )
+        image = self.assets.inspect_delivery(
+            task_id,
+            instance_id,
+            source_relative_path=candidate["image"]["private_relative_path"],
+            role=expected_images[0]["role"],
+            description=f"Branch {candidate['branch_id']} final artwork.",
+            expected_sha256=candidate["image"]["sha256"],
+        )
+        note = self.assets.inspect_delivery(
+            task_id,
+            instance_id,
+            source_relative_path=candidate["design_note"]["private_relative_path"],
+            role="design_note",
+            description=f"Branch {candidate['branch_id']} Markdown design note.",
+            expected_sha256=candidate["design_note"]["sha256"],
+        )
+        if (
+            image["mime_type"] != candidate["image"]["mime_type"]
+            or note["mime_type"] != "text/markdown"
+            or image["size_bytes"] != candidate["image"]["size_bytes"]
+            or note["size_bytes"] != candidate["design_note"]["size_bytes"]
+        ):
+            raise HarnessError(
+                "ASSET_CORRUPTED", "A delivery bundle changed after candidate collection."
+            )
+        batch_identity = {
+            "bundle_id": candidate["bundle_id"],
+            "image": image["sha256"],
+            "note": note["sha256"],
+        }
+        batch_id = f"batch_{digest_json(batch_identity)[:32]}"
+        image_manifest = self.assets.publish_delivery(
+            task_id,
+            instance_id,
+            source_relative_path=image["source_relative_path"],
+            role=image["role"],
+            description=image["description"],
+            idempotency_key=f"bundle-{candidate['bundle_id']}-image",
+            batch_id=batch_id,
+        )
+        note_manifest = self.assets.publish_delivery(
+            task_id,
+            instance_id,
+            source_relative_path=note["source_relative_path"],
+            role=note["role"],
+            description=note["description"],
+            idempotency_key=f"bundle-{candidate['bundle_id']}-note",
+            batch_id=batch_id,
+        )
+        bundle_manifest = {
+            "schema_version": "1.0",
+            "bundle_id": candidate["bundle_id"],
+            "task_id": task_id,
+            "work_item_id": candidate["work_item_id"],
+            "instance_id": instance_id,
+            "task_card_revision": candidate["task_card_revision"],
+            "branch_id": candidate["branch_id"],
+            "checkpoint_id": candidate["checkpoint_id"],
+            "publication_batch_id": batch_id,
+            "image_asset": {
+                "asset_id": image_manifest["asset_id"],
+                "manifest_relpath": f"resources/manifests/{image_manifest['asset_id']}.json",
+            },
+            "design_note_asset": {
+                "asset_id": note_manifest["asset_id"],
+                "manifest_relpath": f"resources/manifests/{note_manifest['asset_id']}.json",
+            },
+            "actor": deepcopy(actor),
+            "created_at": candidate["created_at"],
+            "published_at": published_at,
+        }
+        self.store.contracts.validate("bundle-manifest", bundle_manifest)
+        batch = self.assets.commit_publication_batch(
+            task_id,
+            instance_id,
+            batch_id=batch_id,
+            manifests=[image_manifest, note_manifest],
+            bundle_manifest=bundle_manifest,
+            crash_hook=crash_hook,
+        )
+        if self._required_delivery_selection(
+            task_id, instance_id, [image_manifest, note_manifest]
+        ) is None:
+            raise HarnessError(
+                "VALIDATION_ERROR", "The bundle image does not satisfy its TaskCard contract."
+            )
+        return {
+            "batch": batch,
+            "batch_id": batch_id,
+            "manifests": [image_manifest, note_manifest],
+            "bundle_manifest": bundle_manifest,
+        }
+
+    def _resume_delivery_review_approval(
+        self, intent_path: Path, crash_hook: CrashHook | None
+    ) -> dict[str, Any]:
+        intent = read_json(intent_path)
+        request = intent["request"]
+        envelope = CommandEnvelope.model_validate(request["envelope"])
+        approval_details = self.approvals.get_approval(request["approval_id"])
+        approval_payload = approval_details["payload"]
+        task_id = intent["task_id"]
+        instance_id = intent["instance_id"]
+        bundle_id = str(approval_payload.get("bundle_id", ""))
+        candidates = self.list_delivery_bundle_candidates(task_id, instance_id=instance_id)
+        candidate = next((item for item in candidates if item["bundle_id"] == bundle_id), None)
+        if candidate is None:
+            raise HarnessError("VALIDATION_ERROR", "The approved delivery bundle is missing.")
+        actor = {"type": envelope.actor_type, "id": envelope.actor_id}
+        if request["decision"] == "APPROVED":
+            if request["action"] != "publish_bundle" or request["payload"]:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "A delivery review approval only accepts the frozen bundle.",
+                )
+            if intent.get("publication") is None:
+                publication = self._publish_delivery_bundle(
+                    candidate,
+                    actor=actor,
+                    published_at=intent["prepared_at"],
+                    crash_hook=crash_hook,
+                )
+                intent.update(state="PUBLICATION_COMMITTED", publication=publication)
+                atomic_write_json(intent_path, intent)
+                if crash_hook:
+                    crash_hook("after_delivery_bundle_publication")
+            candidate = self._decide_delivery_bundle_candidate(
+                task_id,
+                bundle_id,
+                status="PUBLISHED",
+                actor=actor,
+                decided_at=intent["prepared_at"],
+                publication_batch_id=intent["publication"]["batch_id"],
+            )
+        else:
+            candidate = self._decide_delivery_bundle_candidate(
+                task_id,
+                bundle_id,
+                status="REJECTED",
+                actor=actor,
+                decided_at=intent["prepared_at"],
+                publication_batch_id=None,
+            )
+        if crash_hook:
+            crash_hook("after_delivery_candidate_decision")
+        resolution = self.approvals.commit_resolution(
+            request["approval_id"], request["decision"], envelope
+        )
+        if crash_hook:
+            crash_hook("after_delivery_approval_commit")
+        self.approvals.handle_approval_notification(
+            request["approval_id"],
+            Actor(envelope.actor_type, envelope.actor_id),
+            self._derived_id("handled", intent["operation_id"], request["approval_id"]),
+        )
+        current = self._instance(task_id, instance_id)
+        transition = None
+        if request["decision"] == "APPROVED" and current["status"] == "WAITING_APPROVAL":
+            transition = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "SUCCEEDED",
+                CommandEnvelope(
+                    idempotency_key=self._derived_id(
+                        "bundle-success", intent["operation_id"], bundle_id
+                    ),
+                    actor_type=envelope.actor_type,
+                    actor_id=envelope.actor_id,
+                    expected_revision=self.store.task.revision(task_id, task_id),
+                ),
+            )
+            self._ensure_success_notifications(task_id, instance_id, transition)
+        elif request["decision"] == "REJECTED" and current["status"] == "WAITING_APPROVAL":
+            all_candidates = self.list_delivery_bundle_candidates(
+                task_id, instance_id=instance_id
+            )
+            if not any(item["status"] == "PENDING_CONFIRMATION" for item in all_candidates):
+                target = (
+                    "SUCCEEDED"
+                    if any(item["status"] == "PUBLISHED" for item in all_candidates)
+                    else "FAILED"
+                )
+                transition = self.commands.transition_instance(
+                    task_id,
+                    instance_id,
+                    target,
+                    CommandEnvelope(
+                        idempotency_key=self._derived_id(
+                            "bundle-decision", intent["operation_id"], bundle_id
+                        ),
+                        actor_type=envelope.actor_type,
+                        actor_id=envelope.actor_id,
+                        expected_revision=self.store.task.revision(task_id, task_id),
+                    ),
+                )
+                if target == "SUCCEEDED":
+                    self._ensure_success_notifications(task_id, instance_id, transition)
+        if crash_hook:
+            crash_hook("after_delivery_instance_transition")
+        current = self._instance(task_id, instance_id)
+        result = {
+            "approval": resolution["approval"],
+            "approval_revision": resolution["approval_revision"],
+            "candidate": candidate,
+            "bundle_manifest": (
+                None
+                if intent.get("publication") is None
+                else intent["publication"]["bundle_manifest"]
+            ),
+            "instance": deepcopy(current),
+            "transition": transition,
+            "advance": None,
+        }
+        intent.update(state="COMMITTED", committed_at=utc_now(), result=result)
         atomic_write_json(intent_path, intent)
         return result
 

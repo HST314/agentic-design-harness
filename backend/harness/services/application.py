@@ -43,6 +43,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         supervisor: ProcessSupervisor,
         adapters: AdapterRegistry,
         configuration: ConfigurationService | None = None,
+        delivery_bundle_write_targets: tuple[bool, bool] = (False, True),
     ) -> None:
         self.store = store
         self.commands = commands
@@ -52,6 +53,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         self.supervisor = supervisor
         self.adapters = adapters
         self.configuration = configuration
+        self.delivery_bundle_write_targets = delivery_bundle_write_targets
         self.intent_root = store.layout.control_root / "application-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 

@@ -232,6 +232,7 @@ def content_tree_sha256(
     *,
     ignored_names: Collection[str] = (),
     ignored_root_names: Collection[str] = (),
+    normalize_text_eol: bool = True,
 ) -> str:
     """Hash every runtime-relevant regular file by relative path and content."""
 
@@ -242,6 +243,7 @@ def content_tree_sha256(
         manifest,
         frozenset(ignored_names),
         frozenset(ignored_root_names),
+        normalize_text_eol,
     )
     return digest_json(manifest)
 
@@ -253,7 +255,21 @@ def dependency_tree_sha256(root: Path) -> str:
         root,
         ignored_names=_DEPENDENCY_IGNORED_NAMES,
         ignored_root_names=_DEPENDENCY_IGNORED_ROOT_NAMES,
+        normalize_text_eol=False,
     )
+
+
+def _portable_file_bytes(path: Path) -> bytes:
+    """Normalize only Git's cross-platform EOL transform for UTF-8 text."""
+
+    content = path.read_bytes()
+    if b"\0" in content:
+        return content
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content
+    return content.replace(b"\r\n", b"\n")
 
 
 def _append_content_manifest(
@@ -262,6 +278,7 @@ def _append_content_manifest(
     manifest: list[dict[str, str | int]],
     ignored_names: frozenset[str],
     ignored_root_names: frozenset[str],
+    normalize_text_eol: bool,
 ) -> None:
     current = root / relative
     try:
@@ -291,6 +308,7 @@ def _append_content_manifest(
                 manifest,
                 ignored_names,
                 ignored_root_names,
+                normalize_text_eol,
             )
             continue
         try:
@@ -300,10 +318,9 @@ def _append_content_manifest(
                     "PROCESS_START_FAILED",
                     "The Image Agent source contains a special file.",
                 )
-            digest = hashlib.sha256()
-            with path.open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
-                    digest.update(chunk)
+            content = (
+                _portable_file_bytes(path) if normalize_text_eol else path.read_bytes()
+            )
         except OSError:
             raise HarnessError(
                 "PROCESS_START_FAILED",
@@ -312,7 +329,7 @@ def _append_content_manifest(
         manifest.append(
             {
                 "path": item_relative.as_posix(),
-                "size_bytes": item_stat.st_size,
-                "sha256": digest.hexdigest(),
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
             }
         )

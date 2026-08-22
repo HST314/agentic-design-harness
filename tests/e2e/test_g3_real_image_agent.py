@@ -206,7 +206,14 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                             ),
                         },
                     )
-                    self.assertEqual(started.status_code, 200, started.text)
+                    if started.status_code != 200:
+                        process_logs = container.supervisor.log_summary(
+                            "t_g3_real_image", instance_id
+                        )
+                        self.fail(
+                            f"{started.text}\nredacted process logs: "
+                            f"{json.dumps(process_logs, ensure_ascii=False)}"
+                        )
 
                     taskbook = self._wait_for_boundary(client, instance_id)
                     self._resolve(client, taskbook, "approve_taskbook", {}, 1)
@@ -236,8 +243,41 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                         3,
                     )
 
-                    completed = self._wait_for_boundary(client, instance_id)
-                    self.assertEqual(completed["instance"]["status"], "SUCCEEDED")
+                    delivery_review = self._wait_for_boundary(client, instance_id)
+                    self.assertEqual(
+                        delivery_review["instance"]["status"], "WAITING_APPROVAL"
+                    )
+                    review = client.get(
+                        "/api/v1/approvals/"
+                        f"{delivery_review['pending_approval']['approval_id']}"
+                    )
+                    self.assertEqual(review.status_code, 200, review.text)
+                    self.assertEqual(review.json()["approval"]["kind"], "DELIVERY_REVIEW")
+                    before_publication = client.get(
+                        "/api/v1/tasks/t_g3_real_image/delivery-bundles"
+                    ).json()
+                    self.assertEqual(len(before_publication["candidates"]), 1)
+                    bundle_id = before_publication["candidates"][0]["bundle_id"]
+                    self.assertEqual(before_publication["manifests"], [])
+                    self.assertEqual(
+                        [
+                            item
+                            for item in client.get(
+                                "/api/v1/tasks/t_g3_real_image/files?group=shared"
+                            ).json()["assets"]
+                            if item["manifest"]["producer_instance_id"] == instance_id
+                        ],
+                        [],
+                    )
+                    published_bundle = self._resolve(
+                        client, delivery_review, "publish_bundle", {}, 4
+                    )
+                    self.assertEqual(
+                        published_bundle["candidate"]["status"], "PUBLISHED"
+                    )
+                    self.assertEqual(
+                        published_bundle["instance"]["status"], "SUCCEEDED"
+                    )
                     task = client.get("/api/v1/tasks/t_g3_real_image").json()["task"]
                     self.assertEqual(task["status"], "SUCCEEDED")
                     resources = client.get(
@@ -248,14 +288,35 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                         for item in resources["assets"]
                         if item["manifest"]["producer_instance_id"] == instance_id
                     ]
-                    self.assertEqual(len(published), 1)
-                    self.assertEqual(published[0]["integrity_status"], "VERIFIED")
-                    self.assertEqual(published[0]["manifest"]["sha256"], self._sha256(PNG))
+                    self.assertEqual(len(published), 2)
+                    self.assertTrue(
+                        all(item["integrity_status"] == "VERIFIED" for item in published)
+                    )
+                    image = next(
+                        item
+                        for item in published
+                        if item["manifest"]["role"] == "final_artwork"
+                    )
+                    note = next(
+                        item
+                        for item in published
+                        if item["manifest"]["role"] == "design_note"
+                    )
+                    self.assertEqual(image["manifest"]["sha256"], self._sha256(PNG))
+                    self.assertEqual(note["manifest"]["mime_type"], "text/markdown")
+                    after_publication = client.get(
+                        "/api/v1/tasks/t_g3_real_image/delivery-bundles"
+                    ).json()
+                    self.assertEqual(len(after_publication["manifests"]), 1)
+                    self.assertEqual(
+                        after_publication["manifests"][0]["publication_batch_id"],
+                        published_bundle["bundle_manifest"]["publication_batch_id"],
+                    )
                     approvals = client.get(
                         f"/api/v1/instances/{instance_id}/approvals"
                     ).json()["items"]
                     self.assertEqual([item["status"] for item in approvals], [
-                        "APPROVED", "APPROVED", "APPROVED"
+                        "APPROVED", "APPROVED", "APPROVED", "APPROVED"
                     ])
                     inbox = client.get("/api/v1/inbox?owner=human").json()["items"]
                     self.assertEqual(
@@ -264,14 +325,15 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                             "APPROVAL_REQUIRED",
                             "APPROVAL_REQUIRED",
                             "APPROVAL_REQUIRED",
+                            "DELIVERY_REVIEW_REQUIRED",
                             "INSTANCE_SUCCEEDED",
                             "TASK_SUCCEEDED",
                         ],
                     )
                     self.assertTrue(
-                        all(item["status"] == "HANDLED" for item in inbox[:3])
+                        all(item["status"] == "HANDLED" for item in inbox[:4])
                     )
-                    finalized = (
+                    candidate_marker = (
                         runtime
                         / "workspace"
                         / "tasks"
@@ -281,9 +343,9 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                         / "work"
                         / instance_id
                         / "delivery"
-                        / "finalized.json"
+                        / f"{bundle_id}-candidate.json"
                     )
-                    self.assertTrue(finalized.is_file())
+                    self.assertTrue(candidate_marker.is_file())
                     self.assertGreaterEqual(provider.chat_requests, 3)  # type: ignore[attr-defined]
                     self.assertEqual(provider.image_requests, 5)  # type: ignore[attr-defined]
                     usage_response = client.get(
@@ -521,7 +583,7 @@ class RealImageAdapterG3Tests(unittest.TestCase):
         action: str,
         payload: dict[str, Any],
         index: int,
-    ) -> None:
+    ) -> dict[str, Any]:
         approval = detail["pending_approval"]
         self.assertIsNotNone(approval)
         approval_details = client.get(
@@ -541,7 +603,12 @@ class RealImageAdapterG3Tests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertTrue(response.json()["advance"]["accepted"])
+        result = response.json()
+        if action == "publish_bundle":
+            self.assertIsNone(result["advance"])
+        else:
+            self.assertTrue(result["advance"]["accepted"])
+        return result
 
     @staticmethod
     def _envelope(key: str, revision: int) -> dict[str, object]:

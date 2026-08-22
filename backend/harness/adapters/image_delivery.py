@@ -31,6 +31,24 @@ _PNG_PARAMETERS = {
 _MAX_IMAGE_PIXELS = 40_000_000
 
 
+def image_dimensions(path: Path) -> tuple[int, int]:
+    """Read and bound decoded dimensions from one staged image."""
+
+    try:
+        with Image.open(path) as opened:
+            width, height = opened.size
+            opened.verify()
+    except (OSError, UnidentifiedImageError):
+        raise HarnessError(
+            "ASSET_VALIDATION_FAILED", "The finalized Image delivery is not decodable."
+        ) from None
+    if width <= 0 or height <= 0 or width * height > _MAX_IMAGE_PIXELS:
+        raise HarnessError(
+            "ASSET_VALIDATION_FAILED", "The finalized Image delivery dimensions are unsafe."
+        )
+    return width, height
+
+
 def stage_final_delivery(
     project_root: Path,
     relative: PurePosixPath,

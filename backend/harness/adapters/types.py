@@ -136,6 +136,36 @@ class DeliveryCandidate(TypedDict):
     derivation: dict[str, Any] | None
 
 
+class DeliveryBundleFile(TypedDict):
+    private_relative_path: str
+    mime_type: str
+    size_bytes: int
+    sha256: str
+
+
+class DeliveryBundleImage(DeliveryBundleFile):
+    width: int
+    height: int
+
+
+class DeliveryBundleCandidate(TypedDict):
+    schema_version: str
+    bundle_id: str
+    task_id: str
+    work_item_id: str
+    instance_id: str
+    task_card_revision: int
+    branch_id: str
+    checkpoint_id: str
+    image: DeliveryBundleImage
+    design_note: DeliveryBundleFile
+    status: Literal["PENDING_CONFIRMATION", "PUBLISHED", "REJECTED", "CORRUPTED"]
+    created_at: str
+    decided_at: str | None
+    actor: dict[str, str] | None
+    publication_batch_id: str | None
+
+
 class BillingUnit(TypedDict):
     unit: str
     quantity: int

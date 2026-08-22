@@ -75,7 +75,7 @@ class MasterThreadService:
             task_id = intent.get("task_id")
             if intent.get("kind") != "CONFIRM_MASTER_PLAN" or not isinstance(task_id, str):
                 raise HarnessError("VALIDATION_ERROR", "A Master confirmation intent is invalid.")
-            if intent.get("state") == "COMPLETED":
+            if intent.get("state") in {"COMPLETED", "ABORTED"}:
                 continue
             with self.commands.task_guard(task_id):
                 result = self._resume_confirm(path)
@@ -183,16 +183,204 @@ class MasterThreadService:
         proposal_revision: int,
         *,
         task_expected_revision: int,
+        expected_card_revisions: dict[str, int],
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
-        if envelope.actor_type != "human":
-            raise HarnessError("VALIDATION_ERROR", "Only a human may confirm a plan here.")
         return self._confirm(
             task_id,
             proposal_revision,
             task_expected_revision=task_expected_revision,
+            expected_card_revisions=expected_card_revisions,
             envelope=envelope,
         )
+
+    def revise_task_card(
+        self,
+        task_id: str,
+        proposal_revision: int,
+        card_id: str,
+        *,
+        expected_proposal_revision: int,
+        expected_card_revision: int,
+        editable: dict[str, Any],
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Create a new pending proposal revision from one human-reviewed card edit."""
+
+        if envelope.actor_type != "human":
+            raise HarnessError("VALIDATION_ERROR", "Only a human may revise a task card.")
+        if proposal_revision != expected_proposal_revision:
+            self._revision_conflict(
+                "plan_proposal",
+                f"{task_id}:r{proposal_revision}",
+                expected_proposal_revision,
+                proposal_revision,
+            )
+        if envelope.expected_revision != expected_proposal_revision:
+            self._revision_conflict(
+                "plan_proposal",
+                f"{task_id}:r{proposal_revision}",
+                envelope.expected_revision,
+                expected_proposal_revision,
+            )
+        next_proposal_id = self._identifier(
+            "proposal_edit",
+            task_id,
+            str(proposal_revision),
+            card_id,
+            envelope.idempotency_key,
+        )
+        with self.commands.task_guard(task_id):
+            existing = self.store.plan_proposal.get(task_id, next_proposal_id)
+            if existing is not None:
+                revised = next(
+                    (card for card in existing["execution_cards"] if card["card_id"] == card_id),
+                    None,
+                )
+                if revised is None or self._editable_card_fields(revised) != editable:
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The task-card idempotency key was reused with different content.",
+                    )
+                return self._session(task_id)
+
+            task = self._task(task_id)
+            thread = self._ensure_thread(task_id, task)
+            proposal = self._proposal_by_revision(task_id, proposal_revision)
+            if thread["latest_proposal_revision"] != proposal_revision:
+                self._revision_conflict(
+                    "plan_proposal",
+                    proposal["proposal_id"],
+                    proposal_revision,
+                    thread["latest_proposal_revision"],
+                )
+            if proposal["status"] != "PENDING_CONFIRMATION":
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "Only the latest pending plan may be revised.",
+                )
+            card_index = next(
+                (
+                    index
+                    for index, card in enumerate(proposal["execution_cards"])
+                    if card["card_id"] == card_id
+                ),
+                None,
+            )
+            if card_index is None:
+                raise HarnessError("TASK_NOT_FOUND", "The selected TaskCard does not exist.")
+            current_card = proposal["execution_cards"][card_index]
+            if current_card["revision"] != expected_card_revision:
+                self._revision_conflict(
+                    "task_card",
+                    card_id,
+                    expected_card_revision,
+                    current_card["revision"],
+                )
+
+            normalized_editable = deepcopy(editable)
+            normalized_editable["input_assets"] = self._validate_asset_refs(
+                task_id, normalized_editable["input_assets"]
+            )
+            now = utc_now()
+            revised_card = {
+                **deepcopy(current_card),
+                **normalized_editable,
+                "revision": current_card["revision"] + 1,
+                "created_at": now,
+            }
+            adapter = self.adapters.get_optional(revised_card["agent_type"])
+            if adapter is not None:
+                validation = adapter.validate_task_card(cast(TaskCard, revised_card))
+                if not validation.valid:
+                    raise HarnessError(
+                        "VALIDATION_ERROR",
+                        "The Agent adapter rejected the revised task card.",
+                        {"errors": list(validation.errors)},
+                    )
+
+            next_proposal = deepcopy(proposal)
+            next_proposal.update(
+                {
+                    "proposal_id": next_proposal_id,
+                    "revision": proposal_revision + 1,
+                    "status": "PENDING_CONFIRMATION",
+                    "created_at": now,
+                    "updated_at": now,
+                    "confirmed_at": None,
+                }
+            )
+            next_proposal["execution_cards"][card_index] = revised_card
+            validate_plan_proposal(
+                self.contracts,
+                next_proposal,
+                task_id=task_id,
+                expected_revision=proposal_revision + 1,
+            )
+
+            actor = Actor(envelope.actor_type, envelope.actor_id)
+            self.store.plan_proposal.put(
+                task_id,
+                next_proposal_id,
+                next_proposal,
+                expected_revision=0,
+                actor=actor,
+                command="revise_plan_task_card",
+                idempotency_key=envelope.idempotency_key,
+            )
+            superseded = {
+                **proposal,
+                "status": "SUPERSEDED",
+                "updated_at": now,
+                "confirmed_at": None,
+            }
+            self.store.plan_proposal.put(
+                task_id,
+                proposal["proposal_id"],
+                superseded,
+                expected_revision=self.store.plan_proposal.revision(
+                    task_id, proposal["proposal_id"]
+                ),
+                actor=actor,
+                command="supersede_plan_proposal_after_card_revision",
+                idempotency_key=self._identifier(
+                    "supersede_card_edit", task_id, next_proposal_id
+                ),
+            )
+            message = self._message(
+                task_id,
+                self._identifier("message_card_edit", task_id, next_proposal_id),
+                thread["latest_sequence"] + 1,
+                role="system",
+                kind="plan_proposal",
+                content=(
+                    f"任务卡 {card_id} 已保存为 r{revised_card['revision']}, "
+                    f"计划已更新为 r{next_proposal['revision']}, 请重新审阅后确认。"
+                ),
+                asset_refs=[],
+                created_at=now,
+            )
+            self._put_message(message, actor, "append_task_card_revision_message")
+            self._put_thread(
+                task_id,
+                {
+                    **thread,
+                    "latest_sequence": message["sequence"],
+                    "latest_proposal_revision": next_proposal["revision"],
+                    "last_error": None,
+                },
+                actor,
+                "publish_task_card_revision",
+            )
+            return self._session(task_id)
+
+    @staticmethod
+    def _require_human_confirmation(actor_type: object) -> None:
+        if actor_type != "human":
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only a human may confirm and start a Master plan.",
+            )
 
     def _confirm(
         self,
@@ -200,17 +388,21 @@ class MasterThreadService:
         proposal_revision: int,
         *,
         task_expected_revision: int,
+        expected_card_revisions: dict[str, int],
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
+        self._require_human_confirmation(envelope.actor_type)
         intent_path = self._confirm_intent_path(task_id, proposal_revision)
         with self.commands.task_guard(task_id):
             if intent_path.exists():
                 intent = read_json(intent_path)
                 if intent["state"] == "COMPLETED":
                     return deepcopy(intent["result"])
+                if intent["state"] == "ABORTED":
+                    self._raise_aborted_confirmation_intent(intent)
             else:
                 task = self._task(task_id)
-                thread = self._ensure_thread(task_id, task)
+                self._ensure_thread(task_id, task)
                 proposal = self._proposal_by_revision(task_id, proposal_revision)
                 if envelope.expected_revision != proposal_revision:
                     self._revision_conflict(
@@ -219,28 +411,13 @@ class MasterThreadService:
                         envelope.expected_revision,
                         proposal_revision,
                     )
-                if thread["latest_proposal_revision"] != proposal_revision:
-                    self._revision_conflict(
-                        "plan_proposal",
-                        proposal["proposal_id"],
-                        proposal_revision,
-                        thread["latest_proposal_revision"],
-                    )
-                if proposal["status"] != "PENDING_CONFIRMATION":
-                    raise HarnessError(
-                        "INVALID_STATE_TRANSITION", "Only the latest pending plan may run."
-                    )
-                actual_task_revision = self.store.task.revision(task_id, task_id)
-                if task_expected_revision != actual_task_revision:
-                    self._revision_conflict(
-                        "task", task_id, task_expected_revision, actual_task_revision
-                    )
                 intent = {
                     "schema_version": "1.0",
                     "kind": "CONFIRM_MASTER_PLAN",
                     "task_id": task_id,
                     "proposal_id": proposal["proposal_id"],
                     "proposal_revision": proposal_revision,
+                    "expected_card_revisions": deepcopy(expected_card_revisions),
                     "task_expected_revision": task_expected_revision,
                     "actor": {
                         "actor_type": envelope.actor_type,
@@ -252,18 +429,33 @@ class MasterThreadService:
                     "start_result": None,
                     "result": None,
                 }
+                self._validate_confirmation_gate(
+                    intent, task_expected_revision=task_expected_revision
+                )
                 atomic_write_json(intent_path, intent)
             return self._resume_confirm(intent_path)
 
     def _resume_confirm(self, intent_path: Path) -> dict[str, Any]:
         intent = read_json(intent_path)
+        if intent.get("state") == "ABORTED":
+            self._raise_aborted_confirmation_intent(intent)
+        try:
+            actor = intent.get("actor")
+            self._require_human_confirmation(
+                actor.get("actor_type") if isinstance(actor, dict) else None
+            )
+        except HarnessError as exc:
+            self._abort_confirmation_intent(intent_path, intent, exc)
+            raise
         task_id = intent["task_id"]
-        proposal = self.store.plan_proposal.get(task_id, intent["proposal_id"])
-        if proposal is None:
-            raise HarnessError("TASK_NOT_FOUND", "The selected PlanProposal does not exist.")
-        stages, instances, cards = materialize_plan_proposal(proposal)
-        providers = self._provider_mapping(instances)
         if intent["state"] == "PREPARED":
+            proposal = self._validate_confirmation_gate_or_abort(
+                intent_path,
+                intent,
+                task_expected_revision=intent.get("task_expected_revision"),
+            )
+            stages, instances, cards = materialize_plan_proposal(proposal)
+            providers = self._provider_mapping(instances)
             actor = intent["actor"]
             plan_result = self.application.save_plan_and_create_instances(
                 task_id,
@@ -284,8 +476,16 @@ class MasterThreadService:
             intent.update({"state": "PLAN_SAVED", "plan_result": plan_result})
             atomic_write_json(intent_path, intent)
         if intent["state"] == "PLAN_SAVED":
+            plan_result = intent.get("plan_result")
+            saved_task_revision = (
+                plan_result.get("task_revision") if isinstance(plan_result, dict) else None
+            )
+            proposal = self._validate_confirmation_gate_or_abort(
+                intent_path,
+                intent,
+                task_expected_revision=saved_task_revision,
+            )
             actor = intent["actor"]
-            task_revision = int(intent["plan_result"]["task_revision"])
             start_result = self.application.confirm_and_start_ready_instances(
                 task_id,
                 operation_id=self._identifier("master_start", task_id, proposal["proposal_id"]),
@@ -295,13 +495,14 @@ class MasterThreadService:
                     ),
                     actor_type=actor["actor_type"],
                     actor_id=actor["actor_id"],
-                    expected_revision=task_revision,
+                    expected_revision=cast(int, saved_task_revision),
                 ),
             )
             intent.update({"state": "STARTED", "start_result": start_result})
             atomic_write_json(intent_path, intent)
         if intent["state"] == "STARTED":
-            current = self.store.plan_proposal.get(task_id, proposal["proposal_id"])
+            proposal_id = intent["proposal_id"]
+            current = self.store.plan_proposal.get(task_id, proposal_id)
             if current is None:
                 raise HarnessError("TASK_NOT_FOUND", "The selected PlanProposal does not exist.")
             if current["status"] != "CONFIRMED":
@@ -314,22 +515,22 @@ class MasterThreadService:
                 }
                 self.store.plan_proposal.put(
                     task_id,
-                    proposal["proposal_id"],
+                    proposal_id,
                     confirmed,
                     expected_revision=self.store.plan_proposal.revision(
-                        task_id, proposal["proposal_id"]
+                        task_id, proposal_id
                     ),
                     actor=Actor(intent["actor"]["actor_type"], intent["actor"]["actor_id"]),
                     command="confirm_plan_proposal",
                     idempotency_key=self._identifier(
-                        "confirm_proposal", task_id, proposal["proposal_id"]
+                        "confirm_proposal", task_id, proposal_id
                     ),
                 )
-            self._append_confirmation_message(task_id, proposal)
+            self._append_confirmation_message(task_id, current)
             result = {
                 "schema_version": "1.0",
                 "proposal": deepcopy(
-                    self.store.plan_proposal.get(task_id, proposal["proposal_id"])
+                    self.store.plan_proposal.get(task_id, proposal_id)
                 ),
                 "plan_result": deepcopy(intent["plan_result"]),
                 "start_result": deepcopy(intent["start_result"]),
@@ -342,6 +543,125 @@ class MasterThreadService:
             })
             atomic_write_json(intent_path, intent)
         return deepcopy(intent["result"])
+
+    def _validate_confirmation_gate_or_abort(
+        self,
+        intent_path: Path,
+        intent: dict[str, Any],
+        *,
+        task_expected_revision: object,
+    ) -> dict[str, Any]:
+        try:
+            return self._validate_confirmation_gate(
+                intent, task_expected_revision=task_expected_revision
+            )
+        except HarnessError as exc:
+            self._abort_confirmation_intent(intent_path, intent, exc)
+            raise
+
+    def _validate_confirmation_gate(
+        self,
+        intent: dict[str, Any],
+        *,
+        task_expected_revision: object,
+    ) -> dict[str, Any]:
+        task_id = intent.get("task_id")
+        proposal_id = intent.get("proposal_id")
+        proposal_revision = intent.get("proposal_revision")
+        expected_card_revisions = intent.get("expected_card_revisions")
+        if (
+            not isinstance(task_id, str)
+            or not isinstance(proposal_id, str)
+            or not isinstance(proposal_revision, int)
+            or not isinstance(task_expected_revision, int)
+            or not isinstance(expected_card_revisions, dict)
+            or not all(
+                isinstance(card_id, str) and isinstance(revision, int)
+                for card_id, revision in expected_card_revisions.items()
+            )
+        ):
+            raise HarnessError("VALIDATION_ERROR", "A Master confirmation intent is invalid.")
+
+        proposal = self.store.plan_proposal.get(task_id, proposal_id)
+        if proposal is None:
+            raise HarnessError("TASK_NOT_FOUND", "The selected PlanProposal does not exist.")
+        if proposal.get("revision") != proposal_revision:
+            actual_revision = proposal.get("revision")
+            if not isinstance(actual_revision, int):
+                raise HarnessError(
+                    "VALIDATION_ERROR", "The selected PlanProposal revision is invalid."
+                )
+            self._revision_conflict(
+                "plan_proposal", proposal_id, proposal_revision, actual_revision
+            )
+
+        thread = self.store.master_thread.get(task_id, task_id)
+        if thread is None:
+            raise HarnessError("TASK_NOT_FOUND", "The Master thread does not exist.")
+        latest_revision = thread["latest_proposal_revision"]
+        if latest_revision != proposal_revision:
+            self._revision_conflict(
+                "plan_proposal", proposal_id, proposal_revision, latest_revision
+            )
+        latest_proposal = self._proposal_by_revision(task_id, latest_revision)
+        if latest_proposal["proposal_id"] != proposal_id:
+            raise HarnessError(
+                "REVISION_CONFLICT",
+                "The selected PlanProposal is no longer the latest proposal.",
+                {
+                    "object_type": "plan_proposal",
+                    "object_id": proposal_id,
+                    "expected_proposal_id": proposal_id,
+                    "actual_proposal_id": latest_proposal["proposal_id"],
+                },
+            )
+        if proposal["status"] != "PENDING_CONFIRMATION":
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION", "Only the latest pending plan may run."
+            )
+
+        actual_card_revisions = {
+            card["card_id"]: card["revision"] for card in proposal["execution_cards"]
+        }
+        if expected_card_revisions != actual_card_revisions:
+            raise HarnessError(
+                "REVISION_CONFLICT",
+                "A TaskCard revision changed before this plan was confirmed.",
+                {
+                    "object_type": "task_card_set",
+                    "object_id": proposal_id,
+                    "expected_revisions": deepcopy(expected_card_revisions),
+                    "actual_revisions": actual_card_revisions,
+                },
+            )
+        actual_task_revision = self.store.task.revision(task_id, task_id)
+        if task_expected_revision != actual_task_revision:
+            self._revision_conflict(
+                "task", task_id, task_expected_revision, actual_task_revision
+            )
+        return proposal
+
+    @staticmethod
+    def _abort_confirmation_intent(
+        intent_path: Path, intent: dict[str, Any], error: HarnessError
+    ) -> None:
+        intent.update(
+            {
+                "state": "ABORTED",
+                "aborted_at": utc_now(),
+                "error": {
+                    "code": error.code,
+                    "message": error.message,
+                    "details": deepcopy(error.details),
+                },
+            }
+        )
+        atomic_write_json(intent_path, intent)
+
+    @staticmethod
+    def _raise_aborted_confirmation_intent(intent: dict[str, Any]) -> None:
+        error = intent["error"]
+        raise HarnessError(error["code"], error["message"], deepcopy(error["details"]))
 
     def _ensure_intake_message(
         self, task_id: str, task: dict[str, Any], thread: dict[str, Any]
@@ -548,31 +868,6 @@ class MasterThreadService:
             "publish_master_plan",
         )
         self._apply_generated_title(task_id, observation.task_title, proposal["proposal_id"])
-        task = self._task(task_id)
-        if task["start_policy"] == "auto":
-            try:
-                self._confirm(
-                    task_id,
-                    proposal["revision"],
-                    task_expected_revision=self.store.task.revision(task_id, task_id),
-                    envelope=CommandEnvelope(
-                        idempotency_key=self._identifier(
-                            "auto_confirm", task_id, proposal["proposal_id"]
-                        ),
-                        actor_type="master",
-                        actor_id="master_gateway",
-                        expected_revision=proposal["revision"],
-                    ),
-                )
-            except HarnessError as exc:
-                current = self.store.master_thread.get(task_id, task_id) or thread
-                return self._record_gateway_error(
-                    task_id,
-                    current,
-                    current["active_run"],
-                    exc.code,
-                    exc.message,
-                )
         return self.store.master_thread.get(task_id, task_id) or thread
 
     def _append_gateway_message(
@@ -761,6 +1056,16 @@ class MasterThreadService:
             seen.add(asset_id)
             refs.append({"asset_id": asset_id, "manifest_relpath": expected})
         return refs
+
+    @staticmethod
+    def _editable_card_fields(card: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "objective": deepcopy(card["objective"]),
+            "instructions": deepcopy(card["instructions"]),
+            "input_assets": deepcopy(card["input_assets"]),
+            "expected_deliveries": deepcopy(card["expected_deliveries"]),
+            "parameters": deepcopy(card["parameters"]),
+        }
 
     def _session(self, task_id: str) -> dict[str, Any]:
         task = self._task(task_id)

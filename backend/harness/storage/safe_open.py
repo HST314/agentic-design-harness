@@ -36,16 +36,27 @@ def open_regular_readonly(path: Path, *, trusted_root: Path | None = None) -> in
     before = candidate.lstat()
     if is_link_or_reparse(candidate, before) or not stat.S_ISREG(before.st_mode):
         raise OSError("path is not a regular no-link file")
-    descriptor = os.open(
-        candidate,
+    open_flags = (
         os.O_RDONLY
         | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0),
+        | getattr(os, "O_CLOEXEC", 0)
     )
+    descriptor = os.open(candidate, open_flags)
     try:
         after = os.fstat(descriptor)
-        if not stat.S_ISREG(after.st_mode) or _identity(before) != _identity(after):
+        if not stat.S_ISREG(after.st_mode):
+            raise OSError("file changed while it was opened")
+        if os.name == "nt":
+            comparison = os.open(candidate, open_flags)
+            try:
+                if not os.path.sameopenfile(descriptor, comparison):
+                    raise OSError("file changed while it was opened")
+            finally:
+                os.close(comparison)
+            if is_link_or_reparse(candidate):
+                raise OSError("path became a link or reparse point")
+        elif _identity(before) != _identity(after):
             raise OSError("file changed while it was opened")
         resolved_root = root.resolve(strict=True)
         resolved_candidate = candidate.resolve(strict=True)
@@ -63,16 +74,6 @@ def _validate_beneath(root: Path, candidate: Path) -> None:
     resolved_root = root.resolve(strict=True)
     if is_link_or_reparse(root):
         raise OSError("trusted root is a link or reparse point")
-    try:
-        relative = candidate.relative_to(root)
-    except ValueError:
-        raise OSError("path leaves its trusted root") from None
-    current = root
-    for component in relative.parts:
-        current = current / component
-        metadata = current.lstat()
-        if is_link_or_reparse(current, metadata):
-            raise OSError("path contains a link or reparse point")
     resolved_candidate = candidate.resolve(strict=True)
     try:
         inside = os.path.commonpath((str(resolved_root), str(resolved_candidate)))
@@ -80,13 +81,29 @@ def _validate_beneath(root: Path, candidate: Path) -> None:
         raise OSError("path leaves its trusted root") from None
     if inside != str(resolved_root):
         raise OSError("path leaves its trusted root")
+    # Windows resolution can expand an 8.3 trusted-root alias. Walk upward from
+    # the caller's spelling so every actual component is still checked without
+    # requiring that spelling to share the resolved root's textual prefix.
+    current = candidate
+    while True:
+        metadata = current.lstat()
+        if is_link_or_reparse(current, metadata):
+            raise OSError("path contains a link or reparse point")
+        if current.resolve(strict=True) == resolved_root:
+            break
+        parent = current.parent
+        if parent == current:
+            raise OSError("path leaves its trusted root")
+        current = parent
 
 
-def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+def _identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    # Windows path stat derives execute bits from the filename extension, while
+    # fstat has no filename context. Both sides are separately required to be
+    # regular files, so mode is not a stable part of the file identity.
     return (
         metadata.st_dev,
         metadata.st_ino,
-        metadata.st_mode,
         metadata.st_size,
         metadata.st_mtime_ns,
     )

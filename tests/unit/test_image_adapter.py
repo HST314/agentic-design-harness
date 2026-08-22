@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import shutil
 import sys
 import tempfile
@@ -8,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness.adapters import PrepareRequest
-from harness.adapters.image import ImageAgentAdapter
+from harness.adapters.image import ImageAgentAdapter, image_dependency_pythonpath_entries
 from harness.adapters.image_delivery import normalize_image_delivery, stage_final_delivery
 from harness.adapters.image_workflow import map_advance_payload
 from harness.core.errors import HarnessError
@@ -17,13 +19,30 @@ from harness.services.configuration import ConfigurationService
 from harness.storage.atomic import digest_json
 from harness.storage.repository import utc_now
 from PIL import Image
-from runtime_helpers import build_service, create_task
+from runtime_helpers import build_service, create_task, envelope, instance, stage
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_SCHEMA = ROOT / "tests" / "fixtures" / "image-agent-contract" / "ImageTaskCard.schema.json"
 
 
 class ImageAdapterTests(unittest.TestCase):
+    def test_windows_target_dependencies_include_pywin32_pth_roots(self) -> None:
+        artifact = Path("runtime") / "image-agent-artifact"
+
+        self.assertEqual(
+            image_dependency_pythonpath_entries(artifact, os_name="nt"),
+            (
+                artifact / "_dependencies",
+                artifact / "_dependencies" / "win32",
+                artifact / "_dependencies" / "win32" / "lib",
+                artifact / "_dependencies" / "pythonwin",
+            ),
+        )
+        self.assertEqual(
+            image_dependency_pythonpath_entries(artifact, os_name="posix"),
+            (artifact / "_dependencies",),
+        )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -630,6 +649,97 @@ class ImageAdapterTests(unittest.TestCase):
         )
         self.assertEqual(observation.status, "WAITING_APPROVAL")
         self.assertEqual(observation.capabilities, ("review_calibration",))
+
+    def test_collect_delivery_bundles_stages_image_and_markdown_together(self) -> None:
+        card = self._card([])
+        self.commands.save_plan(
+            "t_image_adapter",
+            stages=[
+                stage(
+                    "t_image_adapter",
+                    "s_image",
+                    "image",
+                    1,
+                    [],
+                    True,
+                    ["i_image_adapter"],
+                )
+            ],
+            instances=[
+                instance(
+                    "t_image_adapter",
+                    "i_image_adapter",
+                    "s_image",
+                    "image",
+                    True,
+                )
+            ],
+            task_cards=[card],
+            envelope=envelope(
+                "save-image-adapter-bundle-plan",
+                self.store.task.revision("t_image_adapter", "t_image_adapter"),
+            ),
+        )
+        instance_root = self.store.layout.initialize_instance(
+            "t_image_adapter", "i_image_adapter"
+        )
+        delivery = instance_root / "work" / "i_image_adapter" / "delivery"
+        delivery.mkdir(parents=True)
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (48, 32), "navy").save(image_buffer, "PNG")
+        image_bytes = image_buffer.getvalue()
+        note_bytes = b"# Final branch note\n"
+        (delivery / "bundle-image.png").write_bytes(image_bytes)
+        (delivery / "bundle-note.md").write_bytes(note_bytes)
+        response = {
+            "schema_version": "1.0",
+            "candidates": [
+                {
+                    "bundle_id": "bundle_adapter_main_01",
+                    "branch_id": "main",
+                    "checkpoint_id": "checkpoint_0123456789abcdef01234567",
+                    "files": {
+                        "image": "delivery/bundle-image.png",
+                        "markdown": "delivery/bundle-note.md",
+                        "json": "delivery/bundle.json",
+                    },
+                    "image": {
+                        "sha256": hashlib.sha256(image_bytes).hexdigest(),
+                    },
+                    "design_note": {
+                        "sha256": hashlib.sha256(note_bytes).hexdigest(),
+                    },
+                    "created_at": "2026-08-22T17:20:00Z",
+                }
+            ],
+        }
+        with (
+            patch.object(
+                self.adapter, "_base_url", return_value="http://127.0.0.1:1"
+            ),
+            patch.object(self.adapter, "_request", return_value=response),
+        ):
+            candidates = self.adapter.collect_delivery_bundles("i_image_adapter")
+
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate["branch_id"], "main")
+        self.assertEqual(candidate["image"]["mime_type"], "image/png")
+        self.assertEqual(
+            (candidate["image"]["width"], candidate["image"]["height"]),
+            (48, 32),
+        )
+        self.assertEqual(candidate["design_note"]["mime_type"], "text/markdown")
+        self.store.contracts.validate("delivery-bundle-candidate", candidate)
+        for part in (candidate["image"], candidate["design_note"]):
+            self.assertTrue(
+                (
+                    self.store.layout.workspace_root
+                    / "tasks"
+                    / "t_image_adapter"
+                    / part["private_relative_path"]
+                ).is_file()
+            )
 
     def test_final_delivery_staging_rejects_symlink_and_digest_mismatch(self) -> None:
         project = self.root / "project"

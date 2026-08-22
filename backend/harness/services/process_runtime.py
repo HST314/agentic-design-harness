@@ -406,51 +406,75 @@ def _walk_artifact_path(
         relative = prefix / entry.name
         try:
             before = entry.stat(follow_symlinks=False)
-            if is_link_or_reparse(path, before):
-                _artifact_invalid(
-                    "The runtime artifact contains a symlink or unreadable entry."
-                )
-            if _artifact_entry_is_writable(before):
-                _artifact_invalid("Every runtime artifact entry must be read-only.")
-            if stat.S_ISDIR(before.st_mode):
-                _walk_artifact_path(root, relative, manifest)
-                continue
-            if not stat.S_ISREG(before.st_mode):
-                _artifact_invalid("Runtime artifacts may contain only directories and files.")
-            descriptor = open_regular_readonly(path, trusted_root=root)
-            try:
-                opened = os.fstat(descriptor)
-                digest = hashlib.sha256()
-                with os.fdopen(os.dup(descriptor), "rb") as handle:
-                    while chunk := handle.read(1024 * 1024):
-                        digest.update(chunk)
-                after = os.fstat(descriptor)
-            finally:
-                os.close(descriptor)
-            if (
-                opened.st_dev,
-                opened.st_ino,
-                opened.st_size,
-                opened.st_mtime_ns,
-            ) != (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-            ):
-                _artifact_invalid("A runtime artifact file changed during inspection.")
-            manifest.append(
-                {
-                    "path": relative.as_posix(),
-                    "device": opened.st_dev,
-                    "inode": opened.st_ino,
-                    "size_bytes": opened.st_size,
-                    "mode": stat.S_IMODE(opened.st_mode),
-                    "sha256": digest.hexdigest(),
-                }
+        except OSError as exc:
+            _artifact_path_os_error(relative, "stat", exc)
+        if is_link_or_reparse(path, before):
+            _artifact_invalid(
+                "The runtime artifact contains a symlink or unreadable entry."
             )
-        except OSError:
-            _artifact_invalid("The runtime artifact contains a symlink or unreadable entry.")
+        if _artifact_entry_is_writable(before):
+            _artifact_invalid("Every runtime artifact entry must be read-only.")
+        if stat.S_ISDIR(before.st_mode):
+            _walk_artifact_path(root, relative, manifest)
+            continue
+        if not stat.S_ISREG(before.st_mode):
+            _artifact_invalid("Runtime artifacts may contain only directories and files.")
+        try:
+            descriptor = open_regular_readonly(path, trusted_root=root)
+        except OSError as exc:
+            _artifact_path_os_error(relative, "open", exc)
+        try:
+            opened = os.fstat(descriptor)
+            digest = hashlib.sha256()
+            with os.fdopen(os.dup(descriptor), "rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+            after = os.fstat(descriptor)
+        except OSError as exc:
+            _artifact_path_os_error(relative, "read", exc)
+        finally:
+            os.close(descriptor)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            _artifact_invalid("A runtime artifact file changed during inspection.")
+        manifest.append(
+            {
+                "path": relative.as_posix(),
+                "device": opened.st_dev,
+                "inode": opened.st_ino,
+                "size_bytes": opened.st_size,
+                "mode": stat.S_IMODE(opened.st_mode),
+                "sha256": digest.hexdigest(),
+            }
+        )
+
+
+def _artifact_path_os_error(
+    relative: PurePosixPath, operation: str, error: OSError
+) -> NoReturn:
+    details: dict[str, str | int] = {
+        "path": relative.as_posix(),
+        "operation": operation,
+    }
+    if error.errno is not None:
+        details["errno"] = error.errno
+    winerror = getattr(error, "winerror", None)
+    if isinstance(winerror, int):
+        details["winerror"] = winerror
+    raise HarnessError(
+        "PROCESS_START_FAILED",
+        "The runtime artifact contains a symlink or unreadable entry.",
+        details,
+    ) from None
 
 
 def _open_windows_directory_guard(path: Path) -> int:

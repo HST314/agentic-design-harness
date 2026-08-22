@@ -2,7 +2,7 @@ PYTHON ?= python3
 TEST_DEPS ?= .test-deps
 TEST_ENV_STAMP := $(TEST_DEPS)/.requirements-dev-installed
 PYTHONPATH_VALUE := backend:$(TEST_DEPS)
-IMAGE_AGENT_ROOT ?= ../image_agent_mvp
+IMAGE_AGENT_ROOT ?= $(if $(wildcard agents/image_agent_mvp/requirements.lock),agents/image_agent_mvp,../image_agent_mvp)
 IMAGE_AGENT_DEPS ?= .runtime/image-agent-deps
 IMAGE_AGENT_ENV_STAMP := $(IMAGE_AGENT_DEPS)/.requirements-installed
 REAL_PROVIDER_ENV_FILE ?=
@@ -10,7 +10,7 @@ REAL_PROVIDER_EVIDENCE_PATH ?= build/real-provider-evidence.json
 REAL_PROVIDER_LOG_FILE ?= build/real-provider-smoke.log
 REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(REAL_PROVIDER_ENV_FILE)",)
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check docs-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e p6-acceptance evidence dev-setup dev-doctor dev-smoke
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -30,6 +30,9 @@ secret-scan:
 boundary-check:
 	$(PYTHON) scripts/check_agent_import_boundary.py backend/harness
 
+lock-check:
+	$(PYTHON) scripts/verify_image_agent_lock.py
+
 dependency-audit: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m pip_audit \
 		-r requirements-runtime.txt --require-hashes --disable-pip \
@@ -42,6 +45,9 @@ sbom: test-env
 
 contract-check:
 	$(PYTHON) scripts/generate_frontend_contracts.py --check
+
+docs-check:
+	$(PYTHON) scripts/check_docs.py
 
 frontend-contracts:
 	$(PYTHON) scripts/generate_frontend_contracts.py
@@ -83,12 +89,21 @@ real-provider-smoke: real-provider-preflight image-agent-env
 		--evidence-path "$(REAL_PROVIDER_EVIDENCE_PATH)" \
 		--log-file "$(REAL_PROVIDER_LOG_FILE)"
 
-check: test lint compile secret-scan boundary-check frontend-check
+check: test lint compile secret-scan boundary-check lock-check docs-check frontend-check
 
 verify: check typecheck dependency-audit sbom capacity-benchmark
 
 serve: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m harness
+
+dev-setup:
+	$(PYTHON) scripts/dev.py setup
+
+dev-doctor:
+	$(PYTHON) scripts/dev.py doctor
+
+dev-smoke:
+	$(PYTHON) scripts/dev.py start --check
 
 image-agent-env: $(IMAGE_AGENT_ENV_STAMP)
 
@@ -123,12 +138,13 @@ g4-e2e: test-env image-agent-env
 g5-e2e:
 	G5_MAKE="$(MAKE)" G5_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
 		$(PYTHON) scripts/run_g5_gate.py
-	$(PYTHON) scripts/generate_phase1_evidence.py
-	$(PYTHON) scripts/generate_workbench_evidence.py
+	$(PYTHON) scripts/generate_release_evidence.py
+
+p6-acceptance:
+	$(PYTHON) scripts/run_p6_platform_acceptance.py
 
 evidence:
-	$(PYTHON) scripts/generate_phase1_evidence.py
-	$(PYTHON) scripts/generate_workbench_evidence.py
+	$(PYTHON) scripts/generate_release_evidence.py
 
 test-env: $(TEST_ENV_STAMP)
 

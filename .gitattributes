@@ -1,2 +1,9 @@
-# Preserve the reviewed RFC attachment byte-for-byte, including Markdown breaks.
-docs/rfc-v0.2.md -whitespace
+# Keep attested source and dependency text byte-stable across Windows and Linux.
+*.in text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf

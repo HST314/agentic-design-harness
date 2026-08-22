@@ -714,6 +714,8 @@ class SchemaTests(unittest.TestCase):
 
     def test_standalone_object_examples_pass(self) -> None:
         examples = {
+            "bundle-manifest.json": "bundle-manifest.schema.json",
+            "delivery-bundle-candidate.json": "delivery-bundle-candidate.schema.json",
             "imported-asset.json": "asset-manifest.schema.json",
             "master-message.json": "master-message.schema.json",
             "master-thread.json": "master-thread.schema.json",
@@ -745,6 +747,23 @@ class SchemaTests(unittest.TestCase):
                     validate_work_item_semantics(document)
                 elif example_name == "plan-proposal.json":
                     validate_plan_proposal_semantics(document)
+
+    def test_delivery_bundle_candidate_requires_atomic_decision_fields(self) -> None:
+        candidate = load_json(OBJECT_EXAMPLES / "delivery-bundle-candidate.json")
+        validate("delivery-bundle-candidate.schema.json", candidate)
+
+        candidate["status"] = "PUBLISHED"
+        with self.assertRaises(ValidationError):
+            validate("delivery-bundle-candidate.schema.json", candidate)
+
+        candidate.update(
+            {
+                "decided_at": "2026-08-22T15:05:00Z",
+                "actor": {"type": "human", "id": "reviewer_01"},
+                "publication_batch_id": "batch_bundle_main_01",
+            }
+        )
+        validate("delivery-bundle-candidate.schema.json", candidate)
 
     def test_root_contracts_use_current_schema_version(self) -> None:
         catalog = load_json(CATALOGS / "schema-versions.json")

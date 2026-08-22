@@ -33,7 +33,13 @@ from .asset_browser import (
     resolve_committed_browser_path,
     verify_browser_event_path,
 )
-from .asset_files import detect_mime, file_digest, kind_for_mime
+from .asset_files import (
+    detect_mime,
+    detect_mime_stream,
+    file_digest,
+    kind_for_mime,
+    stream_digest,
+)
 from .asset_reader import OpenedCommittedAsset, open_committed_asset
 from .asset_recovery import AssetRecoveryMixin
 
@@ -568,6 +574,8 @@ class AssetService(AssetRecoveryMixin):
         *,
         batch_id: str,
         manifests: list[dict[str, Any]],
+        bundle_manifest: dict[str, Any] | None = None,
+        crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
         """Commit one visibility gate for a fully validated set of publications."""
 
@@ -585,6 +593,20 @@ class AssetService(AssetRecoveryMixin):
         ordered = sorted(manifests, key=lambda item: item["asset_id"])
         if len({item["asset_id"] for item in ordered}) != len(ordered):
             self._invalid("A publication batch cannot contain duplicate assets.")
+        if bundle_manifest is not None:
+            self.store.contracts.validate("bundle-manifest", bundle_manifest)
+            if (
+                bundle_manifest["task_id"] != task_id
+                or bundle_manifest["instance_id"] != instance_id
+                or bundle_manifest["publication_batch_id"] != batch_id
+            ):
+                self._invalid("The bundle manifest does not belong to its publication batch.")
+            referenced = {
+                bundle_manifest["image_asset"]["asset_id"],
+                bundle_manifest["design_note_asset"]["asset_id"],
+            }
+            if referenced != {item["asset_id"] for item in ordered}:
+                self._invalid("The bundle manifest must reference exactly its two batch assets.")
         request = {
             "task_id": task_id,
             "instance_id": instance_id,
@@ -598,6 +620,8 @@ class AssetService(AssetRecoveryMixin):
                 for item in ordered
             ],
         }
+        if bundle_manifest is not None:
+            request["bundle_manifest"] = deepcopy(bundle_manifest)
         record_path = self._transaction_dir(task_id) / f"{batch_id}.json"
         with FileLock(self._asset_lock(task_id), self.store.lock_timeout_seconds):
             if record_path.exists():
@@ -616,7 +640,7 @@ class AssetService(AssetRecoveryMixin):
                     "created_at": utc_now(),
                 }
                 atomic_write_json(record_path, record)
-            return self._resume_publication_batch(record_path)
+            return self._resume_publication_batch(record_path, crash_hook)
 
     def list_publication_batch(
         self, task_id: str, instance_id: str, batch_id: str
@@ -681,6 +705,30 @@ class AssetService(AssetRecoveryMixin):
             manifest = event["manifest"]
             status = self._integrity_status(task_id, manifest["asset_id"])
             values.append({"manifest": deepcopy(manifest), "integrity_status": status})
+        return values
+
+    def list_bundle_manifests(self, task_id: str) -> list[dict[str, Any]]:
+        """List only bundle manifests whose shared publication batch is committed."""
+
+        self._require_task(task_id)
+        workspace = self.initialize_task_workspace(task_id)
+        root = workspace / "resources" / "bundles"
+        values: list[dict[str, Any]] = []
+        for path in sorted(root.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            manifest = read_json(path)
+            self.store.contracts.validate("bundle-manifest", manifest)
+            if manifest["task_id"] != task_id or path.name != f"{manifest['bundle_id']}.json":
+                self._invalid("A bundle manifest has an invalid task owner or filename.")
+            committed = self._publication_batch_event(
+                task_id, manifest["publication_batch_id"]
+            )
+            if committed is None or committed.get("bundle_id") != manifest["bundle_id"]:
+                continue
+            self.verify_asset(task_id, manifest["image_asset"]["asset_id"])
+            self.verify_asset(task_id, manifest["design_note_asset"]["asset_id"])
+            values.append(deepcopy(manifest))
         return values
 
     def verify_asset(self, task_id: str, asset_id: str) -> dict[str, Any]:
@@ -781,6 +829,66 @@ class AssetService(AssetRecoveryMixin):
                 self._invalid(f"The preview content is invalid: {type(exc).__name__}.")
             return {
                 "mime_type": opened.mime_type,
+                "content": content,
+                "encoding": "utf-8",
+            }
+
+    def preview_delivery_candidate(
+        self,
+        task_id: str,
+        instance_id: str,
+        descriptor: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Preview one immutable private bundle file after live descriptor verification."""
+
+        self._require_instance(task_id, instance_id)
+        relative_path = normalized_relative_path(
+            str(descriptor.get("private_relative_path", ""))
+        ).as_posix()
+        workspace = self.initialize_task_workspace(task_id)
+        path = resolve_task_path(
+            workspace,
+            relative_path,
+            allowed_prefixes=(f"instances/{instance_id}/outputs",),
+        )
+        if path.is_symlink() or not path.is_file():
+            raise HarnessError(
+                "ASSET_CORRUPTED", "The delivery candidate preview file is unavailable."
+            )
+        try:
+            file_descriptor = open_regular_readonly(path, trusted_root=workspace)
+        except OSError:
+            raise HarnessError(
+                "ASSET_CORRUPTED", "The delivery candidate preview file is unsafe."
+            ) from None
+        with os.fdopen(file_descriptor, "rb", closefd=True) as opened:
+            mime_type = detect_mime_stream(opened, path.name)
+            size_bytes, sha256 = stream_digest(opened)
+            if (
+                size_bytes != descriptor.get("size_bytes")
+                or sha256 != descriptor.get("sha256")
+                or mime_type != descriptor.get("mime_type")
+            ):
+                raise HarnessError(
+                    "ASSET_CORRUPTED",
+                    "The delivery candidate changed after it was frozen.",
+                )
+            if size_bytes > self.preview_limit_bytes:
+                self._invalid("The delivery candidate is too large to preview safely.")
+            if mime_type.startswith("image/"):
+                return {
+                    "mime_type": mime_type,
+                    "content": opened.read(),
+                    "encoding": None,
+                }
+            if mime_type != "text/markdown":
+                self._invalid("This delivery candidate type is not previewable.")
+            try:
+                content = opened.read().decode("utf-8")
+            except UnicodeDecodeError:
+                self._invalid("The Markdown delivery candidate is not valid UTF-8.")
+            return {
+                "mime_type": mime_type,
                 "content": content,
                 "encoding": "utf-8",
             }
