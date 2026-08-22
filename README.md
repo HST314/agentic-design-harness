@@ -71,7 +71,9 @@ Linux 使用 `/proc`、文件锁和 POSIX 进程组；Windows 使用 Win32 文�
 
 ## 快速开始
 
-下面的流程只启动本地控制平面，不需要先安装 Image Agent。所有命令都在仓库根目录执行。
+下面的流程只启动本地控制平面，不需要先安装 Image Agent。除非某一步明确说明，**所有命令都必须在仓库根目录执行**。仓库根目录就是同时包含 `pyproject.toml`、`backend/`、`frontend/` 和 `.venv/` 的目录；在 Windows CMD 中，提示符应停在 `...\agentic-design-harness>`，不要先执行 `cd backend`。
+
+`harness` 不是仓库根目录下的 `harness.py` 文件，而是位于 `backend/harness/` 的 Python 包，入口文件是 `backend/harness/__main__.py`。`pyproject.toml` 声明了 `backend` 源码布局，因此首次运行前必须执行下面的 `pip install --no-deps -e .`，把这个包安装到当前项目的 `.venv` 中。仅创建 `.venv` 或仅安装 `requirements-dev.txt` 都不足以运行 `python -m harness`。
 
 ### 1. 获取代码
 
@@ -80,7 +82,7 @@ git clone https://github.com/HST314/agentic-design-harness.git
 cd agentic-design-harness
 ```
 
-### 2. 安装依赖
+### 2. 创建虚拟环境并安装项目（首次必须完成）
 
 Linux：
 
@@ -100,9 +102,27 @@ py -3 -m venv .venv
 npm --prefix frontend ci
 ```
 
-这里特意直接调用 `.venv` 中的 Python，不要求激活虚拟环境，因此 CMD 和 PowerShell 可以使用同一组命令，也不会误装到其他 Python 环境。需要激活方式或 Python 环境自检时，请看[安装与启动指南](docs/getting-started.md)。
+前两条 Python 安装命令的职责不同：`requirements-dev.txt` 安装固定版本的依赖，`pip install --no-deps -e .` 安装本仓库的 `harness` 包；后者不能省略。
 
-### 3. 启动两个服务
+这里特意直接调用 `.venv` 中的 Python，不要求激活虚拟环境，因此 CMD 和 PowerShell 可以使用同一组命令，也不会误装到其他 Python 环境。提示符显示 `(.venv)` 并不能证明当前 `python.exe` 来自本项目，实际解释器路径才是判断依据。
+
+安装后立即验证 Python 与 `harness` 的来源。
+
+Linux：
+
+```bash
+.venv/bin/python -c "import sys, harness; print(sys.executable); print(harness.__file__)"
+```
+
+Windows CMD 或 PowerShell：
+
+```bat
+.\.venv\Scripts\python.exe -c "import sys, harness; print(sys.executable); print(harness.__file__)"
+```
+
+命令必须成功打印两行：第一行指向当前仓库的 `.venv`，第二行指向当前仓库的 `backend\harness\__init__.py`。如果不是这两个位置，不要继续启动，先按本节重新安装。需要激活方式或更完整的 Python 环境自检时，请看[安装与启动指南](docs/getting-started.md)。
+
+### 3. 启动两个服务（每次使用）
 
 本地 Web 控制台由两个必须同时常驻的进程组成：
 
@@ -125,6 +145,8 @@ Windows CMD 或 PowerShell：
 .\.venv\Scripts\python.exe -m harness
 ```
 
+不要进入 `backend` 后运行 `python.exe -m harness`。这种方式可能因为 Python 自动把当前目录加入模块搜索路径而“碰巧成功”，即使 `python.exe` 实际来自另一个虚拟环境；它不能证明项目已经正确安装。并且 `.venv` 位于仓库根目录，在 `backend` 中执行 `.\.venv\Scripts\python.exe` 必然找不到路径。若当前提示符已经停在 `...\agentic-design-harness\backend>`，先执行 `cd ..` 回到仓库根目录，再使用上面的显式 `.\.venv\Scripts\python.exe` 命令。
+
 再打开终端二，进入同一个仓库根目录并启动前端：
 
 ```bash
@@ -142,6 +164,25 @@ npm --prefix frontend run dev
 | <http://127.0.0.1:18080/> | 后端未定义的根路由 | HTTP 404（正常） |
 
 如果前端显示“服务不可达”或终端二出现 `ECONNREFUSED`，通常是终端一未运行。按[排障文档](docs/troubleshooting.md)逐项检查。
+
+### Windows 出现 `No module named harness` 时
+
+先回到仓库根目录。下面五项必须依次成功，不要用裸 `python.exe` 或 `pip.exe` 替换其中的显式 `.venv` 路径：
+
+```bat
+dir pyproject.toml
+dir backend\harness\__main__.py
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
+.\.venv\Scripts\python.exe -c "import sys, harness; print(sys.executable); print(harness.__file__)"
+```
+
+- 第一条失败：当前不在仓库根目录；如果刚执行过 `cd backend`，先运行 `cd ..`。
+- 第二条失败：仓库内容不完整或不是最新版本，先检查 `git status` 并拉取 `main`。
+- 第三或第四条失败：依赖或项目本体尚未正确安装到该 `.venv`，应先处理失败命令的完整报错。
+- 第五条成功且两个路径符合上一节的预期后，才执行 `.\.venv\Scripts\python.exe -m harness`。
+
+如果 `.\.venv\Scripts\python.exe` 本身不存在，说明尚未在仓库根目录创建项目虚拟环境，请从“第 2 步”完整执行，不要借用其他项目或全局 Python 环境。
 
 ### 4. 配置后端（可选）
 
