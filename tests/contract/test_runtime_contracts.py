@@ -17,7 +17,9 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_registry_validates_frozen_example(self) -> None:
         example = json.loads(
-            (ROOT / "contracts" / "v1" / "examples" / "plans" / "image-only.json").read_text()
+            (ROOT / "contracts" / "v1" / "examples" / "plans" / "image-only.json").read_text(
+                encoding="utf-8"
+            )
         )
         self.registry.validate("task-plan", example)
 
@@ -28,13 +30,17 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_registry_dispatches_task_card_minor_without_upgrading_other_objects(self) -> None:
         fixture = json.loads(
-            (ROOT / "tests" / "golden" / "image-task-card-mapping-v1.1.json").read_text()
+            (ROOT / "tests" / "golden" / "image-task-card-mapping-v1.1.json").read_text(
+                encoding="utf-8"
+            )
         )
         self.registry.validate("task-card", fixture["harness_task_card"])
         self.registry.validate("task-card-v1.1", fixture["harness_task_card"])
 
         old_card = json.loads(
-            (ROOT / "contracts" / "v1" / "examples" / "plans" / "image-only.json").read_text()
+            (ROOT / "contracts" / "v1" / "examples" / "plans" / "image-only.json").read_text(
+                encoding="utf-8"
+            )
         )["task_cards"][0]
         self.registry.validate("task-card", old_card)
 

@@ -41,8 +41,12 @@ class FoundationTests(unittest.TestCase):
             yaml_path = root / "state.yaml"
             atomic_write_json(json_path, {"revision": 1})
             atomic_write_yaml(yaml_path, {"revision": 2})
-            self.assertEqual(json.loads(json_path.read_text()), {"revision": 1})
-            self.assertEqual(yaml.safe_load(yaml_path.read_text()), {"revision": 2})
+            self.assertEqual(
+                json.loads(json_path.read_text(encoding="utf-8")), {"revision": 1}
+            )
+            self.assertEqual(
+                yaml.safe_load(yaml_path.read_text(encoding="utf-8")), {"revision": 2}
+            )
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(json_path.stat().st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE(yaml_path.stat().st_mode), 0o600)

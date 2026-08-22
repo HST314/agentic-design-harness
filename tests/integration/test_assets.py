@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,6 +105,7 @@ class AssetServiceTests(unittest.TestCase):
         self.assertEqual(download["stream"].read(), b"# Registered brief\n")
         download["stream"].close()
 
+    @unittest.skipIf(os.name == "nt", "Windows denies replacement of an open asset")
     def test_preview_and_download_keep_the_verified_inode_during_symlink_swap(self) -> None:
         imported = self.assets.import_bytes(
             "t_assets",

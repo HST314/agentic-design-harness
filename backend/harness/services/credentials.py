@@ -38,6 +38,7 @@ from ..storage.layout import validate_identifier
 from ..storage.locks import FileLock
 from ..storage.ndjson import append_record, recover_records
 from ..storage.repository import Actor, utc_now
+from ..storage.safe_open import open_regular_readonly
 from ..storage.store import FileStateStore
 from .credential_events import (
     active_assignment_chain,
@@ -782,13 +783,18 @@ class CredentialPoolService:
                     "The credential pool has not been configured.",
                 )
             return {"schema_version": "1.0", "active": [], "pairs": []}
-        if stat_mode(self.secret_path) & 0o077:
+        if os.name != "nt" and stat_mode(self.secret_path) & 0o077:
             raise HarnessError(
                 "CREDENTIAL_PAIR_INVALID",
                 "The credential pool secret file permissions are too broad.",
             )
         try:
-            loaded = yaml.safe_load(self.secret_path.read_text(encoding="utf-8"))
+            descriptor = open_regular_readonly(
+                self.secret_path,
+                trusted_root=self.store.layout.control_root,
+            )
+            with os.fdopen(descriptor, "rb") as stream:
+                loaded = yaml.safe_load(stream.read().decode("utf-8"))
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             self._invalid("The credential pool secret document is invalid.")
         if not isinstance(loaded, dict):
@@ -892,12 +898,20 @@ class CredentialPoolService:
     def _integrity_key(self) -> bytes:
         if not self.integrity_key_path.exists():
             atomic_write_bytes(self.integrity_key_path, secrets.token_bytes(32), mode=0o600)
-        if stat_mode(self.integrity_key_path) & 0o077:
+        if os.name != "nt" and stat_mode(self.integrity_key_path) & 0o077:
             raise HarnessError(
                 "CREDENTIAL_PAIR_INVALID",
                 "The credential integrity key permissions are too broad.",
             )
-        return self.integrity_key_path.read_bytes()
+        try:
+            descriptor = open_regular_readonly(
+                self.integrity_key_path,
+                trusted_root=self.store.layout.control_root,
+            )
+            with os.fdopen(descriptor, "rb") as stream:
+                return stream.read()
+        except OSError:
+            self._invalid("The credential integrity key is invalid.")
 
     def _assignment_path(self, task_id: str, instance_id: str) -> Path:
         path = self.store.layout.control_root / "tasks" / task_id / "credentials"
