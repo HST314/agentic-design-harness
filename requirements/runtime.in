@@ -3,4 +3,5 @@ jsonschema==4.26.0
 Pillow==12.3.0
 pydantic==2.10.4
 PyYAML==6.0.2
+colorama==0.4.6 ; platform_system == "Windows"
 uvicorn==0.34.0
