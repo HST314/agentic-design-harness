@@ -183,6 +183,7 @@ class MasterThreadService:
         proposal_revision: int,
         *,
         task_expected_revision: int,
+        expected_card_revisions: dict[str, int],
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
         if envelope.actor_type != "human":
@@ -191,8 +192,189 @@ class MasterThreadService:
             task_id,
             proposal_revision,
             task_expected_revision=task_expected_revision,
+            expected_card_revisions=expected_card_revisions,
             envelope=envelope,
         )
+
+    def revise_task_card(
+        self,
+        task_id: str,
+        proposal_revision: int,
+        card_id: str,
+        *,
+        expected_proposal_revision: int,
+        expected_card_revision: int,
+        editable: dict[str, Any],
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Create a new pending proposal revision from one human-reviewed card edit."""
+
+        if envelope.actor_type != "human":
+            raise HarnessError("VALIDATION_ERROR", "Only a human may revise a task card.")
+        if proposal_revision != expected_proposal_revision:
+            self._revision_conflict(
+                "plan_proposal",
+                f"{task_id}:r{proposal_revision}",
+                expected_proposal_revision,
+                proposal_revision,
+            )
+        if envelope.expected_revision != expected_proposal_revision:
+            self._revision_conflict(
+                "plan_proposal",
+                f"{task_id}:r{proposal_revision}",
+                envelope.expected_revision,
+                expected_proposal_revision,
+            )
+        next_proposal_id = self._identifier(
+            "proposal_edit",
+            task_id,
+            str(proposal_revision),
+            card_id,
+            envelope.idempotency_key,
+        )
+        with self.commands.task_guard(task_id):
+            existing = self.store.plan_proposal.get(task_id, next_proposal_id)
+            if existing is not None:
+                revised = next(
+                    (card for card in existing["execution_cards"] if card["card_id"] == card_id),
+                    None,
+                )
+                if revised is None or self._editable_card_fields(revised) != editable:
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The task-card idempotency key was reused with different content.",
+                    )
+                return self._session(task_id)
+
+            task = self._task(task_id)
+            thread = self._ensure_thread(task_id, task)
+            proposal = self._proposal_by_revision(task_id, proposal_revision)
+            if thread["latest_proposal_revision"] != proposal_revision:
+                self._revision_conflict(
+                    "plan_proposal",
+                    proposal["proposal_id"],
+                    proposal_revision,
+                    thread["latest_proposal_revision"],
+                )
+            if proposal["status"] != "PENDING_CONFIRMATION":
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "Only the latest pending plan may be revised.",
+                )
+            card_index = next(
+                (
+                    index
+                    for index, card in enumerate(proposal["execution_cards"])
+                    if card["card_id"] == card_id
+                ),
+                None,
+            )
+            if card_index is None:
+                raise HarnessError("TASK_NOT_FOUND", "The selected TaskCard does not exist.")
+            current_card = proposal["execution_cards"][card_index]
+            if current_card["revision"] != expected_card_revision:
+                self._revision_conflict(
+                    "task_card",
+                    card_id,
+                    expected_card_revision,
+                    current_card["revision"],
+                )
+
+            normalized_editable = deepcopy(editable)
+            normalized_editable["input_assets"] = self._validate_asset_refs(
+                task_id, normalized_editable["input_assets"]
+            )
+            now = utc_now()
+            revised_card = {
+                **deepcopy(current_card),
+                **normalized_editable,
+                "revision": current_card["revision"] + 1,
+                "created_at": now,
+            }
+            adapter = self.adapters.get_optional(revised_card["agent_type"])
+            if adapter is not None:
+                validation = adapter.validate_task_card(cast(TaskCard, revised_card))
+                if not validation.valid:
+                    raise HarnessError(
+                        "VALIDATION_ERROR",
+                        "The Agent adapter rejected the revised task card.",
+                        {"errors": list(validation.errors)},
+                    )
+
+            next_proposal = deepcopy(proposal)
+            next_proposal.update(
+                {
+                    "proposal_id": next_proposal_id,
+                    "revision": proposal_revision + 1,
+                    "status": "PENDING_CONFIRMATION",
+                    "created_at": now,
+                    "updated_at": now,
+                    "confirmed_at": None,
+                }
+            )
+            next_proposal["execution_cards"][card_index] = revised_card
+            validate_plan_proposal(
+                self.contracts,
+                next_proposal,
+                task_id=task_id,
+                expected_revision=proposal_revision + 1,
+            )
+
+            actor = Actor(envelope.actor_type, envelope.actor_id)
+            self.store.plan_proposal.put(
+                task_id,
+                next_proposal_id,
+                next_proposal,
+                expected_revision=0,
+                actor=actor,
+                command="revise_plan_task_card",
+                idempotency_key=envelope.idempotency_key,
+            )
+            superseded = {
+                **proposal,
+                "status": "SUPERSEDED",
+                "updated_at": now,
+                "confirmed_at": None,
+            }
+            self.store.plan_proposal.put(
+                task_id,
+                proposal["proposal_id"],
+                superseded,
+                expected_revision=self.store.plan_proposal.revision(
+                    task_id, proposal["proposal_id"]
+                ),
+                actor=actor,
+                command="supersede_plan_proposal_after_card_revision",
+                idempotency_key=self._identifier(
+                    "supersede_card_edit", task_id, next_proposal_id
+                ),
+            )
+            message = self._message(
+                task_id,
+                self._identifier("message_card_edit", task_id, next_proposal_id),
+                thread["latest_sequence"] + 1,
+                role="system",
+                kind="plan_proposal",
+                content=(
+                    f"任务卡 {card_id} 已保存为 r{revised_card['revision']}, "
+                    f"计划已更新为 r{next_proposal['revision']}, 请重新审阅后确认。"
+                ),
+                asset_refs=[],
+                created_at=now,
+            )
+            self._put_message(message, actor, "append_task_card_revision_message")
+            self._put_thread(
+                task_id,
+                {
+                    **thread,
+                    "latest_sequence": message["sequence"],
+                    "latest_proposal_revision": next_proposal["revision"],
+                    "last_error": None,
+                },
+                actor,
+                "publish_task_card_revision",
+            )
+            return self._session(task_id)
 
     def _confirm(
         self,
@@ -200,6 +382,7 @@ class MasterThreadService:
         proposal_revision: int,
         *,
         task_expected_revision: int,
+        expected_card_revisions: dict[str, int],
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
         intent_path = self._confirm_intent_path(task_id, proposal_revision)
@@ -230,6 +413,21 @@ class MasterThreadService:
                     raise HarnessError(
                         "INVALID_STATE_TRANSITION", "Only the latest pending plan may run."
                     )
+                actual_card_revisions = {
+                    card["card_id"]: card["revision"]
+                    for card in proposal["execution_cards"]
+                }
+                if expected_card_revisions != actual_card_revisions:
+                    raise HarnessError(
+                        "REVISION_CONFLICT",
+                        "A TaskCard revision changed before this plan was confirmed.",
+                        {
+                            "object_type": "task_card_set",
+                            "object_id": proposal["proposal_id"],
+                            "expected_revisions": deepcopy(expected_card_revisions),
+                            "actual_revisions": actual_card_revisions,
+                        },
+                    )
                 actual_task_revision = self.store.task.revision(task_id, task_id)
                 if task_expected_revision != actual_task_revision:
                     self._revision_conflict(
@@ -241,6 +439,7 @@ class MasterThreadService:
                     "task_id": task_id,
                     "proposal_id": proposal["proposal_id"],
                     "proposal_revision": proposal_revision,
+                    "expected_card_revisions": actual_card_revisions,
                     "task_expected_revision": task_expected_revision,
                     "actor": {
                         "actor_type": envelope.actor_type,
@@ -555,6 +754,10 @@ class MasterThreadService:
                     task_id,
                     proposal["revision"],
                     task_expected_revision=self.store.task.revision(task_id, task_id),
+                    expected_card_revisions={
+                        card["card_id"]: card["revision"]
+                        for card in proposal["execution_cards"]
+                    },
                     envelope=CommandEnvelope(
                         idempotency_key=self._identifier(
                             "auto_confirm", task_id, proposal["proposal_id"]
@@ -761,6 +964,16 @@ class MasterThreadService:
             seen.add(asset_id)
             refs.append({"asset_id": asset_id, "manifest_relpath": expected})
         return refs
+
+    @staticmethod
+    def _editable_card_fields(card: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "objective": deepcopy(card["objective"]),
+            "instructions": deepcopy(card["instructions"]),
+            "input_assets": deepcopy(card["input_assets"]),
+            "expected_deliveries": deepcopy(card["expected_deliveries"]),
+            "parameters": deepcopy(card["parameters"]),
+        }
 
     def _session(self, task_id: str) -> dict[str, Any]:
         task = self._task(task_id)

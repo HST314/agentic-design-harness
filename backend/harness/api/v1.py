@@ -109,8 +109,30 @@ class AppendMasterMessageRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class EditableExpectedDelivery(StrictRequest):
+    kind: Literal["image", "presentation", "document", "archive", "other"]
+    role: str = Field(min_length=1, max_length=128)
+    required: bool
+    accepted_mime_types: list[str] = Field(min_length=1, max_length=20)
+
+
+class UpdatePlanTaskCardRequest(StrictRequest):
+    expected_proposal_revision: int = Field(ge=1)
+    expected_card_revision: int = Field(ge=1)
+    objective: str = Field(min_length=1, max_length=20_000)
+    instructions: list[str] = Field(max_length=100)
+    input_assets: list[MasterAssetReference] = Field(max_length=20)
+    expected_deliveries: list[EditableExpectedDelivery] = Field(min_length=1, max_length=20)
+    parameters: dict[str, Any]
+    envelope: CommandEnvelope
+
+
 class ConfirmPlanProposalRequest(StrictRequest):
     task_expected_revision: int = Field(ge=1)
+    expected_card_revisions: dict[
+        Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")],
+        Annotated[int, Field(ge=1)],
+    ] = Field(min_length=1, max_length=100)
     envelope: CommandEnvelope
 
 
@@ -362,6 +384,37 @@ def build_v1_router(container: Container) -> APIRouter:
     async def get_work_item(task_id: str, work_item_id: str) -> dict[str, Any]:
         return await run_in_threadpool(container.work_items.get, task_id, work_item_id)
 
+    @router.patch(
+        "/tasks/{task_id}/plan-proposals/{proposal_revision}/task-cards/{card_id}",
+        tags=["master"],
+    )
+    async def update_plan_task_card(
+        task_id: str,
+        proposal_revision: int,
+        card_id: str,
+        body: UpdatePlanTaskCardRequest,
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.master_threads.revise_task_card,
+            task_id,
+            proposal_revision,
+            card_id,
+            expected_proposal_revision=body.expected_proposal_revision,
+            expected_card_revision=body.expected_card_revision,
+            editable={
+                "objective": body.objective,
+                "instructions": body.instructions,
+                "input_assets": [
+                    item.model_dump(mode="json") for item in body.input_assets
+                ],
+                "expected_deliveries": [
+                    item.model_dump(mode="json") for item in body.expected_deliveries
+                ],
+                "parameters": deepcopy(body.parameters),
+            },
+            envelope=body.envelope,
+        )
+
     @router.post(
         "/tasks/{task_id}/plan-proposals/{proposal_revision}/confirm",
         tags=["master"],
@@ -376,6 +429,7 @@ def build_v1_router(container: Container) -> APIRouter:
             task_id,
             proposal_revision,
             task_expected_revision=body.task_expected_revision,
+            expected_card_revisions=body.expected_card_revisions,
             envelope=body.envelope,
         )
 

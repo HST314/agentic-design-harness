@@ -114,6 +114,11 @@ export interface ConfirmPlanResponse {
   session: MasterSessionResponse;
 }
 
+export type EditableTaskCard = Pick<
+  ContractPlanProposal["execution_cards"][number],
+  "objective" | "instructions" | "input_assets" | "expected_deliveries" | "parameters"
+>;
+
 export interface WorkItemStageProjection {
   stage_id: string;
   position: number;
@@ -444,11 +449,32 @@ export class ApiClient {
   confirmPlanProposal(
     taskId: string,
     proposalRevision: number,
-    body: { task_expected_revision: number; envelope: CommandEnvelope },
+    body: {
+      task_expected_revision: number;
+      expected_card_revisions: Record<string, number>;
+      envelope: CommandEnvelope;
+    },
   ): Promise<ConfirmPlanResponse> {
     return this.send(
       "POST",
       `/api/v1/tasks/${encodeURIComponent(taskId)}/plan-proposals/${proposalRevision}/confirm`,
+      body,
+    );
+  }
+
+  updatePlanTaskCard(
+    taskId: string,
+    proposalRevision: number,
+    cardId: string,
+    body: EditableTaskCard & {
+      expected_proposal_revision: number;
+      expected_card_revision: number;
+      envelope: CommandEnvelope;
+    },
+  ): Promise<MasterSessionResponse> {
+    return this.send(
+      "PATCH",
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/plan-proposals/${proposalRevision}/task-cards/${encodeURIComponent(cardId)}`,
       body,
     );
   }
