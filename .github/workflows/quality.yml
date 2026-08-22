@@ -108,6 +108,36 @@ jobs:
       - run: python scripts/dev.py doctor
       - run: python scripts/dev.py start --check --timeout 60
 
+  documentation:
+    name: documentation and examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check document set, links, JSON, commands and versions
+        run: python scripts/check_docs.py --report build/documentation-check.json
+      - name: Check documented launcher commands
+        run: |
+          python scripts/dev.py --help
+          python scripts/dev.py setup --help
+          python scripts/dev.py doctor --help
+          python scripts/dev.py start --help
+      - name: Check contracts and generated types
+        run: python scripts/generate_frontend_contracts.py --check
+      - name: Check pinned Image version and content
+        run: python scripts/verify_image_agent_lock.py
+      - name: Scan source and documentation for secrets
+        run: python scripts/secret_scan.py .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: documentation-evidence
+          path: build/documentation-check.json
+
   workbench-real-image:
     name: workbench real Image closure
     needs: [backend, frontend]
@@ -160,7 +190,7 @@ jobs:
   release-gate:
     name: release gate
     if: ${{ always() }}
-    needs: [backend, frontend, launcher, workbench-real-image, supply-chain]
+    needs: [backend, frontend, launcher, documentation, workbench-real-image, supply-chain]
     runs-on: ubuntu-latest
     steps:
       - name: Require every release job to pass
@@ -168,11 +198,13 @@ jobs:
           BACKEND_RESULT: ${{ needs.backend.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           LAUNCHER_RESULT: ${{ needs.launcher.result }}
+          DOCUMENTATION_RESULT: ${{ needs.documentation.result }}
           REAL_IMAGE_RESULT: ${{ needs.workbench-real-image.result }}
           SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
         run: |
           test "$BACKEND_RESULT" = success
           test "$FRONTEND_RESULT" = success
           test "$LAUNCHER_RESULT" = success
+          test "$DOCUMENTATION_RESULT" = success
           test "$REAL_IMAGE_RESULT" = success
           test "$SUPPLY_CHAIN_RESULT" = success
