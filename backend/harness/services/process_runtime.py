@@ -548,11 +548,22 @@ def validate_launch_identity(
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     try:
-        descriptor = (
-            open_regular_readonly(path)
-            if os.name == "nt"
-            else os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        )
+        if os.name == "nt":
+            candidate = path.resolve(strict=True)
+            metadata = candidate.lstat()
+            if is_link_or_reparse(candidate, metadata) or not stat.S_ISREG(
+                metadata.st_mode
+            ):
+                raise OSError("runtime dependency is not a regular file")
+            descriptor = os.open(
+                candidate,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+        else:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
         with os.fdopen(descriptor, "rb") as handle:
             while chunk := handle.read(1024 * 1024):
                 digest.update(chunk)
