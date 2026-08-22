@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/work-item-projection.schema.json",
+  "title": "WorkItemProjection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "work_item_id",
+    "task_id",
+    "title",
+    "agent_type",
+    "required",
+    "depends_on",
+    "stage",
+    "business_status",
+    "raw_status",
+    "current_instance",
+    "instance_ids",
+    "attempts",
+    "pending_approvals",
+    "delivery_count",
+    "alerts",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "work_item_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "agent_type": {
+      "$ref": "common.schema.json#/$defs/agentType"
+    },
+    "required": {
+      "type": "boolean"
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/identifier"
+      },
+      "uniqueItems": true
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_id",
+        "position",
+        "type",
+        "status",
+        "depends_on",
+        "available"
+      ],
+      "properties": {
+        "stage_id": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "position": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "$ref": "common.schema.json#/$defs/agentType"
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/identifier"
+          },
+          "uniqueItems": true
+        },
+        "available": {
+          "type": "boolean"
+        }
+      }
+    },
+    "business_status": {
+      "type": "string",
+      "enum": ["TODO", "RUNNING", "WAITING_APPROVAL", "COMPLETED", "EXCEPTION"]
+    },
+    "raw_status": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "current_instance": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "instance_id",
+            "status",
+            "approval_mode",
+            "process_state",
+            "restart_required",
+            "created_at"
+          ],
+          "properties": {
+            "instance_id": {
+              "$ref": "common.schema.json#/$defs/identifier"
+            },
+            "status": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "approval_mode": {
+              "type": "string",
+              "enum": ["human", "master"]
+            },
+            "process_state": {
+              "type": ["string", "null"],
+              "maxLength": 64
+            },
+            "restart_required": {
+              "type": "boolean"
+            },
+            "created_at": {
+              "$ref": "common.schema.json#/$defs/timestamp"
+            }
+          }
+        }
+      ]
+    },
+    "instance_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/identifier"
+      },
+      "uniqueItems": true
+    },
+    "attempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attempt_id", "instance_id", "status", "automatic", "created_at", "settled_at"],
+        "properties": {
+          "attempt_id": {
+            "$ref": "common.schema.json#/$defs/identifier"
+          },
+          "instance_id": {
+            "$ref": "common.schema.json#/$defs/identifier"
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "automatic": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "$ref": "common.schema.json#/$defs/timestamp"
+          },
+          "settled_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "pending_approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["approval_id", "kind", "owner", "created_at"],
+        "properties": {
+          "approval_id": {
+            "$ref": "common.schema.json#/$defs/identifier"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["WORKFLOW", "BUDGET_OVERRIDE", "ASSET_DELETION"]
+          },
+          "owner": {
+            "type": "string",
+            "enum": ["human", "master"]
+          },
+          "created_at": {
+            "$ref": "common.schema.json#/$defs/timestamp"
+          }
+        }
+      }
+    },
+    "delivery_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "alerts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["info", "warning", "error"]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        }
+      }
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}
