@@ -82,11 +82,13 @@ def _validate_beneath(root: Path, candidate: Path) -> None:
         raise OSError("path leaves its trusted root")
 
 
-def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+def _identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    # Windows path stat derives execute bits from the filename extension, while
+    # fstat has no filename context. Both sides are separately required to be
+    # regular files, so mode is not a stable part of the file identity.
     return (
         metadata.st_dev,
         metadata.st_ino,
-        metadata.st_mode,
         metadata.st_size,
         metadata.st_mtime_ns,
     )
