@@ -19,3 +19,6 @@ workspace/tasks/
 .env
 .env.*
 !.env.example
+
+# Local operator configuration copied from config/harness.example.yaml.
+config/harness.local.yaml
