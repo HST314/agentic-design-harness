@@ -74,16 +74,6 @@ def _validate_beneath(root: Path, candidate: Path) -> None:
     resolved_root = root.resolve(strict=True)
     if is_link_or_reparse(root):
         raise OSError("trusted root is a link or reparse point")
-    try:
-        relative = candidate.relative_to(root)
-    except ValueError:
-        raise OSError("path leaves its trusted root") from None
-    current = root
-    for component in relative.parts:
-        current = current / component
-        metadata = current.lstat()
-        if is_link_or_reparse(current, metadata):
-            raise OSError("path contains a link or reparse point")
     resolved_candidate = candidate.resolve(strict=True)
     try:
         inside = os.path.commonpath((str(resolved_root), str(resolved_candidate)))
@@ -91,6 +81,20 @@ def _validate_beneath(root: Path, candidate: Path) -> None:
         raise OSError("path leaves its trusted root") from None
     if inside != str(resolved_root):
         raise OSError("path leaves its trusted root")
+    # Windows resolution can expand an 8.3 trusted-root alias. Walk upward from
+    # the caller's spelling so every actual component is still checked without
+    # requiring that spelling to share the resolved root's textual prefix.
+    current = candidate
+    while True:
+        metadata = current.lstat()
+        if is_link_or_reparse(current, metadata):
+            raise OSError("path contains a link or reparse point")
+        if current.resolve(strict=True) == resolved_root:
+            break
+        parent = current.parent
+        if parent == current:
+            raise OSError("path leaves its trusted root")
+        current = parent
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
