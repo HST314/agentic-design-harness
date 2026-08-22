@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,8 @@ CONTRACTS_ROOT = PROJECT_ROOT / "contracts" / "v1"
 
 def build_store(root: Path) -> FileStateStore:
     contracts = ContractRegistry(CONTRACTS_ROOT)
-    return FileStateStore(root / "control-data", root / "workspace", contracts, 0.25)
+    lock_timeout = 5.0 if os.name == "nt" else 0.25
+    return FileStateStore(root / "control-data", root / "workspace", contracts, lock_timeout)
 
 
 def build_service(root: Path) -> tuple[FileStateStore, TaskCommandService]:

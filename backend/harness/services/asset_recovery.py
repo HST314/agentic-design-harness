@@ -204,7 +204,8 @@ class AssetRecoveryMixin:
                 os.link(temporary, destination, follow_symlinks=False)
             except FileExistsError:
                 self._invalid("The publication destination is already occupied.")
-            os.chmod(destination, 0o440)
+            if os.name != "nt":
+                os.chmod(destination, 0o440)
             fsync_directory(destination.parent)
             if crash_hook:
                 crash_hook("after_final_rename")
@@ -261,7 +262,8 @@ class AssetRecoveryMixin:
                 os.link(manifest_temporary, manifest_path, follow_symlinks=False)
             except FileExistsError:
                 self._invalid("The publication manifest target is already occupied.")
-            os.chmod(manifest_path, 0o440)
+            if os.name != "nt":
+                os.chmod(manifest_path, 0o440)
             fsync_directory(manifest_path.parent)
         if crash_hook:
             crash_hook("after_manifest_rename")

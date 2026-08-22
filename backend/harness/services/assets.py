@@ -233,7 +233,8 @@ class AssetService(AssetRecoveryMixin):
             except HarnessError:
                 destination.unlink(missing_ok=True)
                 raise
-            os.chmod(destination, 0o440)
+            if os.name != "nt":
+                os.chmod(destination, 0o440)
             now = utc_now()
             manifest = {
                 "schema_version": "1.0",
@@ -310,7 +311,8 @@ class AssetService(AssetRecoveryMixin):
                 selected_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
                 selected_path = selected_dir / source_path.name
                 self._copy_file(source_path, selected_path, self.max_file_bytes)
-                os.chmod(selected_path, 0o440)
+                if os.name != "nt":
+                    os.chmod(selected_path, 0o440)
                 manifest_relpath = self._manifest_relpath(manifest)
                 entries.append(
                     {

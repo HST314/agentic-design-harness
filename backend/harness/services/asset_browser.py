@@ -10,6 +10,7 @@ from typing import Any
 from ..core.errors import HarnessError
 from ..storage.atomic import read_json
 from ..storage.paths import normalized_relative_path, resolve_task_path
+from ..storage.safe_open import is_link_or_reparse
 
 ManifestVerifier = Callable[[str, dict[str, Any]], None]
 
@@ -28,14 +29,14 @@ def browser_roots(workspace: Path, group: str) -> list[Path]:
     if group in {"instances", "all"}:
         instances = workspace / "instances"
         for instance_root in sorted(instances.iterdir() if instances.exists() else []):
-            if instance_root.is_symlink():
+            if is_link_or_reparse(instance_root):
                 raise HarnessError(
                     "PATH_OUTSIDE_TASK_ROOT",
-                    "Symlinked instance resources are not browseable.",
+                    "Linked instance resources are not browseable.",
                 )
             if instance_root.is_dir():
                 roots.append(instance_root / "outputs")
-    return roots
+    return [root.resolve(strict=True) for root in roots]
 
 
 def resolve_committed_browser_path(
