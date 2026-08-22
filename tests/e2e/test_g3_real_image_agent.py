@@ -206,7 +206,14 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                             ),
                         },
                     )
-                    self.assertEqual(started.status_code, 200, started.text)
+                    if started.status_code != 200:
+                        process_logs = container.supervisor.log_summary(
+                            "t_g3_real_image", instance_id
+                        )
+                        self.fail(
+                            f"{started.text}\nredacted process logs: "
+                            f"{json.dumps(process_logs, ensure_ascii=False)}"
+                        )
 
                     taskbook = self._wait_for_boundary(client, instance_id)
                     self._resolve(client, taskbook, "approve_taskbook", {}, 1)
