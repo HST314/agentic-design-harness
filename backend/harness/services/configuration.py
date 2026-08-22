@@ -157,7 +157,7 @@ class SupervisorConfig(BaseModel):
 
     port_range_start: int = Field(default=18100, ge=1024, le=65535)
     port_range_end: int = Field(default=18199, ge=1024, le=65535)
-    startup_timeout_seconds: float = Field(default=15, gt=0, le=300)
+    startup_timeout_seconds: float = Field(default=60, gt=0, le=300)
     health_interval_seconds: float = Field(default=1, gt=0, le=60)
     shutdown_grace_seconds: float = Field(default=5, gt=0, le=60)
 
