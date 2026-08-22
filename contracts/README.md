@@ -5,6 +5,7 @@
 - `main-task.schema.json`
 - `stage.schema.json`
 - `work-item.schema.json`（重试与替换 Agent 时保持稳定的逻辑工作项）
+- `work-item-projection.schema.json`（看板与计划视图共享的只读业务状态投影）
 - `task-intake.schema.json`（可恢复的首次创建与上传会话）
 - `master-message.schema.json`（永久 Master 线程的追加式消息）
 - `plan-proposal.schema.json`（确认前的阶段、工作项与执行卡建议）

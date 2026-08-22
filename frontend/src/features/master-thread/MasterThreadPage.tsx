@@ -68,7 +68,7 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
-function TaskTabs({ taskId }: { taskId: string }): React.JSX.Element {
+export function TaskTabs({ taskId }: { taskId: string }): React.JSX.Element {
   const base = `/tasks/${encodeURIComponent(taskId)}`;
   return (
     <nav className="workbench-task-tabs" aria-label="任务工作区">

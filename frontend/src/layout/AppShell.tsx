@@ -10,6 +10,7 @@ import {
 import type { ReadyResponse, TaskSummary } from "../api/client";
 import { api, readinessQuery, taskHistoryQuery } from "../api/queries";
 import { Icon } from "../components/Icon";
+import { WorkItemDetailsPanel } from "../features/task-board/TaskBoardPage";
 
 const statusLabels: Record<string, string> = {
   AWAITING_START_CONFIRMATION: "等待启动",
@@ -140,11 +141,13 @@ function DetailsDrawer({
   drawer,
   readiness,
   taskId,
+  target,
   onClose,
 }: {
   drawer: string;
   readiness: { data: ReadyResponse | undefined; isError: boolean };
   taskId: string | null;
+  target: string | null;
   onClose: () => void;
 }): React.JSX.Element {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -171,7 +174,7 @@ function DetailsDrawer({
       }}
     >
       <div className="workbench-drawer__header">
-        <div><p className="workbench-eyebrow">按需详情</p><h2>{drawer === "status" ? "运行状态" : "任务信息"}</h2></div>
+        <div><p className="workbench-eyebrow">按需详情</p><h2>{drawer === "status" ? "运行状态" : drawer === "work-item" ? "子任务详情" : "任务信息"}</h2></div>
         <button className="workbench-icon-button" type="button" aria-label="关闭详情抽屉" onClick={onClose}><Icon name="close" /></button>
       </div>
       {drawer === "status" ? (
@@ -179,6 +182,8 @@ function DetailsDrawer({
           <div className="workbench-status-card"><Icon name="status" /><div><strong>{readiness.data?.status === "ready" ? "控制面连接正常" : "正在等待控制面"}</strong><p>状态来自 `/readyz`，工作台每 10 秒重新校验。</p></div></div>
           <dl className="workbench-definition-list"><div><dt>当前上下文</dt><dd>{taskId ?? "新任务"}</dd></div><div><dt>刷新策略</dt><dd>窗口聚焦时重新校验</dd></div></dl>
         </div>
+      ) : drawer === "work-item" && taskId && target ? (
+        <div className="workbench-drawer__body workbench-drawer__body--work-item"><WorkItemDetailsPanel taskId={taskId} workItemId={target} /></div>
       ) : (
         <div className="workbench-drawer__body"><p>该抽屉类型将在对应功能阶段接入真实读模型。</p></div>
       )}
@@ -197,6 +202,7 @@ export function AppShell(): React.JSX.Element {
   const readiness = useQuery(readinessQuery);
   const taskId = taskIdFromPath(location.pathname);
   const drawer = searchParams.get("drawer");
+  const drawerTarget = searchParams.get("target");
   const groups = useMemo(() => historyGroups(tasks.data?.items ?? [], search), [search, tasks.data?.items]);
   const presentation = useMutation({
     mutationFn: ({ task, patch }: { task: TaskSummary; patch: { title?: string; pinned?: boolean; archived?: boolean } }) => api.updateTaskPresentation(task.task_id, {
@@ -216,8 +222,14 @@ export function AppShell(): React.JSX.Element {
 
   const setDrawer = (value: string | null): void => {
     const next = new URLSearchParams(searchParams);
-    if (value) next.set("drawer", value);
-    else next.delete("drawer");
+    if (value) {
+      next.set("drawer", value);
+      if (value !== "work-item") next.delete("target");
+    }
+    else {
+      next.delete("drawer");
+      next.delete("target");
+    }
     setSearchParams(next, { replace: true });
   };
 
@@ -311,7 +323,7 @@ export function AppShell(): React.JSX.Element {
           </main>
         </div>
 
-        {drawer ? <DetailsDrawer drawer={drawer} readiness={readiness} taskId={taskId} onClose={() => setDrawer(null)} /> : null}
+        {drawer ? <DetailsDrawer drawer={drawer} readiness={readiness} taskId={taskId} target={drawerTarget} onClose={() => setDrawer(null)} /> : null}
         {renameTask ? <RenameTaskDialog task={renameTask} busy={presentation.isPending} error={presentation.isError ? presentation.error.message : null} onCancel={() => { presentation.reset(); setRenameTask(null); }} onSubmit={(title) => presentation.mutate({ task: renameTask, patch: { title } })} /> : null}
       </div>
     </>

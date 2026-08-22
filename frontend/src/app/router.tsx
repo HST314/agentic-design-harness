@@ -5,9 +5,13 @@ import {
   Route,
   Routes,
 } from "react-router-dom";
-import { FoundationPage } from "../features/workbench/FoundationPage";
 import { TaskIntakePage } from "../features/task-intake/TaskIntakePage";
 import { MasterRoutePage } from "../features/master-thread/MasterThreadPage";
+import {
+  TaskBoardPage,
+  TaskPlanPage,
+  WorkItemRoutePage,
+} from "../features/task-board/TaskBoardPage";
 import { AppShell } from "../layout/AppShell";
 
 function LegacyRoute(): React.JSX.Element {
@@ -44,15 +48,15 @@ export function AppRouter(): React.JSX.Element {
           />
           <Route
             path="/tasks/:taskId/board"
-            element={<FoundationPage view="board" />}
+            element={<TaskBoardPage />}
           />
           <Route
             path="/tasks/:taskId/plan"
-            element={<FoundationPage view="plan" />}
+            element={<TaskPlanPage />}
           />
           <Route
             path="/tasks/:taskId/work-items/:workItemId"
-            element={<FoundationPage view="work-item" />}
+            element={<WorkItemRoutePage />}
           />
         </Route>
         <Route path="*" element={<LegacyRoute />} />
