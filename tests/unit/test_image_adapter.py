@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness.adapters import PrepareRequest
-from harness.adapters.image import ImageAgentAdapter
+from harness.adapters.image import ImageAgentAdapter, image_dependency_pythonpath_entries
 from harness.adapters.image_delivery import normalize_image_delivery, stage_final_delivery
 from harness.adapters.image_workflow import map_advance_payload
 from harness.core.errors import HarnessError
@@ -26,6 +26,23 @@ IMAGE_SCHEMA = ROOT / "tests" / "fixtures" / "image-agent-contract" / "ImageTask
 
 
 class ImageAdapterTests(unittest.TestCase):
+    def test_windows_target_dependencies_include_pywin32_pth_roots(self) -> None:
+        artifact = Path("runtime") / "image-agent-artifact"
+
+        self.assertEqual(
+            image_dependency_pythonpath_entries(artifact, os_name="nt"),
+            (
+                artifact / "_dependencies",
+                artifact / "_dependencies" / "win32",
+                artifact / "_dependencies" / "win32" / "lib",
+                artifact / "_dependencies" / "pythonwin",
+            ),
+        )
+        self.assertEqual(
+            image_dependency_pythonpath_entries(artifact, os_name="posix"),
+            (artifact / "_dependencies",),
+        )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

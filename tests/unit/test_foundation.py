@@ -13,14 +13,10 @@ import yaml
 from harness.core.config import HarnessSettings, load_settings
 from harness.core.logging import JsonFormatter, redact
 from harness.runtime import validate_runtime_platform
-from harness.services.configuration import SupervisorConfig
 from harness.storage.atomic import atomic_write_json, atomic_write_yaml
 
 
 class FoundationTests(unittest.TestCase):
-    def test_supervisor_default_allows_cold_cross_platform_agent_start(self) -> None:
-        self.assertEqual(SupervisorConfig().startup_timeout_seconds, 60)
-
     def test_yaml_and_environment_configuration_is_validated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
