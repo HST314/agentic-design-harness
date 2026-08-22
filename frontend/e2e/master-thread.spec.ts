@@ -1,7 +1,8 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, testInfo) => {
+  const startPolicy: "manual" | "auto" = testInfo.title.includes("auto mode") ? "auto" : "manual";
   let threadRevision = 4;
   let confirmed = false;
   let busy = false;
@@ -98,7 +99,7 @@ test.beforeEach(async ({ page }) => {
       title: "秋季发布会主视觉",
       goal: "为秋季发布会生成主视觉。",
       master_owner: "master_default",
-      start_policy: "manual",
+      start_policy: startPolicy,
       status: confirmed ? "RUNNING" : "DRAFT",
       created_at: "2026-08-22T10:00:00Z",
       updated_at: "2026-08-22T10:02:00Z",
@@ -112,7 +113,7 @@ test.beforeEach(async ({ page }) => {
 
   await page.route("**/readyz", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ready" }) }));
   await page.route("**/api/v1/tasks", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", items: [{ task_id: "task_master_e2e", status: confirmed ? "RUNNING" : "DRAFT", title: "秋季发布会主视觉", updated_at: "2026-08-22T10:02:00Z", revision: confirmed ? 4 : 2 }] }) }));
-  await page.route("**/api/v1/task-intakes/task_master_e2e", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", intake: { schema_version: "1.0", task_id: "task_master_e2e", prompt: "为秋季发布会生成主视觉。", upload_session: { session_id: "upload_master", status: "LOCKED", accepted_mime_types: ["text/markdown"], max_files: 20, max_total_bytes: 209715200 }, asset_ids: ["asset_brief"], status: "SUBMITTED", start_policy: "manual", revision: 3, created_at: "2026-08-22T10:00:00Z", updated_at: "2026-08-22T10:01:00Z", submitted_at: "2026-08-22T10:01:00Z" }, intake_revision: 3, task: session().task, task_revision: session().task_revision, assets: [] }) }));
+  await page.route("**/api/v1/task-intakes/task_master_e2e", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", intake: { schema_version: "1.0", task_id: "task_master_e2e", prompt: "为秋季发布会生成主视觉。", upload_session: { session_id: "upload_master", status: "LOCKED", accepted_mime_types: ["text/markdown"], max_files: 20, max_total_bytes: 209715200 }, asset_ids: ["asset_brief"], status: "SUBMITTED", start_policy: startPolicy, revision: 3, created_at: "2026-08-22T10:00:00Z", updated_at: "2026-08-22T10:01:00Z", submitted_at: "2026-08-22T10:01:00Z" }, intake_revision: 3, task: session().task, task_revision: session().task_revision, assets: [] }) }));
   await page.route("**/api/v1/tasks/task_master_e2e/master/messages", async (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON() as { content: string; asset_refs: unknown[]; envelope: { expected_revision: number } };
@@ -145,7 +146,8 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(session()) });
   });
   await page.route("**/api/v1/tasks/task_master_e2e/plan-proposals/*/confirm", async (route) => {
-    const body = route.request().postDataJSON() as { expected_card_revisions: Record<string, number>; envelope: { expected_revision: number } };
+    const body = route.request().postDataJSON() as { task_expected_revision: number; expected_card_revisions: Record<string, number>; envelope: { expected_revision: number } };
+    expect(body.task_expected_revision).toBe(2);
     expect(body.expected_card_revisions).toEqual({ card_direction_a: cardRevision });
     expect(body.envelope.expected_revision).toBe(proposalRevision);
     confirmed = true;
@@ -178,6 +180,36 @@ test("requires an explicit final confirmation before starting the reviewed revis
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("分配凭据并启动满足门禁的实例");
   await dialog.getByRole("button", { name: "确认并启动" }).click();
+  await expect(page.getByText("计划已确认，实例启动结果已记录。")).toBeVisible();
+  await expect(page.getByText("已确认", { exact: true })).toBeVisible();
+});
+
+test("auto mode keeps human review and starts only after the final revision and cost confirmation", async ({ page }) => {
+  let confirmationRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/plan-proposals/1/confirm")) confirmationRequests += 1;
+  });
+
+  await page.goto("/tasks/task_master_e2e/master");
+  await expect(page.getByText("自动规划 · 人工启动")).toBeVisible();
+  await expect(page.getByRole("button", { name: "编辑任务卡 自然光主视觉方向" })).toBeVisible();
+  await page.getByRole("button", { name: "要求调整" }).click();
+  await expect(page.getByLabel("发送给 Master")).toHaveValue("请调整计划 r1：");
+  expect(confirmationRequests).toBe(0);
+
+  await page.getByRole("button", { name: "确认并运行" }).click();
+  const dialog = page.getByRole("dialog", { name: "启动计划 r1" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("主任务修订");
+  await expect(dialog).toContainText("计划修订");
+  await expect(dialog.locator("dl").getByText("r2", { exact: true })).toBeVisible();
+  await expect(dialog.locator("dl").getByText("r1", { exact: true })).toBeVisible();
+  await expect(dialog).toContainText("实例 instance_direction_a");
+  await expect(dialog).toContainText("可能产生真实模型费用");
+  expect(confirmationRequests).toBe(0);
+
+  await dialog.getByRole("button", { name: "确认并启动" }).click();
+  await expect.poll(() => confirmationRequests).toBe(1);
   await expect(page.getByText("计划已确认，实例启动结果已记录。")).toBeVisible();
   await expect(page.getByText("已确认", { exact: true })).toBeVisible();
 });
