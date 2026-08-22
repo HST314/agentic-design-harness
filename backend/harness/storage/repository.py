@@ -201,6 +201,14 @@ class RetryBudgetRepository(SnapshotRepository[dict[str, Any]]):
     pass
 
 
+class TaskIntakeRepository(SnapshotRepository[dict[str, Any]]):
+    pass
+
+
+class TaskNavigationRepository(SnapshotRepository[dict[str, Any]]):
+    pass
+
+
 class UsageRepository:
     def __init__(
         self,

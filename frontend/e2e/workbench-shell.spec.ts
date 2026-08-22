@@ -21,6 +21,9 @@ test.beforeEach(async ({ page }) => {
             title: "秋季发布会主视觉",
             updated_at: "2026-08-22T09:00:00Z",
             revision: 3,
+            pinned_at: "2026-08-22T09:30:00Z",
+            archived_at: null,
+            presentation_revision: 2,
           },
           {
             task_id: "task_archive_review",
@@ -28,9 +31,19 @@ test.beforeEach(async ({ page }) => {
             title: "品牌资料归档",
             updated_at: "2026-08-21T09:00:00Z",
             revision: 2,
+            pinned_at: null,
+            archived_at: "2026-08-22T08:00:00Z",
+            presentation_revision: 3,
           },
         ],
       }),
+    });
+  });
+  await page.route("**/api/v1/task-intakes/*", async (route) => {
+    await route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { message: "The requested task intake does not exist." } }),
     });
   });
 });

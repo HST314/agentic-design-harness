@@ -109,6 +109,62 @@ class TaskCommandService:
             lambda: self._update_task_input(request, envelope),
         )
 
+    def rename_task(
+        self,
+        task_id: str,
+        title: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        normalized = title.strip()
+        if not normalized or len(normalized) > 256:
+            raise HarnessError("VALIDATION_ERROR", "The task title is invalid.")
+        if envelope.actor_type != "human":
+            raise HarnessError("VALIDATION_ERROR", "Only a human may rename a task.")
+        request = {"task_id": task_id, "title": normalized}
+        return self._idempotent(
+            task_id,
+            "rename_task",
+            request,
+            envelope,
+            lambda: self._rename_task(request, envelope),
+        )
+
+    def _rename_task(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        task_id = request["task_id"]
+        task = self._task(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        task.update({"title": request["title"], "updated_at": utc_now()})
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is not None:
+            updated_plan = deepcopy(plan)
+            updated_plan["task"] = deepcopy(task)
+            return self._persist_aggregate(
+                updated_plan,
+                envelope,
+                "rename_task",
+                request,
+                actual,
+            )
+        result = {"task": deepcopy(task), "revision": actual + 1}
+        self.store.task.put(
+            task_id,
+            task_id,
+            task,
+            expected_revision=actual,
+            actor=self._actor(envelope),
+            command="rename_task",
+            idempotency_key=envelope.idempotency_key,
+            command_result=result,
+            request_sha256=self._request_digest("rename_task", request),
+        )
+        workspace_task = self.store.layout.workspace_root / "tasks" / task_id
+        atomic_write_json(workspace_task / "task-summary.json", task, mode=0o640)
+        return result
+
     def _update_task_input(
         self, request: dict[str, Any], envelope: CommandEnvelope
     ) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Link,
@@ -8,7 +8,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import type { ReadyResponse, TaskSummary } from "../api/client";
-import { readinessQuery, taskHistoryQuery } from "../api/queries";
+import { api, readinessQuery, taskHistoryQuery } from "../api/queries";
 import { Icon } from "../components/Icon";
 
 const statusLabels: Record<string, string> = {
@@ -36,6 +36,104 @@ function taskIdFromPath(pathname: string): string | null {
   } catch {
     return null;
   }
+}
+
+function historyGroups(tasks: TaskSummary[], search: string): Array<{ label: string; items: TaskSummary[] }> {
+  const needle = search.trim().toLocaleLowerCase("zh-CN");
+  const visible = tasks.filter((task) => {
+    const matches = !needle || `${task.title} ${task.task_id}`.toLocaleLowerCase("zh-CN").includes(needle);
+    return matches && (needle || !task.archived_at);
+  });
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startSevenDays = startToday - 6 * 24 * 60 * 60 * 1000;
+  const pinned = visible.filter((task) => task.pinned_at && !task.archived_at);
+  const unpinned = visible.filter((task) => !task.pinned_at && !task.archived_at);
+  const archived = visible.filter((task) => task.archived_at);
+  const groups = [
+    { label: "置顶", items: pinned },
+    { label: "今天", items: unpinned.filter((task) => new Date(task.updated_at).getTime() >= startToday) },
+    { label: "近 7 天", items: unpinned.filter((task) => {
+      const value = new Date(task.updated_at).getTime();
+      return value < startToday && value >= startSevenDays;
+    }) },
+    { label: "更早", items: unpinned.filter((task) => new Date(task.updated_at).getTime() < startSevenDays) },
+    { label: "归档搜索结果", items: archived },
+  ];
+  return groups.filter((group) => group.items.length > 0);
+}
+
+function closeMenu(event: React.MouseEvent<HTMLButtonElement>): void {
+  event.currentTarget.closest("details")?.removeAttribute("open");
+}
+
+function TaskHistoryRow({
+  task,
+  busy,
+  onRename,
+  onPin,
+  onArchive,
+}: {
+  task: TaskSummary;
+  busy: boolean;
+  onRename: (task: TaskSummary) => void;
+  onPin: (task: TaskSummary) => void;
+  onArchive: (task: TaskSummary) => void;
+}): React.JSX.Element {
+  return (
+    <div className="workbench-history-row">
+      <NavLink
+        className="workbench-history-item"
+        to={`/tasks/${encodeURIComponent(task.task_id)}/master`}
+        title={task.title}
+      >
+        <span className="workbench-history-item__title">{task.title}</span>
+        <span className="workbench-history-item__meta">
+          <span>{task.archived_at ? "已归档 · " : ""}{taskLabel(task)}</span>
+          <time dateTime={task.updated_at}>{new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(task.updated_at))}</time>
+        </span>
+      </NavLink>
+      <details className="workbench-history-menu">
+        <summary aria-label={`打开 ${task.title} 的任务操作`}><Icon name="more" /></summary>
+        <div role="menu" aria-label={`${task.title} 的任务操作`}>
+          <button type="button" role="menuitem" disabled={busy} onClick={(event) => { closeMenu(event); onRename(task); }}><Icon name="rename" />重命名</button>
+          {!task.archived_at ? <button type="button" role="menuitem" disabled={busy} onClick={(event) => { closeMenu(event); onPin(task); }}><Icon name="pin" />{task.pinned_at ? "取消置顶" : "置顶"}</button> : null}
+          <button type="button" role="menuitem" disabled={busy} onClick={(event) => { closeMenu(event); onArchive(task); }}><Icon name="archive" />{task.archived_at ? "恢复" : "归档"}</button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function RenameTaskDialog({
+  task,
+  busy,
+  error,
+  onCancel,
+  onSubmit,
+}: {
+  task: TaskSummary;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onSubmit: (title: string) => void;
+}): React.JSX.Element {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [title, setTitle] = useState(task.title);
+  useEffect(() => {
+    dialogRef.current?.showModal();
+    return () => dialogRef.current?.close();
+  }, []);
+  return (
+    <dialog ref={dialogRef} className="workbench-rename-dialog" aria-labelledby="rename-task-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}>
+      <form onSubmit={(event) => { event.preventDefault(); if (title.trim()) onSubmit(title.trim()); }}>
+        <div className="workbench-drawer__header"><div><p className="workbench-eyebrow">展示属性</p><h2 id="rename-task-title">重命名任务</h2></div><button type="button" className="workbench-icon-button" aria-label="关闭重命名窗口" onClick={onCancel}><Icon name="close" /></button></div>
+        <label className="workbench-field"><span>任务标题</span><input autoFocus value={title} maxLength={256} onChange={(event) => setTitle(event.currentTarget.value)} /></label>
+        {error ? <p className="workbench-inline-error" role="alert">{error}</p> : null}
+        <div className="workbench-dialog-actions"><button type="button" className="workbench-secondary-button" onClick={onCancel}>取消</button><button type="submit" className="workbench-primary-button" disabled={busy || !title.trim()}>{busy ? "正在保存…" : "保存标题"}</button></div>
+      </form>
+    </dialog>
+  );
 }
 
 function DetailsDrawer({
@@ -92,18 +190,29 @@ export function AppShell(): React.JSX.Element {
   const [collapsed, setCollapsed] = useState(false);
   const [search, setSearch] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
+  const [renameTask, setRenameTask] = useState<TaskSummary | null>(null);
   const location = useLocation();
+  const queryClient = useQueryClient();
   const tasks = useQuery(taskHistoryQuery);
   const readiness = useQuery(readinessQuery);
   const taskId = taskIdFromPath(location.pathname);
   const drawer = searchParams.get("drawer");
-  const filteredTasks = useMemo(() => {
-    const needle = search.trim().toLocaleLowerCase("zh-CN");
-    if (!needle) return tasks.data?.items ?? [];
-    return (tasks.data?.items ?? []).filter((task) =>
-      `${task.title} ${task.task_id}`.toLocaleLowerCase("zh-CN").includes(needle),
-    );
-  }, [search, tasks.data?.items]);
+  const groups = useMemo(() => historyGroups(tasks.data?.items ?? [], search), [search, tasks.data?.items]);
+  const presentation = useMutation({
+    mutationFn: ({ task, patch }: { task: TaskSummary; patch: { title?: string; pinned?: boolean; archived?: boolean } }) => api.updateTaskPresentation(task.task_id, {
+      ...patch,
+      envelope: {
+        idempotency_key: `presentation_${crypto.randomUUID().replaceAll("-", "")}`,
+        actor_type: "human",
+        actor_id: "human_operator",
+        expected_revision: patch.title === undefined ? task.presentation_revision ?? 0 : task.revision,
+      },
+    }),
+    onSuccess: () => {
+      setRenameTask(null);
+      void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
+    },
+  });
 
   const setDrawer = (value: string | null): void => {
     const next = new URLSearchParams(searchParams);
@@ -149,26 +258,18 @@ export function AppShell(): React.JSX.Element {
           </label>
 
           <nav className="workbench-history" aria-label="任务历史">
-            <p className="workbench-history__heading">最近更新</p>
             {tasks.isPending ? <p className="workbench-sidebar-note" role="status">正在读取任务历史</p> : null}
             {tasks.isError ? <p className="workbench-sidebar-note workbench-sidebar-note--error" role="alert">任务历史暂时不可用</p> : null}
-            {!tasks.isPending && !tasks.isError && filteredTasks.length === 0 ? (
+            {!tasks.isPending && !tasks.isError && groups.length === 0 ? (
               <p className="workbench-sidebar-note">没有匹配任务</p>
             ) : null}
-            {filteredTasks.map((task) => (
-              <NavLink
-                className="workbench-history-item"
-                key={task.task_id}
-                to={`/tasks/${encodeURIComponent(task.task_id)}/master`}
-                title={task.title}
-              >
-                <span className="workbench-history-item__title">{task.title}</span>
-                <span className="workbench-history-item__meta">
-                  <span>{taskLabel(task)}</span>
-                  <time dateTime={task.updated_at}>{new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(task.updated_at))}</time>
-                </span>
-              </NavLink>
+            {groups.map((group) => (
+              <section className="workbench-history-group" aria-label={group.label} key={group.label}>
+                <p className="workbench-history__heading">{group.label}</p>
+                {group.items.map((task) => <TaskHistoryRow key={task.task_id} task={task} busy={presentation.isPending} onRename={setRenameTask} onPin={(item) => presentation.mutate({ task: item, patch: { pinned: !item.pinned_at } })} onArchive={(item) => presentation.mutate({ task: item, patch: { archived: !item.archived_at } })} />)}
+              </section>
             ))}
+            {presentation.isError && !renameTask ? <p className="workbench-sidebar-note workbench-sidebar-note--error" role="alert">{presentation.error.message}</p> : null}
           </nav>
 
           <nav className="workbench-utilities" aria-label="工作台工具">
@@ -211,6 +312,7 @@ export function AppShell(): React.JSX.Element {
         </div>
 
         {drawer ? <DetailsDrawer drawer={drawer} readiness={readiness} taskId={taskId} onClose={() => setDrawer(null)} /> : null}
+        {renameTask ? <RenameTaskDialog task={renameTask} busy={presentation.isPending} error={presentation.isError ? presentation.error.message : null} onCancel={() => { presentation.reset(); setRenameTask(null); }} onSubmit={(title) => presentation.mutate({ task: renameTask, patch: { title } })} /> : null}
       </div>
     </>
   );
