@@ -42,7 +42,7 @@ def set_permissions(path: Path, mode: int, *, descriptor: int | None = None) -> 
     """Apply the platform's available private/read-only file protection."""
 
     if descriptor is not None and hasattr(os, "fchmod"):
-        os.fchmod(descriptor, mode)
+        os.fchmod(descriptor, mode)  # pyright: ignore[reportAttributeAccessIssue]
         return
     os.chmod(path, mode)
 
