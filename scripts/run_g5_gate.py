@@ -18,6 +18,7 @@ STAGES = (
     ("g3-real-closure", "g3-e2e"),
     ("g4-multi-instance", "g4-e2e"),
     ("frontend-browser", "frontend-e2e"),
+    ("workbench-real-stack", "frontend-integration"),
 )
 
 
@@ -46,6 +47,15 @@ def require_clean_commit(root: Path) -> tuple[str, str]:
     )
 
 
+def require_clean_image_baseline(root: Path) -> str:
+    if not root.is_dir():
+        raise SystemExit(f"G5 Image Agent root does not exist: {root}")
+    dirty = git_output(root, "status", "--porcelain")
+    if dirty:
+        raise SystemExit("G5 evidence requires a clean Image Agent worktree.")
+    return git_output(root, "rev-parse", "HEAD")
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
@@ -61,6 +71,11 @@ def main() -> None:
     log_path = build / "g5-gate.log"
     result_path = build / "g5-gate-result.json"
     commit, branch = require_clean_commit(root)
+    image_root_value = os.environ.get("G5_IMAGE_AGENT_ROOT")
+    if not image_root_value:
+        raise SystemExit("G5_IMAGE_AGENT_ROOT must point to the release Image Agent source.")
+    image_root = Path(image_root_value).resolve()
+    image_commit = require_clean_image_baseline(image_root)
     make_prefix = shlex.split(os.environ.get("G5_MAKE", "make"))
     if not make_prefix:
         raise SystemExit("G5_MAKE must name the make executable.")
@@ -118,11 +133,15 @@ def main() -> None:
     if final_exit == 0 and len(stage_results) == len(STAGES):
         try:
             final_commit, final_branch = require_clean_commit(root)
-            stable_candidate = (final_commit, final_branch) == (commit, branch)
+            final_image_commit = require_clean_image_baseline(image_root)
+            stable_candidate = (
+                (final_commit, final_branch) == (commit, branch)
+                and final_image_commit == image_commit
+            )
         except SystemExit:
             stable_candidate = False
     result = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "verification_command": "make g5-e2e",
         "commit": commit,
         "branch": branch,
@@ -130,6 +149,12 @@ def main() -> None:
         "started_at": started_at,
         "completed_at": completed_at,
         "stages": stage_results,
+        "dependencies": {
+            "image_agent": {
+                "commit": image_commit,
+                "worktree_clean": True,
+            }
+        },
         "log": {
             "path": "build/g5-gate.log",
             "sha256": hashlib.sha256(log_path.read_bytes()).hexdigest(),
@@ -140,7 +165,9 @@ def main() -> None:
     if final_exit != 0:
         raise SystemExit(final_exit)
     if not stable_candidate:
-        raise SystemExit("The checked commit or branch changed during the G5 gate.")
+        raise SystemExit(
+            "The checked commit, branch, or Image Agent baseline changed during the G5 gate."
+        )
     print(f"G5 gate result written to {result_path.relative_to(root)}")
 
 

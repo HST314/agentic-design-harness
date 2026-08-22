@@ -40,10 +40,12 @@ Windows 不要求 GNU Make。使用项目虚拟环境执行：
 .\.venv\Scripts\python.exe scripts\check_agent_import_boundary.py backend\harness
 .\.venv\Scripts\python.exe scripts\generate_frontend_contracts.py --check
 npm --prefix frontend run check
+npm --prefix frontend run test:unit
 npm --prefix frontend run build
+npm --prefix frontend run test:e2e
 ```
 
-真实 Agent、浏览器和 Provider 门禁需要额外环境，按[运行手册](docs/operations.md)选择 G2–G5 范围。不要把真实链路的跳过结果描述为通过。
+浏览器命令需要先安装锁定 Playwright 对应的 Chromium。真实 Agent 和 Provider 门禁需要额外环境，按[运行手册](docs/operations.md)选择 G2–G5 范围。不要把真实链路的跳过结果描述为通过。
 
 ## 提交说明
 

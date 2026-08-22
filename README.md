@@ -277,12 +277,13 @@ make real-provider-smoke \
 | `make test` | 契约、单元、集成、崩溃恢复和可用的 E2E 测试 |
 | `make check` | 测试、Ruff、compileall、密钥扫描、边界检查、前端类型检查与构建 |
 | `make verify` | `check` + Pyright + Python/npm 漏洞审计 + SBOM + 容量基准 |
+| `make frontend-unit` | React 组件、前端 API、命令信封与轮询恢复单测 |
 | `npm --prefix frontend run test:e2e` | Playwright 浏览器测试 |
-| `make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp` | Phase 1 完整离线发布门禁与证据索引 |
+| `make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp` | Phase 1 + RFC v0.3 工作台完整离线发布门禁与证据索引 |
 
 `make test` 在未提供合格 Image Agent 环境时会按设计跳过真实 Agent 用例；这不等同于真实链路已通过。发布前应根据目标范围执行对应的 G2–G5 门禁。
 
-Windows 不要求安装 GNU Make。可直接使用 `.\.venv\Scripts\python.exe` 运行测试、Ruff 和 Pyright，并使用 `npm --prefix frontend run check` 检查前端；完整命令见[贡献指南](CONTRIBUTING.md#本地验证)。GitHub Actions 会在真实 `windows-latest` 内核上执行完整后端测试矩阵。
+Windows 不要求安装 GNU Make。可直接使用 `.\.venv\Scripts\python.exe` 运行测试、Ruff 和 Pyright，并使用 npm 执行前端单测、构建和 Playwright；完整命令见[贡献指南](CONTRIBUTING.md#本地验证)。GitHub Actions 会在真实 `windows-latest` 内核上执行后端、前端构建和浏览器回归矩阵。
 
 ## 数据、安全与恢复
 
@@ -318,6 +319,7 @@ docs/              当前仍有效的 API、运维、契约、容量与发布验
 - [单机容量 SLO](docs/single-machine-capacity-slo.md)：适用边界、基准和容量纪律。
 - [G5 发布验收](docs/verification/g5-release.md)：完整门禁场景和证据生成。
 - [Phase 1 验收矩阵](docs/verification/phase1-traceability.md)：需求与可执行测试的映射。
+- [工作台 F5 回归与发布](docs/verification/workbench-f5-release.md)：RFC v0.3 的完整门禁与 15 项证据矩阵。
 - [RFC v0.2](docs/rfc-v0.2.md)：当前契约和验收证据仍依赖的 Phase 1 设计基线。
 
 ## 当前边界与路线

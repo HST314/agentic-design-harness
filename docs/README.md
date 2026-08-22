@@ -13,6 +13,7 @@
 - [单机容量 SLO](single-machine-capacity-slo.md)：支持边界、容量指标与基准方法。
 - [G5 发布验收](verification/g5-release.md)：Phase 1 离线发布门禁。
 - [Phase 1 验收矩阵](verification/phase1-traceability.md)：需求、测试与证据的对应关系。
+- [工作台 F5 回归与发布](verification/workbench-f5-release.md)：RFC v0.3 的组件/API/浏览器/真实栈、双平台 CI 与证据矩阵。
 
 ## 架构与契约
 
