@@ -25,14 +25,11 @@ class HarnessSettings(BaseModel):
     lock_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     contracts_root: Path = Path("contracts/v1")
     image_agent_root: Path = Path("agents/image_agent_mvp")
-    image_agent_legacy_root: Path = Path("../image_agent_mvp")
     image_agent_lock_path: Path = Path("agents/image-agent.lock.json")
-    image_agent_path_mode: Literal[
-        "prefer_embedded", "embedded_only", "external_only"
-    ] = "prefer_embedded"
+    image_agent_path_mode: Literal["embedded_only", "external_only"] = "embedded_only"
     delivery_bundle_migration_mode: Literal[
         "legacy_only", "dual_write", "bundle_only"
-    ] = "legacy_only"
+    ] = "bundle_only"
     image_agent_python: Path = Field(default_factory=lambda: Path(sys.executable))
     image_agent_dependency_root: Path = Path(".runtime/image-agent-deps")
     image_agent_revision: str | None = Field(
@@ -73,7 +70,6 @@ class HarnessSettings(BaseModel):
             "control_root",
             "workspace_root",
             "contracts_root",
-            "image_agent_legacy_root",
             "image_agent_lock_path",
             "image_agent_python",
             "image_agent_dependency_root",
@@ -87,26 +83,15 @@ class HarnessSettings(BaseModel):
             else project_root / configured_root
         )
         embedded_root = project_root / "agents" / "image_agent_mvp"
-        legacy_root = updates["image_agent_legacy_root"]
         if self.image_agent_path_mode == "embedded_only":
             selected_root = embedded_root
-        elif self.image_agent_path_mode == "external_only":
-            selected_root = (
-                configured_root
-                if self.image_agent_root != Path("agents/image_agent_mvp")
-                else legacy_root
-            )
-        elif embedded_root.is_dir():
-            selected_root = embedded_root
-        elif (
-            self.image_agent_root != Path("agents/image_agent_mvp")
-            and configured_root.is_dir()
-        ):
+        elif self.image_agent_root != Path("agents/image_agent_mvp"):
             selected_root = configured_root
-        elif legacy_root.is_dir():
-            selected_root = legacy_root
         else:
-            selected_root = embedded_root
+            raise ValueError(
+                "external_only requires an explicit image_agent_root; "
+                "automatic legacy-directory fallback was removed after P6 acceptance"
+            )
         updates["image_agent_root"] = selected_root
         return self.model_copy(update=updates)
 
@@ -130,7 +115,6 @@ _ENV_MAP = {
     "HARNESS_LOCK_TIMEOUT_SECONDS": "lock_timeout_seconds",
     "HARNESS_CONTRACTS_ROOT": "contracts_root",
     "HARNESS_IMAGE_AGENT_ROOT": "image_agent_root",
-    "HARNESS_IMAGE_AGENT_LEGACY_ROOT": "image_agent_legacy_root",
     "HARNESS_IMAGE_AGENT_LOCK_PATH": "image_agent_lock_path",
     "HARNESS_IMAGE_AGENT_PATH_MODE": "image_agent_path_mode",
     "HARNESS_DELIVERY_BUNDLE_MIGRATION_MODE": "delivery_bundle_migration_mode",

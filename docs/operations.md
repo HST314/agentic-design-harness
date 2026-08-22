@@ -74,7 +74,7 @@ make typecheck
 make verify
 ```
 
-GitHub Actions 在 Windows/Linux 运行后端、前端和启动器矩阵，在 Linux 对固定 Image runtime 执行真实进程闭环，并生成 SBOM 与文档检查报告。报告、浏览器结果和发布证据作为 CI artifact 保存，不手工提交到 `docs/`。
+GitHub Actions 在 Windows/Linux 运行后端、前端、启动器和 P6 专项矩阵，在 Linux 对固定 Image runtime 执行真实进程闭环，并生成 SBOM、文档检查和 `p6-platform-<OS>` 证据。P6 证据覆盖默认切换、双分支双资产、崩溃恢复、幂等、Key 脱敏和真实 Image Agent 进程；本地确定性 Provider 只属于进程/契约证据，不计为 Ark 通过。报告、浏览器结果和发布证据作为 CI artifact 保存，不手工提交到 `docs/`。
 
 真实 Ark 验收必须独立执行零费用预检、显式费用确认和一次最小生成；日志与证据不能包含 Key、完整 Base URL、请求/响应正文或图片临时 URL。未提供凭据导致的 skip 不是通过。
 
@@ -82,7 +82,7 @@ GitHub Actions 在 Windows/Linux 运行后端、前端和启动器矩阵，在 L
 
 升级前完成一致备份、`make verify`、适用的 Image E2E，并确认 submodule/lock 成对。先在恢复副本运行新版本，验证 ready、TaskCard revision、受管实例、至少两个分支候选、双资产原子发布和幂等重放，再切换正式目录。
 
-交付迁移顺序固定为 `legacy_only → dual_write → bundle_only`。在 `dual_write` 期间对账对象数量、摘要、branch/checkpoint、TaskCard revision 和 publication batch；只有 Windows/Linux 真实验收均通过后才可切换默认值。回滚默认路径或 UI 入口不能删除新 Bundle 数据，旧版本应保留只读能力或恢复升级前备份。
+交付迁移顺序固定为 `legacy_only → dual_write → bundle_only`。P6 后默认值为 `bundle_only`；路径默认值为 `embedded_only`，且不再自动搜索相邻外部目录。紧急回滚必须显式提供 `external_only + image_agent_root`，同时通过同一 release lock；写入回滚可显式设为 `legacy_only`。回滚默认路径、写入模式或 UI 入口不能删除新 Bundle 数据，旧版本应保留只读能力或恢复升级前备份。
 
 代码回滚必须匹配状态格式、契约 major、主仓 commit 和 Image lock。若新版本已提交旧代码无法识别的事件，禁止直接在原状态目录降级；恢复升级前备份。Git 回滚不能替代数据回滚。
 

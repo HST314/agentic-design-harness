@@ -43,7 +43,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         supervisor: ProcessSupervisor,
         adapters: AdapterRegistry,
         configuration: ConfigurationService | None = None,
-        delivery_bundle_write_targets: tuple[bool, bool] = (True, False),
+        delivery_bundle_write_targets: tuple[bool, bool] = (False, True),
     ) -> None:
         self.store = store
         self.commands = commands
