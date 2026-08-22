@@ -12,7 +12,7 @@ from harness.core.config import HarnessSettings
 from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
 from harness.services.master_gateway import MasterRunObservation
-from harness.storage.atomic import atomic_write_json
+from harness.storage.atomic import atomic_write_json, read_json
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -122,7 +122,7 @@ class RecordingApplication:
     def save_plan_and_create_instances(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         self.saved.append({"task_id": task_id, **deepcopy(kwargs)})
         expected = kwargs["envelope"].expected_revision
-        return {"task_revision": expected + 1, "task": {"task_id": task_id}}
+        return {"task_revision": expected, "task": {"task_id": task_id}}
 
     def confirm_and_start_ready_instances(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         self.started.append({"task_id": task_id, **deepcopy(kwargs)})
@@ -132,6 +132,11 @@ class RecordingApplication:
 class InterruptedApplication(RecordingApplication):
     def confirm_and_start_ready_instances(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("simulated crash after the plan-save checkpoint")
+
+
+class InterruptedBeforePlanSaveApplication(RecordingApplication):
+    def save_plan_and_create_instances(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("simulated crash after the confirmation-intent checkpoint")
 
 
 class EnabledCredentials:
@@ -454,6 +459,67 @@ class MasterThreadApiTests(unittest.TestCase):
                 )
                 self.assertEqual(application.saved, [])
                 self.assertEqual(application.started, [])
+
+    def test_recovery_aborts_r1_after_a_persisted_intent_is_superseded_by_r2(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self._app(Path(temporary))
+            app.state.container.master_threads.gateway = RecordingGateway()
+            app.state.container.master_threads.application = (
+                InterruptedBeforePlanSaveApplication()
+            )
+            app.state.container.master_threads.credentials = EnabledCredentials()
+            with TestClient(app) as client:
+                task_id = self._create_submit(client, "auto")
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                service = app.state.container.master_threads
+
+                with self.assertRaisesRegex(
+                    RuntimeError, "confirmation-intent checkpoint"
+                ):
+                    service.confirm_plan(
+                        task_id,
+                        1,
+                        task_expected_revision=session["task_revision"],
+                        expected_card_revisions={"card_master_1": 1},
+                        envelope=CommandEnvelope.model_validate(
+                            self._envelope("persist-r1-intent", 1)
+                        ),
+                    )
+
+                intent_path = service._confirm_intent_path(task_id, 1)
+                self.assertEqual(read_json(intent_path)["state"], "PREPARED")
+                card = session["latest_proposal"]["execution_cards"][0]
+                revised = client.patch(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/task-cards/{card['card_id']}",
+                    json={
+                        "expected_proposal_revision": 1,
+                        "expected_card_revision": 1,
+                        "objective": "采用经过人工复核的新方向。",
+                        "instructions": card["instructions"],
+                        "input_assets": card["input_assets"],
+                        "expected_deliveries": card["expected_deliveries"],
+                        "parameters": card["parameters"],
+                        "envelope": self._envelope("revise-after-r1-intent", 1),
+                    },
+                )
+                self.assertEqual(revised.status_code, 200, revised.text)
+                self.assertEqual(revised.json()["latest_proposal"]["revision"], 2)
+
+                recovered_application = RecordingApplication()
+                service.application = recovered_application
+                with self.assertRaises(HarnessError) as raised:
+                    service.recover()
+
+                self.assertEqual(raised.exception.code, "REVISION_CONFLICT")
+                self.assertEqual(recovered_application.saved, [])
+                self.assertEqual(recovered_application.started, [])
+                self.assertEqual(read_json(intent_path)["state"], "ABORTED")
+                proposals = app.state.container.store.plan_proposal.list(task_id)
+                self.assertEqual(
+                    {item["revision"]: item["status"] for item in proposals},
+                    {1: "SUPERSEDED", 2: "PENDING_CONFIRMATION"},
+                )
+                self.assertEqual(service.recover(), [])
 
     def test_unconfigured_gateway_persists_a_truthful_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
