@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 from copy import deepcopy
@@ -57,6 +58,25 @@ from .types import (
 
 _PACKAGE_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 _ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
+
+
+def image_dependency_pythonpath_entries(
+    artifact_root: Path, *, os_name: str | None = None
+) -> tuple[Path, ...]:
+    """Return import roots required by a pip --target dependency artifact."""
+
+    dependencies = artifact_root / "_dependencies"
+    selected_os = os.name if os_name is None else os_name
+    if selected_os == "nt":
+        # pip --target does not process pywin32.pth. These are the same
+        # locked directories that the wheel's .pth file would add.
+        return (
+            dependencies,
+            dependencies / "win32",
+            dependencies / "win32" / "lib",
+            dependencies / "pythonwin",
+        )
+    return (dependencies,)
 
 
 class ImageAgentAdapter(ImageObservationMixin):
@@ -231,7 +251,9 @@ class ImageAgentAdapter(ImageObservationMixin):
                 "IMAGE_AGENT_MANAGED_MODE": "1",
                 "IMAGE_AGENT_MANAGED_PROJECT_ID": instance_id,
                 "IMAGE_AGENT_CONTROL_FILE": str(control_path),
-                "PYTHONPATH": str(artifact_root / "_dependencies"),
+                "PYTHONPATH": os.pathsep.join(
+                    str(path) for path in image_dependency_pythonpath_entries(artifact_root)
+                ),
             },
             health_path="/api/health",
             readiness_path="/api/health",
