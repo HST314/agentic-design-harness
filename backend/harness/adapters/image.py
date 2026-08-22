@@ -29,10 +29,12 @@ from .base import (
     ValidationResult,
 )
 from .image_delivery import normalize_image_delivery, stage_final_delivery
-from .image_observation import (
-    SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION,
-    ImageObservationMixin,
+from .image_lock import (
+    ImageAgentReleaseLock,
+    default_image_agent_lock_path,
+    load_image_agent_lock,
 )
+from .image_observation import ImageObservationMixin
 from .image_runtime import (
     IMAGE_ENTRYPOINT,
     IMAGE_WEB_REQUIREMENTS,
@@ -44,18 +46,6 @@ from .image_workflow import (
     map_advance_payload,
 )
 from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
-
-SUPPORTED_IMAGE_AGENT_REVISION = "0e559d0153f479c8abefb14613804b8cde486282"
-_SUPPORTED_IMAGE_RUNTIME_ATTESTATIONS = {
-    SUPPORTED_IMAGE_AGENT_REVISION: {
-        "source_content_sha256": (
-            "ade81f5bf339b4c8d16755876d49fccc1ba6c783434d7432294449fdc7ba10fb"
-        ),
-        "dependency_content_sha256": (
-            "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb"
-        ),
-    }
-}
 
 _PACKAGE_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 _ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
@@ -77,7 +67,8 @@ class ImageAgentAdapter(ImageObservationMixin):
         source_root: Path,
         interpreter: Path,
         dependency_root: Path,
-        revision: str = SUPPORTED_IMAGE_AGENT_REVISION,
+        release_lock: ImageAgentReleaseLock | None = None,
+        revision: str | None = None,
         host: str = "127.0.0.1",
         request_timeout_seconds: float = 5.0,
     ) -> None:
@@ -88,17 +79,20 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.source_root = source_root
         self.interpreter = interpreter
         self.dependency_root = dependency_root
-        self.revision = revision
+        self.release_lock = release_lock or load_image_agent_lock(
+            default_image_agent_lock_path()
+        )
+        self.revision = revision or self.release_lock.revision
+        self.package_version = self.release_lock.package_version
         self.host = host
         self.request_timeout_seconds = request_timeout_seconds
-        attestation = _SUPPORTED_IMAGE_RUNTIME_ATTESTATIONS.get(revision, {})
         self.runtime_builder = ImageRuntimeBuilder(
             source_root,
             dependency_root,
-            revision=revision,
-            package_version=SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION,
-            source_content_sha256=attestation.get("source_content_sha256", ""),
-            dependency_content_sha256=attestation.get("dependency_content_sha256", ""),
+            revision=self.revision,
+            package_version=self.package_version,
+            source_content_sha256=self.release_lock.source_content_sha256,
+            dependency_content_sha256=self.release_lock.runtime_dependency_tree_sha256,
         )
 
     def validate_task_card(self, card: TaskCard) -> ValidationResult:
@@ -707,7 +701,7 @@ class ImageAgentAdapter(ImageObservationMixin):
 
 
     def _validate_runtime_source(self) -> None:
-        if self.revision != SUPPORTED_IMAGE_AGENT_REVISION:
+        if self.revision != self.release_lock.revision:
             raise HarnessError(
                 "SCHEMA_VERSION_UNSUPPORTED",
                 "The configured Image Agent revision is not supported by this Harness build.",
@@ -731,7 +725,7 @@ class ImageAgentAdapter(ImageObservationMixin):
             match = _PACKAGE_VERSION.search(pyproject.read_text(encoding="utf-8"))
         except OSError:
             match = None
-        if match is None or match.group(1) != SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION:
+        if match is None or match.group(1) != self.package_version:
             raise HarnessError(
                 "SCHEMA_VERSION_UNSUPPORTED",
                 "The configured Image Agent package version is unsupported.",

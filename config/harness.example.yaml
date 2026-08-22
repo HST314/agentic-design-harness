@@ -5,6 +5,8 @@ host: 127.0.0.1
 port: 18080
 log_level: INFO
 lock_timeout_seconds: 5.0
-image_agent_root: ../image_agent_mvp
+image_agent_root: agents/image_agent_mvp
+image_agent_lock_path: agents/image-agent.lock.json
+image_agent_path_mode: prefer_embedded
 image_agent_dependency_root: .runtime/image-agent-deps
-image_agent_revision: 0e559d0153f479c8abefb14613804b8cde486282
+delivery_bundle_migration_mode: legacy_only

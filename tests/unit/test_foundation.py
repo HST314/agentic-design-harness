@@ -68,6 +68,48 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             HarnessSettings(log_level="verbose")
 
+    def test_image_agent_path_migration_prefers_embedded_and_can_roll_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            embedded = root / "agents" / "image_agent_mvp"
+            legacy = root / "legacy_image_agent"
+            embedded.mkdir(parents=True)
+            legacy.mkdir()
+            environment = {"HARNESS_IMAGE_AGENT_LEGACY_ROOT": "legacy_image_agent"}
+            preferred = load_settings(root, environment)
+            self.assertEqual(preferred.image_agent_root, embedded)
+
+            embedded.rmdir()
+            fallback = load_settings(root, environment)
+            self.assertEqual(fallback.image_agent_root, legacy)
+
+            embedded_only = load_settings(
+                root,
+                {**environment, "HARNESS_IMAGE_AGENT_PATH_MODE": "embedded_only"},
+            )
+            self.assertEqual(embedded_only.image_agent_root, embedded)
+
+            external_only = load_settings(
+                root,
+                {**environment, "HARNESS_IMAGE_AGENT_PATH_MODE": "external_only"},
+            )
+            self.assertEqual(external_only.image_agent_root, legacy)
+
+    def test_delivery_bundle_migration_modes_expose_explicit_write_targets(self) -> None:
+        self.assertEqual(HarnessSettings().delivery_bundle_write_targets, (True, False))
+        self.assertEqual(
+            HarnessSettings(
+                delivery_bundle_migration_mode="dual_write"
+            ).delivery_bundle_write_targets,
+            (True, True),
+        )
+        self.assertEqual(
+            HarnessSettings(
+                delivery_bundle_migration_mode="bundle_only"
+            ).delivery_bundle_write_targets,
+            (False, True),
+        )
+
     def test_runtime_preflight_accepts_supported_host_and_rejects_unknown_kernel(self) -> None:
         validate_runtime_platform()
         with patch("harness.runtime.sys.platform", "darwin"), self.assertRaisesRegex(

@@ -18,6 +18,8 @@ jobs:
         python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -29,6 +31,7 @@ jobs:
       - run: python -m compileall -q backend/harness scripts tests
       - run: python scripts/secret_scan.py .
       - run: python scripts/check_agent_import_boundary.py backend/harness
+      - run: python scripts/verify_image_agent_lock.py
       - run: python scripts/generate_frontend_contracts.py --check
       - run: python scripts/benchmark_storage_recovery.py --profile ci
       - run: python -m pip_audit -r requirements-runtime.txt --require-hashes --disable-pip --progress-spinner off
@@ -85,20 +88,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
         with:
-          repository: HST314/image_agent_mvp
-          ref: 0e559d0153f479c8abefb14613804b8cde486282
-          path: .runtime/image-agent-source
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: pip
+      - name: Read locked Image revision
+        id: image-lock
+        shell: bash
+        run: echo "revision=$(python scripts/verify_image_agent_lock.py --print-revision)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: HST314/image_agent_mvp
+          ref: ${{ steps.image-lock.outputs.revision }}
+          path: .runtime/image-agent-source
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Verify locked Image source and dependency manifests
+        run: python scripts/verify_image_agent_lock.py --image-agent-root .runtime/image-agent-source
       - run: npm ci
         working-directory: frontend
       - run: npx playwright install --with-deps chromium

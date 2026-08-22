@@ -6,6 +6,7 @@
 - [常见问题排查](troubleshooting.md)：404、Python 环境、前端代理、端口和就绪状态。
 - [Master API 调用指南](master-api-guide.md)：标准编排流程、命令信封、分页与错误处理。
 - [Master Gateway 接入契约](master-gateway.md)：真实编排服务的 HTTP 契约、幂等与确认恢复语义。
+- [Image Agent 集成与迁移护栏](image-agent-integration.md)：版本锁、内嵌路径、迁移开关与回滚边界。
 
 ## 运维与发布
 

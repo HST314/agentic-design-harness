@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
 from ..adapters import AdapterRegistry, ImageAgentAdapter, PptAgentContractAdapter
+from ..adapters.image_lock import load_image_agent_lock
 from ..contracts import ContractRegistry
 from ..core.config import HarnessSettings, load_settings
 from ..core.errors import ErrorCatalog, HarnessError
@@ -68,6 +69,15 @@ class ContractValidationRequest(BaseModel):
 
 
 def build_container(settings: HarnessSettings) -> Container:
+    image_release_lock = load_image_agent_lock(settings.image_agent_lock_path)
+    if (
+        settings.image_agent_revision is not None
+        and settings.image_agent_revision != image_release_lock.revision
+    ):
+        raise HarnessError(
+            "SCHEMA_VERSION_UNSUPPORTED",
+            "The legacy Image Agent revision override differs from the release lock.",
+        )
     contracts = ContractRegistry(settings.contracts_root)
     errors = ErrorCatalog(settings.contracts_root / "catalogs" / "error-codes.json")
     store = FileStateStore(
@@ -100,6 +110,7 @@ def build_container(settings: HarnessSettings) -> Container:
                 source_root=settings.image_agent_root,
                 interpreter=settings.image_agent_python,
                 dependency_root=settings.image_agent_dependency_root,
+                release_lock=image_release_lock,
                 revision=settings.image_agent_revision,
                 host=settings.host,
             ),
