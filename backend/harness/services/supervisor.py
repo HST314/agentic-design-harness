@@ -118,6 +118,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 self._enforce_code_identity(
                     task_id, instance_id, pinned_artifact.identity.digest
                 )
+                pinned_artifact.verify_current()
                 record_path = self._launch_path(launch_id)
                 if record_path.exists():
                     existing = read_json(record_path)
