@@ -64,6 +64,12 @@ class Phase1EvidenceTests(unittest.TestCase):
                 {"name": name, "command": command, "exit_code": 0}
                 for name, command in EXPECTED_GATE_STAGES
             ],
+            "dependencies": {
+                "image_agent": {
+                    "commit": "b" * 40,
+                    "worktree_clean": True,
+                }
+            },
             "log": {
                 "path": "build/g5-gate.log",
                 "sha256": hashlib.sha256(log_path.read_bytes()).hexdigest(),

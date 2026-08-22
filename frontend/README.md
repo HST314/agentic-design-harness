@@ -24,8 +24,9 @@ npm --prefix frontend run dev
 
 ```bash
 npm --prefix frontend run check
+npm --prefix frontend run test:unit
 npm --prefix frontend run build
 npm --prefix frontend run test:e2e
 ```
 
-浏览器测试位于 `frontend/e2e/`，需要已安装的 Playwright Chromium。`npm run preview` 有意不固定 host/port；本地 Playwright 使用 `preview:local`，生产栈测试运行器会注入随机地址。
+组件与 API 单测和源码相邻，以 `*.test.ts(x)` 命名；浏览器测试位于 `frontend/e2e/`，其中工作台核心路由还执行 WCAG 2.1 A/AA 自动审计。浏览器回归需要已安装的 Playwright Chromium。`npm run preview` 有意不固定 host/port；本地 Playwright 使用 `preview:local`，生产栈测试运行器会注入随机地址。

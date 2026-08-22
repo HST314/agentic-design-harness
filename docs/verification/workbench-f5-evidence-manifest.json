@@ -1,0 +1,107 @@
+{
+  "schema_version": "1.0",
+  "release_checks": [
+    {
+      "claim": "Linux and Windows execute the same backend, frontend component, build and browser gates",
+      "commands": ["GitHub Actions quality / release-gate"],
+      "evidence_files": [".github/workflows/quality.yml"]
+    },
+    {
+      "claim": "The production bundle completes a browser workflow against the pinned real Image runtime without browser API mocks",
+      "commands": ["make frontend-integration"],
+      "evidence_files": ["scripts/run_browser_integration.py", "frontend/e2e/real-stack.spec.ts"]
+    }
+  ],
+  "acceptance_items": [
+    {
+      "rfc_item": 1,
+      "claim": "Root navigation opens the new-task workbench with searchable task history",
+      "commands": ["make frontend-e2e"],
+      "evidence_files": ["frontend/e2e/workbench-shell.spec.ts", "frontend/src/layout/AppShell.tsx"]
+    },
+    {
+      "rfc_item": 2,
+      "claim": "Prompt, file type, size and MIME errors are rejected next to the task intake controls",
+      "commands": ["make test", "make frontend-e2e"],
+      "evidence_files": ["tests/integration/test_task_intakes.py", "frontend/e2e/task-intake.spec.ts"]
+    },
+    {
+      "rfc_item": 3,
+      "claim": "Initial images, PDF and text assets have bounded concurrent upload progress, retry and cancellation",
+      "commands": ["make test", "make frontend-e2e"],
+      "evidence_files": ["tests/integration/test_task_intakes.py", "frontend/e2e/task-intake.spec.ts", "frontend/src/features/task-intake/TaskIntakePage.tsx"]
+    },
+    {
+      "rfc_item": 4,
+      "claim": "A DRAFT survives refresh and locks all later uploads after intake submission",
+      "commands": ["make test", "make frontend-e2e"],
+      "evidence_files": ["tests/integration/test_task_intakes.py", "frontend/e2e/task-intake.spec.ts"]
+    },
+    {
+      "rfc_item": 5,
+      "claim": "Master messages and plan revisions persist and manual mode creates no running instances before confirmation",
+      "commands": ["make test", "make frontend-e2e"],
+      "evidence_files": ["tests/integration/test_master_threads.py", "frontend/e2e/master-thread.spec.ts"]
+    },
+    {
+      "rfc_item": 6,
+      "claim": "Automatic mode skips only final confirmation and retains Provider, credential and Adapter gates",
+      "commands": ["make test"],
+      "evidence_files": ["tests/integration/test_master_threads.py", "tests/integration/test_application_service.py"]
+    },
+    {
+      "rfc_item": 7,
+      "claim": "Rename, pin, archive and restore update presentation state without changing execution state",
+      "commands": ["make test", "make frontend-e2e"],
+      "evidence_files": ["tests/integration/test_task_intakes.py", "frontend/e2e/task-intake.spec.ts"]
+    },
+    {
+      "rfc_item": 8,
+      "claim": "The board projects one stable logical WorkItem across instance replacement and retry history",
+      "commands": ["make test", "make frontend-e2e"],
+      "evidence_files": ["tests/integration/test_work_item_projections.py", "frontend/e2e/task-board.spec.ts"]
+    },
+    {
+      "rfc_item": 9,
+      "claim": "Running work wins over parallel approval and all board mappings are deterministic",
+      "commands": ["make test", "make frontend-e2e"],
+      "evidence_files": ["tests/integration/test_work_item_projections.py", "tests/integration/test_domain_commands.py", "frontend/e2e/task-board.spec.ts"]
+    },
+    {
+      "rfc_item": 10,
+      "claim": "The plan view orders stages and dependencies and reports the unavailable PPT boundary truthfully",
+      "commands": ["make frontend-e2e"],
+      "evidence_files": ["frontend/e2e/task-board.spec.ts", "frontend/src/features/task-board/TaskBoardPage.tsx"]
+    },
+    {
+      "rfc_item": 11,
+      "claim": "An Image WorkItem opens only its server-approved current instance workbench with controlled recovery",
+      "commands": ["make test", "make frontend-e2e", "make frontend-integration"],
+      "evidence_files": ["tests/integration/test_agent_workbench.py", "frontend/e2e/agent-workbench.spec.ts", "frontend/e2e/real-stack.spec.ts"]
+    },
+    {
+      "rfc_item": 12,
+      "claim": "The embedded Agent surface contains no duplicate workbench chat and keeps specialist interaction in the iframe",
+      "commands": ["make frontend-e2e"],
+      "evidence_files": ["frontend/e2e/agent-workbench.spec.ts", "frontend/src/features/agent-workbench/AgentWorkbenchPage.tsx"]
+    },
+    {
+      "rfc_item": 13,
+      "claim": "Active and stable projections use three- and five-second cadence and hidden tabs pause polling",
+      "commands": ["make frontend-unit", "make frontend-e2e"],
+      "evidence_files": ["frontend/src/api/queries.test.ts", "frontend/e2e/task-board.spec.ts"]
+    },
+    {
+      "rfc_item": 14,
+      "claim": "Writes retain idempotency, actor and expected-revision envelopes and conflicts remain recoverable",
+      "commands": ["make frontend-unit", "make test"],
+      "evidence_files": ["frontend/src/api/client.test.ts", "tests/integration/test_task_intakes.py", "tests/integration/test_master_threads.py"]
+    },
+    {
+      "rfc_item": 15,
+      "claim": "Supported desktop widths, keyboard focus, reduced motion, error announcements and WCAG 2.1 A/AA checks pass",
+      "commands": ["make frontend-unit", "make frontend-e2e"],
+      "evidence_files": ["frontend/e2e/workbench-shell.spec.ts", "frontend/e2e/master-thread.spec.ts", "frontend/e2e/agent-workbench.spec.ts", "frontend/src/components/Icon.test.tsx", "design-system/agentic-design-harness/MASTER.md"]
+    }
+  ]
+}

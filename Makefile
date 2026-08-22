@@ -10,7 +10,7 @@ REAL_PROVIDER_EVIDENCE_PATH ?= build/real-provider-evidence.json
 REAL_PROVIDER_LOG_FILE ?= build/real-provider-smoke.log
 REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(REAL_PROVIDER_ENV_FILE)",)
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -52,7 +52,11 @@ capacity-benchmark: test-env
 
 frontend-check: contract-check
 	npm --prefix frontend run check
+	npm --prefix frontend run test:unit
 	npm --prefix frontend run build
+
+frontend-unit:
+	npm --prefix frontend run test:unit
 
 frontend-e2e:
 	npm --prefix frontend run test:e2e
@@ -117,11 +121,14 @@ g4-e2e: test-env image-agent-env
 	$(PYTHON) -m unittest tests.e2e.test_g4_multi_image_agent -v
 
 g5-e2e:
-	G5_MAKE="$(MAKE)" $(PYTHON) scripts/run_g5_gate.py
+	G5_MAKE="$(MAKE)" G5_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
+		$(PYTHON) scripts/run_g5_gate.py
 	$(PYTHON) scripts/generate_phase1_evidence.py
+	$(PYTHON) scripts/generate_workbench_evidence.py
 
 evidence:
 	$(PYTHON) scripts/generate_phase1_evidence.py
+	$(PYTHON) scripts/generate_workbench_evidence.py
 
 test-env: $(TEST_ENV_STAMP)
 

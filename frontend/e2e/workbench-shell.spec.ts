@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
@@ -164,4 +165,37 @@ test("desktop target widths have no page-level horizontal overflow", async ({ pa
     }));
     expect(dimensions.scrollWidth).toBe(dimensions.clientWidth);
   }
+});
+
+test("core workbench routes pass the WCAG 2.1 A/AA automated audit", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+
+  for (const route of [
+    "/tasks/new",
+    "/tasks/task_launch_campaign/master",
+    "/tasks/task_launch_campaign/board",
+    "/tasks/task_launch_campaign/plan",
+  ]) {
+    await page.goto(route);
+    await expect(page.locator("#workbench-main")).toBeVisible();
+    const audit = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+      .analyze();
+
+    expect(
+      audit.violations,
+      `${route}: ${audit.violations.map((violation) => violation.id).join(", ")}`,
+    ).toEqual([]);
+  }
+});
+
+test("reduced-motion keeps feedback effectively instant without removing focus", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/tasks/new");
+  const action = page.getByRole("link", { name: "新任务", exact: true });
+  await action.focus();
+  await expect(action).toBeFocused();
+  await expect.poll(async () => action.evaluate((element) => (
+    Number.parseFloat(getComputedStyle(element).transitionDuration) <= 0.001
+  ))).toBe(true);
 });
