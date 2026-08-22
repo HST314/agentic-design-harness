@@ -75,3 +75,23 @@ export const agentWorkbenchLinkQuery = (
   retry: false,
   staleTime: 15_000,
 });
+
+export const deliveryBundlesQuery = (taskId: string) => queryOptions({
+  queryKey: ["delivery-bundles", taskId],
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.deliveryBundles(taskId, signal),
+  refetchInterval: 5_000,
+  refetchIntervalInBackground: false,
+  retry: false,
+});
+
+export const settingsQuery = queryOptions({
+  queryKey: ["settings"],
+  queryFn: async ({ signal }: { signal: AbortSignal }) => {
+    const [globalConfig, keyPool] = await Promise.all([
+      api.globalConfig(signal),
+      api.keyPool(signal),
+    ]);
+    return { globalConfig, keyPool };
+  },
+  retry: false,
+});

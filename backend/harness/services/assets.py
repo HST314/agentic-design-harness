@@ -33,7 +33,13 @@ from .asset_browser import (
     resolve_committed_browser_path,
     verify_browser_event_path,
 )
-from .asset_files import detect_mime, file_digest, kind_for_mime
+from .asset_files import (
+    detect_mime,
+    detect_mime_stream,
+    file_digest,
+    kind_for_mime,
+    stream_digest,
+)
 from .asset_reader import OpenedCommittedAsset, open_committed_asset
 from .asset_recovery import AssetRecoveryMixin
 
@@ -823,6 +829,66 @@ class AssetService(AssetRecoveryMixin):
                 self._invalid(f"The preview content is invalid: {type(exc).__name__}.")
             return {
                 "mime_type": opened.mime_type,
+                "content": content,
+                "encoding": "utf-8",
+            }
+
+    def preview_delivery_candidate(
+        self,
+        task_id: str,
+        instance_id: str,
+        descriptor: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Preview one immutable private bundle file after live descriptor verification."""
+
+        self._require_instance(task_id, instance_id)
+        relative_path = normalized_relative_path(
+            str(descriptor.get("private_relative_path", ""))
+        ).as_posix()
+        workspace = self.initialize_task_workspace(task_id)
+        path = resolve_task_path(
+            workspace,
+            relative_path,
+            allowed_prefixes=(f"instances/{instance_id}/outputs",),
+        )
+        if path.is_symlink() or not path.is_file():
+            raise HarnessError(
+                "ASSET_CORRUPTED", "The delivery candidate preview file is unavailable."
+            )
+        try:
+            file_descriptor = open_regular_readonly(path, trusted_root=workspace)
+        except OSError:
+            raise HarnessError(
+                "ASSET_CORRUPTED", "The delivery candidate preview file is unsafe."
+            ) from None
+        with os.fdopen(file_descriptor, "rb", closefd=True) as opened:
+            mime_type = detect_mime_stream(opened, path.name)
+            size_bytes, sha256 = stream_digest(opened)
+            if (
+                size_bytes != descriptor.get("size_bytes")
+                or sha256 != descriptor.get("sha256")
+                or mime_type != descriptor.get("mime_type")
+            ):
+                raise HarnessError(
+                    "ASSET_CORRUPTED",
+                    "The delivery candidate changed after it was frozen.",
+                )
+            if size_bytes > self.preview_limit_bytes:
+                self._invalid("The delivery candidate is too large to preview safely.")
+            if mime_type.startswith("image/"):
+                return {
+                    "mime_type": mime_type,
+                    "content": opened.read(),
+                    "encoding": None,
+                }
+            if mime_type != "text/markdown":
+                self._invalid("This delivery candidate type is not previewable.")
+            try:
+                content = opened.read().decode("utf-8")
+            except UnicodeDecodeError:
+                self._invalid("The Markdown delivery candidate is not valid UTF-8.")
+            return {
+                "mime_type": mime_type,
                 "content": content,
                 "encoding": "utf-8",
             }

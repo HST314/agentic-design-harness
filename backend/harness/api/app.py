@@ -32,6 +32,7 @@ from ..services.credentials import CredentialPoolService
 from ..services.master_gateway import HttpMasterGateway, UnavailableMasterGateway
 from ..services.master_threads import MasterThreadService
 from ..services.retry_budget import RetryBudgetService
+from ..services.settings_diagnostics import SettingsDiagnosticsService
 from ..services.supervisor import ProcessSupervisor
 from ..services.task_intakes import TaskIntakeService
 from ..services.usage import UsageService
@@ -61,6 +62,7 @@ class Container:
     master_threads: MasterThreadService
     work_items: WorkItemProjectionService
     agent_workbench: AgentWorkbenchService
+    settings_diagnostics: SettingsDiagnosticsService
 
 
 class ContractValidationRequest(BaseModel):
@@ -171,6 +173,11 @@ def build_container(settings: HarnessSettings) -> Container:
         adapters,
     )
     agent_workbench = AgentWorkbenchService(store, adapters, work_items)
+    settings_diagnostics = SettingsDiagnosticsService(
+        configuration,
+        credentials,
+        settings.control_root,
+    )
     return Container(
         settings=settings,
         contracts=contracts,
@@ -190,6 +197,7 @@ def build_container(settings: HarnessSettings) -> Container:
         master_threads=master_threads,
         work_items=work_items,
         agent_workbench=agent_workbench,
+        settings_diagnostics=settings_diagnostics,
     )
 
 

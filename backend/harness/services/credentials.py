@@ -201,6 +201,29 @@ class CredentialPoolService:
             values.append(pair_to_resolved(pair).safe_summary() | {"enabled": pair.enabled})
         return values
 
+    def resolve_active_pair(self, pair_id: str, revision: int) -> ResolvedCredential:
+        """Resolve one explicitly selected active pair without exposing it to an API response."""
+
+        validate_identifier(pair_id, "credential_pair_id")
+        with FileLock(self.lock_path, self.store.lock_timeout_seconds):
+            document = self._load_secret_document(required=False)
+            active = next(
+                (
+                    item
+                    for item in document.get("active", [])
+                    if item.get("credential_pair_id") == pair_id
+                    and item.get("revision") == revision
+                ),
+                None,
+            )
+            if active is None or not active.get("enabled"):
+                raise HarnessError(
+                    "CREDENTIAL_PAIR_UNAVAILABLE",
+                    "The selected credential pair is not active and enabled.",
+                    {"credential_pair_id": pair_id, "revision": revision},
+                )
+            return self._resolve_pair(pair_id, revision)
+
     def create_instance(
         self,
         task_id: str,

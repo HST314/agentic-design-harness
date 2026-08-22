@@ -212,7 +212,7 @@ class ApprovalInboxService:
             owner="human",
             title="分支交付包等待确认",
             message=f"实例 {instance_id} 的分支 {candidate['branch_id']} 已冻结图片与设计说明。",
-            deep_link=f"tasks/{task_id}?tab=deliveries&bundle_id={bundle_id}",
+            deep_link=f"tasks/{task_id}/deliveries?bundle_id={bundle_id}",
             dedupe_key=f"delivery-review:{bundle_id}",
             instance_id=instance_id,
             approval_id=approval_id,

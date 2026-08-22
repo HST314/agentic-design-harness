@@ -7,7 +7,9 @@ import {
 } from "react-router-dom";
 import { TaskIntakePage } from "../features/task-intake/TaskIntakePage";
 import { AgentWorkbenchPage } from "../features/agent-workbench/AgentWorkbenchPage";
+import { DeliveryPage } from "../features/deliveries/DeliveryPage";
 import { MasterRoutePage } from "../features/master-thread/MasterThreadPage";
+import { SettingsPage } from "../features/settings/SettingsPage";
 import {
   TaskBoardPage,
   TaskPlanPage,
@@ -55,9 +57,14 @@ export function AppRouter(): React.JSX.Element {
             element={<TaskPlanPage />}
           />
           <Route
+            path="/tasks/:taskId/deliveries"
+            element={<DeliveryPage />}
+          />
+          <Route
             path="/tasks/:taskId/work-items/:workItemId"
             element={<AgentWorkbenchPage />}
           />
+          <Route path="/settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<LegacyRoute />} />
       </Routes>
