@@ -28,7 +28,7 @@
 | 边框 | `--color-border` | `#E2E8F0` |
 | 焦点环 | `--color-ring` | `#2563EB` |
 | 成功 | `--color-success` | `#047857` |
-| 等待 | `--color-warning` | `#B45309` |
+| 等待 | `--color-warning` | `#9A3412` |
 | 失败 | `--color-danger` | `#B91C1C` |
 | 不可用 | `--color-unavailable` | `#64748B` |
 

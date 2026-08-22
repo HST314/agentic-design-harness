@@ -252,6 +252,11 @@ async function renderTaskSection(
   pageContent().innerHTML = renderTaskShell(response, section, body);
   wireNavigation();
   wireResourcePreviews(taskId);
+  if (section === "resources") {
+    const selected = root.querySelector<HTMLElement>("[data-selected-asset]");
+    selected?.scrollIntoView({ block: "center" });
+    selected?.focus({ preventScroll: true });
+  }
 }
 
 function renderTaskShell(
@@ -656,23 +661,25 @@ function wireInboxActions(): void {
 
 function renderResources(taskId: string, files: TaskFile[], assets: AssetManifest[]): string {
   const manifests = new Map(assets.map((entry) => [entry.manifest.relative_path, entry]));
+  const selectedAssetId = new URLSearchParams(window.location.search).get("asset_id");
   const deliverables = files.filter((file) => !file.relative_path.includes("/manifests/"));
   const groups = [
     { key: "inputs", label: "任务输入", files: deliverables.filter((file) => file.relative_path.startsWith("inputs/")) },
     { key: "shared", label: "公共交付", files: deliverables.filter((file) => file.relative_path.startsWith("resources/shared/")) },
     { key: "instances", label: "实例输出", files: deliverables.filter((file) => file.relative_path.startsWith("instances/")) },
   ];
-  return `<section class="resources-section" aria-labelledby="resources-title"><div class="section-heading"><div><p class="eyebrow">受控资源</p><h2 id="resources-title">任务文件</h2><p>只展示已提交且实时完整性校验通过的文件；未发布候选不会混入公共交付。</p></div><span class="count-pill">${deliverables.length} 个文件</span></div>${groups.map((group) => `<section class="resource-group" aria-labelledby="resource-group-${group.key}"><div class="resource-group__heading"><h3 id="resource-group-${group.key}">${group.label}</h3><span>${group.files.length}</span></div>${group.files.length ? `<div class="resource-grid">${group.files.map((file) => resourceCard(taskId, file, manifests.get(file.relative_path))).join("")}</div>` : '<p class="resource-empty">该分组暂无已提交文件。</p>'}</section>`).join("")}</section>`;
+  return `<section class="resources-section" aria-labelledby="resources-title"><div class="section-heading"><div><p class="eyebrow">受控资源</p><h2 id="resources-title">任务文件</h2><p>只展示已提交且实时完整性校验通过的文件；未发布候选不会混入公共交付。</p></div><span class="count-pill">${deliverables.length} 个文件</span></div>${groups.map((group) => `<section class="resource-group" aria-labelledby="resource-group-${group.key}"><div class="resource-group__heading"><h3 id="resource-group-${group.key}">${group.label}</h3><span>${group.files.length}</span></div>${group.files.length ? `<div class="resource-grid">${group.files.map((file) => { const asset = manifests.get(file.relative_path); return resourceCard(taskId, file, asset, asset?.manifest.asset_id === selectedAssetId); }).join("")}</div>` : '<p class="resource-empty">该分组暂无已提交文件。</p>'}</section>`).join("")}</section>`;
 }
 
 function resourceCard(
   taskId: string,
   file: TaskFile,
   asset: AssetManifest | undefined,
+  selected = false,
 ): string {
   const imagePreview = file.previewable && file.mime_type.startsWith("image/");
   const textPreview = file.previewable && !imagePreview;
-  return `<article class="resource-card">${imagePreview ? `<img src="${escapeHtml(api.previewUrl(taskId, file.relative_path))}" alt="${escapeHtml(file.filename)} 预览" loading="lazy" width="480" height="320">` : `<div class="resource-file-icon" aria-hidden="true">${icon("image")}</div>`}<div class="resource-card__body"><p class="eyebrow">${escapeHtml(asset?.manifest.role ?? file.mime_type)}</p><h3 title="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}</h3><p>${escapeHtml(asset?.manifest.description || formatBytes(file.size_bytes))}</p><dl class="resource-meta">${detailItem("来源实例", asset?.manifest.producer_instance_id ?? "用户输入")}${detailItem("完整性", asset?.integrity_status ?? "VERIFIED")}${detailItem("SHA-256", file.sha256.slice(0, 12) + "…")}</dl><div class="resource-actions">${textPreview ? `<button class="button button--secondary" type="button" data-preview-path="${escapeHtml(file.relative_path)}">安全预览</button>` : ""}<a class="button button--secondary" href="${escapeHtml(api.downloadUrl(taskId, file.relative_path))}" download>${icon("download")}下载文件</a></div>${textPreview ? '<pre class="resource-text-preview" tabindex="0" hidden></pre>' : ""}</div></article>`;
+  return `<article class="resource-card${selected ? " resource-card--selected" : ""}" tabindex="-1" ${selected ? "data-selected-asset" : ""}>${imagePreview ? `<img src="${escapeHtml(api.previewUrl(taskId, file.relative_path))}" alt="${escapeHtml(file.filename)} 预览" loading="lazy" width="480" height="320">` : `<div class="resource-file-icon" aria-hidden="true">${icon("image")}</div>`}<div class="resource-card__body"><p class="eyebrow">${escapeHtml(asset?.manifest.role ?? file.mime_type)}</p><h3 title="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}</h3><p>${escapeHtml(asset?.manifest.description || formatBytes(file.size_bytes))}</p><dl class="resource-meta">${detailItem("来源实例", asset?.manifest.producer_instance_id ?? "用户输入")}${detailItem("完整性", asset?.integrity_status ?? "VERIFIED")}${detailItem("SHA-256", file.sha256.slice(0, 12) + "…")}</dl><div class="resource-actions">${textPreview ? `<button class="button button--secondary" type="button" data-preview-path="${escapeHtml(file.relative_path)}">安全预览</button>` : ""}<a class="button button--secondary" href="${escapeHtml(api.downloadUrl(taskId, file.relative_path))}" download>${icon("download")}下载文件</a></div>${textPreview ? '<pre class="resource-text-preview" tabindex="0" hidden></pre>' : ""}</div></article>`;
 }
 
 function wireResourcePreviews(taskId: string): void {

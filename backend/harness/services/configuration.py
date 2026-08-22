@@ -21,6 +21,16 @@ from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 
 ApplyConfig = Callable[[str, str, Path], bool]
+IMAGE_STATE_ROLES: dict[
+    str, Literal["reasoning_llm", "text_to_image_model", "vision_language_model"]
+] = {
+    "intake_clarify": "reasoning_llm",
+    "confirmation_build": "reasoning_llm",
+    "initial_candidate_generation": "text_to_image_model",
+    "self_check_inspection": "vision_language_model",
+    "self_check_rework": "text_to_image_model",
+    "human_prompt_rework": "text_to_image_model",
+}
 _SENSITIVE_CONFIG_KEY = re.compile(
     r"(?:api[_-]?key|authorization|cookie|password|secret|token|url|endpoint|host)",
     re.I,
@@ -118,22 +128,16 @@ class ImageModelConfig(BaseModel):
         states = [item.state for item in self.state_bindings]
         if len(states) != len(set(states)):
             raise ValueError("Image model binding states must be unique")
+        if set(states) != set(IMAGE_STATE_ROLES):
+            raise ValueError("Image model bindings must cover the six supported workflow states")
+        if any(item.model_role != IMAGE_STATE_ROLES[item.state] for item in self.state_bindings):
+            raise ValueError("Image model binding roles must match their workflow states")
         return self
 
 
 def offline_image_model_config() -> ImageModelConfig:
     """Return a complete, role-correct routing table for offline Image runs."""
 
-    roles: dict[
-        str, Literal["reasoning_llm", "text_to_image_model", "vision_language_model"]
-    ] = {
-        "intake_clarify": "reasoning_llm",
-        "confirmation_build": "reasoning_llm",
-        "initial_candidate_generation": "text_to_image_model",
-        "self_check_inspection": "vision_language_model",
-        "self_check_rework": "text_to_image_model",
-        "human_prompt_rework": "text_to_image_model",
-    }
     return ImageModelConfig(
         model_config_id="offline_fake",
         state_bindings=[
@@ -143,7 +147,7 @@ def offline_image_model_config() -> ImageModelConfig:
                 provider="fake",
                 model=f"offline-{role}",
             )
-            for state, role in roles.items()
+            for state, role in IMAGE_STATE_ROLES.items()
         ],
     )
 

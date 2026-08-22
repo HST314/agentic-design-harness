@@ -364,6 +364,7 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
 .resource-group__heading span { min-width: 28px; padding: 3px 8px; border-radius: 999px; color: var(--color-secondary-text); background: var(--color-muted); font-size: 12px; font-weight: 700; text-align: center; }
 .resource-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .resource-card { min-width: 0; overflow: hidden; border: 1px solid var(--color-border); border-radius: 14px; background: var(--color-surface); box-shadow: var(--shadow-card); }
+.resource-card--selected { border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-soft); }
 .resource-card > img { width: 100%; aspect-ratio: 16 / 10; display: block; object-fit: cover; background: var(--color-muted); }
 .resource-file-icon { min-height: 150px; display: grid; place-items: center; color: var(--color-primary); background: var(--color-primary-softer); }
 .resource-file-icon svg { width: 36px; height: 36px; }
