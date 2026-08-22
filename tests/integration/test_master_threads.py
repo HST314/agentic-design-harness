@@ -9,8 +9,10 @@ from typing import Any
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
+from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
 from harness.services.master_gateway import MasterRunObservation
+from harness.storage.atomic import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -345,7 +347,7 @@ class MasterThreadApiTests(unittest.TestCase):
                 self.assertEqual(len(proposals), 1)
                 self.assertEqual(proposals[0]["status"], "PENDING_CONFIRMATION")
 
-    def test_auto_mode_uses_the_same_gates_and_confirms_without_human_api(self) -> None:
+    def test_auto_mode_waits_for_exact_human_confirmation_before_starting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
             application = RecordingApplication()
@@ -355,10 +357,103 @@ class MasterThreadApiTests(unittest.TestCase):
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "auto")
                 session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
-                self.assertEqual(session["latest_proposal"]["status"], "CONFIRMED")
+                self.assertEqual(
+                    session["latest_proposal"]["status"], "PENDING_CONFIRMATION"
+                )
+                self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
+                self.assertEqual(application.saved, [])
+                self.assertEqual(application.started, [])
+
+                non_human = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/confirm",
+                    json={
+                        "task_expected_revision": session["task_revision"],
+                        "expected_card_revisions": {"card_master_1": 1},
+                        "envelope": {
+                            **self._envelope("reject-master-confirm", 1),
+                            "actor_type": "master",
+                            "actor_id": "master_gateway",
+                        },
+                    },
+                )
+                self.assertEqual(non_human.status_code, 422, non_human.text)
+                self.assertEqual(non_human.json()["error"]["code"], "VALIDATION_ERROR")
+
+                stale_task = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/confirm",
+                    json={
+                        "task_expected_revision": session["task_revision"] + 1,
+                        "expected_card_revisions": {"card_master_1": 1},
+                        "envelope": self._envelope("reject-stale-auto-task", 1),
+                    },
+                )
+                self.assertEqual(stale_task.status_code, 409, stale_task.text)
+                self.assertEqual(stale_task.json()["error"]["code"], "REVISION_CONFLICT")
+
+                stale_card = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/confirm",
+                    json={
+                        "task_expected_revision": session["task_revision"],
+                        "expected_card_revisions": {"card_master_1": 2},
+                        "envelope": self._envelope("reject-stale-auto-card", 1),
+                    },
+                )
+                self.assertEqual(stale_card.status_code, 409, stale_card.text)
+                self.assertEqual(stale_card.json()["error"]["code"], "REVISION_CONFLICT")
+                self.assertEqual(application.saved, [])
+                self.assertEqual(application.started, [])
+
+                confirmed = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/confirm",
+                    json={
+                        "task_expected_revision": session["task_revision"],
+                        "expected_card_revisions": {"card_master_1": 1},
+                        "envelope": self._envelope("confirm-auto-plan", 1),
+                    },
+                )
+                self.assertEqual(confirmed.status_code, 200, confirmed.text)
+                self.assertEqual(confirmed.json()["proposal"]["status"], "CONFIRMED")
                 self.assertEqual(len(application.saved), 1)
                 self.assertEqual(len(application.started), 1)
                 self.assertEqual(application.saved[0]["providers"], {"instance_master_1": "openai"})
+
+    def test_recovery_rejects_a_non_human_confirmation_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self._app(Path(temporary))
+            application = RecordingApplication()
+            app.state.container.master_threads.gateway = RecordingGateway()
+            app.state.container.master_threads.application = application
+            app.state.container.master_threads.credentials = EnabledCredentials()
+            with TestClient(app) as client:
+                task_id = self._create_submit(client, "auto")
+                service = app.state.container.master_threads
+                intent_path = service._confirm_intent_path(task_id, 1)
+                atomic_write_json(
+                    intent_path,
+                    {
+                        "schema_version": "1.0",
+                        "kind": "CONFIRM_MASTER_PLAN",
+                        "task_id": task_id,
+                        "proposal_revision": 1,
+                        "actor": {
+                            "actor_type": "master",
+                            "actor_id": "master_gateway",
+                        },
+                        "state": "PREPARED",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    HarnessError, "Only a human may confirm and start"
+                ):
+                    service.recover()
+
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                self.assertEqual(
+                    session["latest_proposal"]["status"], "PENDING_CONFIRMATION"
+                )
+                self.assertEqual(application.saved, [])
+                self.assertEqual(application.started, [])
 
     def test_unconfigured_gateway_persists_a_truthful_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
