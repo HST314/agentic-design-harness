@@ -112,6 +112,7 @@ class PinnedRuntimeArtifact:
 
     identity: AgentRuntimeIdentity
     source_descriptor: int | None
+    windows_root_handle: int | None
     source_root: Path
     entrypoint_relpath: str
 
@@ -141,6 +142,9 @@ class PinnedRuntimeArtifact:
         if self.source_descriptor is not None and self.source_descriptor >= 0:
             os.close(self.source_descriptor)
             self.source_descriptor = None
+        if self.windows_root_handle is not None:
+            _close_windows_handle(self.windows_root_handle)
+            self.windows_root_handle = None
 
     def __enter__(self) -> PinnedRuntimeArtifact:
         return self
@@ -232,9 +236,13 @@ def pin_runtime_artifact(spec: ProcessSpec) -> PinnedRuntimeArtifact:
     spec.validate()
     artifact = spec.runtime_artifact
     descriptor: int | None = None
+    windows_root_handle: int | None = None
     try:
         try:
             if os.name == "nt":
+                windows_root_handle = _open_windows_directory_guard(
+                    artifact.source_root
+                )
                 root_stat = artifact.source_root.lstat()
                 if is_link_or_reparse(artifact.source_root, root_stat):
                     _artifact_invalid("The runtime artifact root cannot be opened safely.")
@@ -291,12 +299,15 @@ def pin_runtime_artifact(spec: ProcessSpec) -> PinnedRuntimeArtifact:
         return PinnedRuntimeArtifact(
             identity=identity,
             source_descriptor=descriptor,
+            windows_root_handle=windows_root_handle,
             source_root=artifact.source_root,
             entrypoint_relpath=artifact.entrypoint_relpath,
         )
     except BaseException:
         if descriptor is not None:
             os.close(descriptor)
+        if windows_root_handle is not None:
+            _close_windows_handle(windows_root_handle)
         raise
 
 
@@ -402,6 +413,7 @@ def _walk_artifact_path(
                 _artifact_invalid("Runtime artifacts may contain only directories and files.")
             descriptor = open_regular_readonly(path, trusted_root=root)
             try:
+                opened = os.fstat(descriptor)
                 digest = hashlib.sha256()
                 with os.fdopen(os.dup(descriptor), "rb") as handle:
                     while chunk := handle.read(1024 * 1024):
@@ -410,10 +422,10 @@ def _walk_artifact_path(
             finally:
                 os.close(descriptor)
             if (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
-                before.st_mtime_ns,
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
             ) != (
                 after.st_dev,
                 after.st_ino,
@@ -424,15 +436,58 @@ def _walk_artifact_path(
             manifest.append(
                 {
                     "path": relative.as_posix(),
-                    "device": before.st_dev,
-                    "inode": before.st_ino,
-                    "size_bytes": before.st_size,
-                    "mode": stat.S_IMODE(before.st_mode),
+                    "device": opened.st_dev,
+                    "inode": opened.st_ino,
+                    "size_bytes": opened.st_size,
+                    "mode": stat.S_IMODE(opened.st_mode),
                     "sha256": digest.hexdigest(),
                 }
             )
         except OSError:
             _artifact_invalid("The runtime artifact contains a symlink or unreadable entry.")
+
+
+def _open_windows_directory_guard(path: Path) -> int:
+    """Hold a Windows directory open without delete sharing during launch."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        0,
+        0x00000001 | 0x00000002,  # share reads and writes, but not deletion
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000 | 0x00200000,  # directory handle, do not follow reparse points
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        last_error = ctypes.get_last_error()  # type: ignore[attr-defined]
+        raise OSError(last_error, f"cannot guard runtime directory: {path}")
+    return handle
+
+
+def _close_windows_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle(handle)
 
 
 def _artifact_relative_path(value: str) -> PurePosixPath:
