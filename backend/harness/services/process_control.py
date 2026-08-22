@@ -131,7 +131,7 @@ if os.name == "nt":
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
     class _ProcessEntry32W(ctypes.Structure):
-        _fields_: ClassVar[list[tuple[str, Any]]] = [
+        _fields_: ClassVar[list[tuple[str, Any]]] = [  # pyright: ignore[reportIncompatibleVariableOverride]
             ("dwSize", wintypes.DWORD),
             ("cntUsage", wintypes.DWORD),
             ("th32ProcessID", wintypes.DWORD),

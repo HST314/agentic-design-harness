@@ -105,7 +105,7 @@ class AssetService(AssetRecoveryMixin):
             return self._import_stream(
                 task_id,
                 filename=filename,
-                stream=stream,
+                stream=cast(BinaryIO, stream),
                 description=description,
                 source=source,
                 idempotency_key=idempotency_key,

@@ -18,7 +18,7 @@ import sys
 import threading
 from ctypes import wintypes
 from pathlib import Path
-from typing import Any, BinaryIO, ClassVar
+from typing import Any, BinaryIO, ClassVar, cast
 
 _COMMON_SECRET = re.compile(
     rb"(?:bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,})",
@@ -101,7 +101,7 @@ def _assign_kill_on_close_job(process: subprocess.Popen[bytes]) -> object | None
         return None
 
     class IoCounters(ctypes.Structure):
-        _fields_: ClassVar[list[tuple[str, Any]]] = [
+        _fields_: ClassVar[list[tuple[str, Any]]] = [  # pyright: ignore[reportIncompatibleVariableOverride]
             ("ReadOperationCount", ctypes.c_ulonglong),
             ("WriteOperationCount", ctypes.c_ulonglong),
             ("OtherOperationCount", ctypes.c_ulonglong),
@@ -111,7 +111,7 @@ def _assign_kill_on_close_job(process: subprocess.Popen[bytes]) -> object | None
         ]
 
     class BasicLimitInformation(ctypes.Structure):
-        _fields_: ClassVar[list[tuple[str, Any]]] = [
+        _fields_: ClassVar[list[tuple[str, Any]]] = [  # pyright: ignore[reportIncompatibleVariableOverride]
             ("PerProcessUserTimeLimit", ctypes.c_longlong),
             ("PerJobUserTimeLimit", ctypes.c_longlong),
             ("LimitFlags", wintypes.DWORD),
@@ -124,7 +124,7 @@ def _assign_kill_on_close_job(process: subprocess.Popen[bytes]) -> object | None
         ]
 
     class ExtendedLimitInformation(ctypes.Structure):
-        _fields_: ClassVar[list[tuple[str, Any]]] = [
+        _fields_: ClassVar[list[tuple[str, Any]]] = [  # pyright: ignore[reportIncompatibleVariableOverride]
             ("BasicLimitInformation", BasicLimitInformation),
             ("IoInfo", IoCounters),
             ("ProcessMemoryLimit", ctypes.c_size_t),
@@ -157,7 +157,8 @@ def _assign_kill_on_close_job(process: subprocess.Popen[bytes]) -> object | None
         error = ctypes.get_last_error()
         kernel32.CloseHandle(job)
         raise OSError(error, "SetInformationJobObject failed")
-    if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(int(process._handle))):
+    process_handle = cast(Any, process)._handle
+    if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(int(process_handle))):
         error = ctypes.get_last_error()
         kernel32.CloseHandle(job)
         raise OSError(error, "AssignProcessToJobObject failed")
