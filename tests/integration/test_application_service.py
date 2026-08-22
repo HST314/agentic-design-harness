@@ -129,6 +129,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             self.credentials,
             self.supervisor,
             self.adapters,
+            # Most of this fixture is the retained legacy-read/write regression suite.
+            delivery_bundle_write_targets=(True, False),
         )
         self.read_only_artifacts: list[Path] = []
 

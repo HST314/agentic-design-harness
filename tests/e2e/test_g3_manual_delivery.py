@@ -101,6 +101,7 @@ class ManualApprovalDeliveryG3Tests(unittest.TestCase):
                     control_root=runtime / "control-data",
                     workspace_root=runtime / "workspace",
                     contracts_root=ROOT / "contracts" / "v1",
+                    delivery_bundle_migration_mode="legacy_only",
                 )
             )
             with TestClient(app) as client:

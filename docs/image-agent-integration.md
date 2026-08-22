@@ -44,9 +44,8 @@ Image Agent 路径模式：
 
 | 模式 | 语义 |
 | --- | --- |
-| `prefer_embedded` | 默认优先内嵌路径；仅在一个迁移发布周期内兼容已存在的外部部署 |
-| `embedded_only` | 只接受内嵌路径；本地启动器和 CI 使用此模式 |
-| `external_only` | 仅供迁移期紧急回滚，不是新部署方式 |
+| `embedded_only` | P6 后默认且唯一的新部署方式；只接受固定内嵌路径 |
+| `external_only` | 仅供紧急回滚；必须同时显式配置外部根目录，不会自动搜索相邻目录 |
 
 任何模式都必须通过相同 release lock、revision 和内容摘要校验，路径回滚不能绕过供应链身份。
 
@@ -54,11 +53,11 @@ Image Agent 路径模式：
 
 | 模式 | Legacy 写入 | Bundle 写入 | 使用时机 |
 | --- | --- | --- | --- |
-| `legacy_only` | 是 | 否 | 当前默认与切换前回滚点 |
+| `legacy_only` | 是 | 否 | 仅供受控回滚窗口 |
 | `dual_write` | 是 | 是 | 对账期 |
-| `bundle_only` | 否 | 是 | 双平台真实验收后的目标 |
+| `bundle_only` | 否 | 是 | P6 后默认写入方式 |
 
-切换开关只改变新写入目标，不删除既有候选、AssetManifest 或 BundleManifest。降级版本不能识别的新事件时，应恢复升级前一致备份，而不是在原状态目录直接回滚代码。
+P6 双平台矩阵通过后，默认值已由迁移态切换为 `embedded_only + bundle_only`，并删除自动外部目录回退。切换开关只改变新写入目标，不删除既有候选、AssetManifest 或 BundleManifest。降级版本不能识别的新事件时，应恢复升级前一致备份，而不是在原状态目录直接回滚代码。
 
 ## 升级 Image Agent
 
@@ -77,7 +76,8 @@ python scripts/dev.py doctor
 python scripts/verify_image_agent_lock.py
 make g2-e2e
 make g3-e2e
+make p6-acceptance
 make check
 ```
 
-G2 验证受管创建和真实进程边界；G3 验证分支候选、人工门禁与双资产发布。外部 Provider 测试需要单独授权，步骤见[配置指南](configuration.md)。
+G2 验证受管创建和真实进程边界；G3 验证分支候选、人工门禁与双资产发布。P6 命令生成不含秘密的平台证据并明确记录 Ark 是否被凭据/费用确认阻塞；其中本地确定性 HTTP fixture 只证明真实 Image Agent 进程与契约，不得作为 Ark 验收。外部 Provider 测试需要单独授权，步骤见[配置指南](configuration.md)。
