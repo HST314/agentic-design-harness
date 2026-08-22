@@ -29,6 +29,7 @@ from ..services.configuration import ConfigurationService
 from ..services.credentials import CredentialPoolService
 from ..services.retry_budget import RetryBudgetService
 from ..services.supervisor import ProcessSupervisor
+from ..services.task_intakes import TaskIntakeService
 from ..services.usage import UsageService
 from ..storage.atomic import read_json
 from ..storage.store import FileStateStore
@@ -51,6 +52,7 @@ class Container:
     supervisor: ProcessSupervisor
     adapters: AdapterRegistry
     application: HarnessApplicationService
+    task_intakes: TaskIntakeService
 
 
 class ContractValidationRequest(BaseModel):
@@ -123,6 +125,7 @@ def build_container(settings: HarnessSettings) -> Container:
         adapters,
         configuration,
     )
+    task_intakes = TaskIntakeService(store, commands, assets)
     return Container(
         settings=settings,
         contracts=contracts,
@@ -138,6 +141,7 @@ def build_container(settings: HarnessSettings) -> Container:
         supervisor=supervisor,
         adapters=adapters,
         application=application,
+        task_intakes=task_intakes,
     )
 
 

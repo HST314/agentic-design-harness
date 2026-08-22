@@ -144,6 +144,31 @@ class AssetService(AssetRecoveryMixin):
                 crash_hook=crash_hook,
             )
 
+    def import_stream(
+        self,
+        task_id: str,
+        stream: BinaryIO,
+        *,
+        filename: str,
+        description: str,
+        source: str,
+        idempotency_key: str,
+        max_file_bytes: int | None = None,
+        crash_hook: CrashHook | None = None,
+    ) -> dict[str, Any]:
+        """Register an untrusted streamed upload without materializing it in memory."""
+
+        return self._import_stream(
+            task_id,
+            filename=filename,
+            stream=stream,
+            description=description,
+            source=source,
+            idempotency_key=idempotency_key,
+            max_file_bytes=max_file_bytes,
+            crash_hook=crash_hook,
+        )
+
     def _import_stream(
         self,
         task_id: str,
@@ -153,7 +178,8 @@ class AssetService(AssetRecoveryMixin):
         description: str,
         source: str,
         idempotency_key: str,
-        crash_hook: CrashHook | None,
+        max_file_bytes: int | None = None,
+        crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
         self._require_task(task_id)
         self._validate_filename(filename)
@@ -162,10 +188,15 @@ class AssetService(AssetRecoveryMixin):
         self._validate_idempotency_key(idempotency_key)
         content_size = 0
         content_digest = hashlib.sha256()
+        effective_limit = self.max_file_bytes
+        if max_file_bytes is not None:
+            if max_file_bytes < 1:
+                self._invalid("The task upload size limit would be exceeded.")
+            effective_limit = min(effective_limit, max_file_bytes)
         with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as staged:
             while chunk := stream.read(1024 * 1024):
                 content_size += len(chunk)
-                if content_size > self.max_file_bytes:
+                if content_size > effective_limit:
                     self._invalid("The asset exceeds the per-file size limit.")
                 content_digest.update(chunk)
                 staged.write(chunk)
@@ -182,6 +213,66 @@ class AssetService(AssetRecoveryMixin):
                 content_sha256=content_sha256,
                 crash_hook=crash_hook,
             )
+
+    def remove_input_asset(
+        self,
+        task_id: str,
+        asset_id: str,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Tombstone one imported input so it is no longer browser-visible.
+
+        Immutable import evidence and bytes are retained for crash recovery and audit;
+        every public asset read is derived from the event projection, which excludes
+        tombstoned assets.
+        """
+
+        self._require_task(task_id)
+        validate_identifier(asset_id, "asset_id")
+        self._validate_idempotency_key(idempotency_key)
+        request_sha256 = digest_json({"kind": "input_removal", "asset_id": asset_id})
+        with FileLock(self._asset_lock(task_id), self.store.lock_timeout_seconds):
+            records = recover_records(self._event_path(task_id))
+            replay = next(
+                (
+                    item
+                    for item in records
+                    if item.get("event_type") == "ASSET_REMOVED"
+                    and item.get("idempotency_key") == idempotency_key
+                ),
+                None,
+            )
+            if replay is not None:
+                if replay.get("request_sha256") != request_sha256:
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The idempotency key was reused for another asset removal.",
+                    )
+                return {"asset_id": asset_id, "removed": True}
+            imported = next(
+                (
+                    item
+                    for item in records
+                    if item.get("event_type") == "ASSET_IMPORTED"
+                    and item.get("asset_id") == asset_id
+                ),
+                None,
+            )
+            if imported is None:
+                self._invalid("The requested intake asset does not exist.")
+            append_record(
+                self._event_path(task_id),
+                {
+                    "event_id": f"evt_{uuid.uuid4().hex}",
+                    "event_type": "ASSET_REMOVED",
+                    "asset_id": asset_id,
+                    "request_sha256": request_sha256,
+                    "idempotency_key": idempotency_key,
+                    "occurred_at": utc_now(),
+                },
+            )
+        return {"asset_id": asset_id, "removed": True}
 
     def _commit_import(
         self,
@@ -213,8 +304,21 @@ class AssetService(AssetRecoveryMixin):
                 self._check_request(existing, "import", request)
                 return self._resume_import(record_path)
 
-            current_total = sum(
-                item["manifest"]["size_bytes"] for item in self.list_assets(task_id)
+            records = recover_records(self._event_path(task_id))
+            visible = self.list_assets(task_id)
+            visible_ids = {item["manifest"]["asset_id"] for item in visible}
+            # Removed inputs keep immutable bytes for recovery/audit. Include those
+            # retained files in the physical storage ceiling so repeated
+            # upload/remove cycles cannot bypass the task quota.
+            retained_removed_bytes = sum(
+                int(item["manifest"]["size_bytes"])
+                for item in records
+                if item.get("event_type") == "ASSET_IMPORTED"
+                and item["asset_id"] not in visible_ids
+            )
+            current_total = (
+                sum(item["manifest"]["size_bytes"] for item in visible)
+                + retained_removed_bytes
             )
             asset_digest = hashlib.sha256(f"{task_id}:{idempotency_key}".encode()).hexdigest()
             asset_id = f"a_imp_{asset_digest[:20]}"
@@ -740,6 +844,8 @@ class AssetService(AssetRecoveryMixin):
                     ):
                         continue
                 latest[event["asset_id"]] = event
+            elif event.get("event_type") == "ASSET_REMOVED":
+                latest.pop(event["asset_id"], None)
         return sorted(latest.values(), key=lambda item: (item["occurred_at"], item["asset_id"]))
 
     def _resolve_browser_path(self, task_id: str, workspace: Path, relative_path: str) -> Path:
