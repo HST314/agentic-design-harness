@@ -31,6 +31,10 @@
       }
     ],
     "lock_set_sha256": "e2f66966ed45fe0a1df6f6323f38875a9f5db4e5f4030aee7e74875765e5b17d",
-    "runtime_tree_sha256": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb"
+    "runtime_tree_sha256": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
+    "runtime_tree_sha256_by_platform": {
+      "linux-x86_64": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
+      "windows-amd64": "b683e0e9bc14d7fb53203dd7c264e4741cf415642a7a0e5ef177ddba6dda607e"
+    }
   }
 }

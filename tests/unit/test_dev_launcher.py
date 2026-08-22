@@ -11,6 +11,7 @@ from unittest.mock import patch
 from scripts.dev import (
     DevelopmentLauncher,
     LauncherError,
+    _console_safe,
     content_tree_digest,
     input_digest,
     main,
@@ -19,6 +20,15 @@ from scripts.dev import (
 
 
 class DevelopmentLauncherTests(unittest.TestCase):
+    def test_child_output_is_safe_for_legacy_windows_console_encoding(self) -> None:
+        message = "[frontend] ➜ ready"
+
+        self.assertEqual(_console_safe(message, encoding="utf-8"), message)
+        self.assertEqual(
+            _console_safe(message, encoding="cp1252"),
+            "[frontend] \\u279c ready",
+        )
+
     def test_virtual_environment_interpreter_is_cross_platform(self) -> None:
         root = Path("environment")
 
