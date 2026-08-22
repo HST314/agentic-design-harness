@@ -48,13 +48,13 @@ flowchart LR
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | Linux / POSIX；运行时依赖 `/proc`、`fcntl` 和进程组控制 |
-| Python | 3.10+；CI 覆盖 3.10 与 3.13 |
+| 操作系统 | Windows 10/11、Windows Server 2022 或 Linux |
+| Python | 3.10+；CI 在 Windows/Linux 覆盖 3.10 与 3.13 |
 | Node.js | 22+ |
-| 其他工具 | npm、GNU Make、Git |
+| 其他工具 | npm、Git；GNU Make 仅用于 Linux/macOS 快捷命令 |
 | Image Agent | 仅启动真实 Image 工作流时需要；源码和依赖必须使用固定版本 |
 
-Windows 和 macOS 当前不能作为正式运行主机；不满足进程隔离条件时，后端会直接拒绝启动。
+Linux 使用 `/proc`、文件锁和 POSIX 进程组；Windows 使用 Win32 文件锁、进程组与 Job Object。两套后端提供相同的 PID 防复用、进程树终止和唯一写者语义，启动时会检测当前内核能力。macOS 尚未进入正式支持矩阵。
 
 ## 快速开始
 
@@ -67,9 +67,27 @@ cd agentic-design-harness
 
 ### 2. 安装依赖
 
+Linux：
+
 ```bash
-# 后端开发与测试依赖会安装到仓库内的 .test-deps，不污染全局环境
-make test-env
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --require-hashes -r requirements-dev.txt
+python -m pip install --no-deps -e .
+
+# 也可使用仓库内隔离目录快捷方式：make test-env
+
+# 前端依赖
+npm --prefix frontend ci
+```
+
+Windows PowerShell：
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --require-hashes -r requirements-dev.txt
+python -m pip install --no-deps -e .
 
 # 前端依赖
 npm --prefix frontend ci
@@ -84,6 +102,8 @@ cp config/harness.example.yaml config/harness.local.yaml
 export HARNESS_CONFIG=config/harness.local.yaml
 ```
 
+Windows PowerShell 使用 `Copy-Item config/harness.example.yaml config/harness.local.yaml`，再执行 `$env:HARNESS_CONFIG = "config/harness.local.yaml"`。
+
 常用环境变量会覆盖 YAML 中的同名配置：
 
 | 环境变量 | 默认值 | 说明 |
@@ -93,7 +113,7 @@ export HARNESS_CONFIG=config/harness.local.yaml
 | `HARNESS_CONTROL_ROOT` | `control-data` | 控制状态、事件和密钥目录 |
 | `HARNESS_WORKSPACE_ROOT` | `workspace` | 任务输入与交付目录 |
 | `HARNESS_IMAGE_AGENT_ROOT` | `../image_agent_mvp` | Image Agent 源码目录 |
-| `HARNESS_IMAGE_AGENT_PYTHON` | `/usr/bin/python3` | Image Agent 解释器 |
+| `HARNESS_IMAGE_AGENT_PYTHON` | 当前 Python 解释器 | Image Agent 解释器；Windows 可设为 `.venv\Scripts\python.exe` |
 | `HARNESS_IMAGE_AGENT_REVISION` | 固定提交 | 允许启动的 Image Agent 版本 |
 
 凭据不能写入 YAML 或 `.env` 后提交到 Git。请通过受控的 `/api/v1/key-pool` 接口写入，公开响应只会返回 Key ID、尾号和 Base URL 提示。
@@ -103,8 +123,10 @@ export HARNESS_CONFIG=config/harness.local.yaml
 终端一：
 
 ```bash
-make serve
+python -m harness
 ```
+
+Linux/macOS 开发者也可以使用等价快捷命令 `make serve`。
 
 启动后可访问：
 
@@ -194,6 +216,8 @@ make real-provider-smoke \
 | `make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp` | Phase 1 完整离线发布门禁与证据索引 |
 
 `make test` 在未提供合格 Image Agent 环境时会按设计跳过真实 Agent 用例；这不等同于真实链路已通过。发布前应根据目标范围执行对应的 G2–G5 门禁。
+
+Windows 不要求安装 GNU Make。激活虚拟环境并完成 `pip install --no-deps -e .` 后，可直接运行 `python -m unittest discover -s tests -v`、`python -m ruff check backend/harness scripts tests`、`python -m pyright backend/harness` 和 `npm --prefix frontend run check`。GitHub Actions 会在真实 `windows-latest` 内核上执行完整后端测试矩阵。
 
 ## 数据、安全与恢复
 

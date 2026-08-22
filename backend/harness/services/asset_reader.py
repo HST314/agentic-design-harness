@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, NoReturn
 
 from ..core.errors import HarnessError
+from ..storage.safe_open import open_regular_readonly
 from .asset_browser import committed_browser_event
 from .asset_files import detect_mime_stream, stream_digest
 
@@ -80,6 +81,12 @@ def open_committed_asset(
 
 
 def _open_beneath(root: Path, parts: tuple[str, ...], asset_id: str) -> BinaryIO:
+    if os.name == "nt":
+        try:
+            descriptor = open_regular_readonly(root.joinpath(*parts), trusted_root=root)
+        except OSError:
+            _corrupted(asset_id)
+        return os.fdopen(descriptor, "rb")
     directory_flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)

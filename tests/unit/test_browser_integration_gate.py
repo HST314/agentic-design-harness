@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -108,12 +109,14 @@ class BrowserIntegrationGateTests(unittest.TestCase):
             log_path.chmod(0o644)
 
             with open_private_persistent_log(log_path) as stream:
-                self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
+                if os.name != "nt":
+                    self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
                 stream.write(b"new private log")
                 stream.flush()
                 self.assertEqual(log_path.read_bytes(), b"new private log")
 
-            self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
+            if os.name != "nt":
+                self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
 
     def test_persistent_log_replaces_a_symlink_instead_of_following_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -129,7 +132,8 @@ class BrowserIntegrationGateTests(unittest.TestCase):
             self.assertFalse(log_path.is_symlink())
             self.assertEqual(log_path.read_bytes(), b"private gate log")
             self.assertEqual(target.read_bytes(), b"must remain unchanged")
-            self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
+            if os.name != "nt":
+                self.assertEqual(S_IMODE(log_path.stat().st_mode), 0o600)
 
     def test_real_evidence_is_not_published_when_worktree_becomes_dirty(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

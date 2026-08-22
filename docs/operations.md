@@ -2,7 +2,7 @@
 
 ## 运行前置
 
-本版本只支持 Linux/POSIX 单机运行，启动入口会检查 `fcntl`、`/proc/self/stat`、process group、`killpg` 和 `setsid`。不满足条件时直接失败，不降级为不安全的进程监管。
+本版本支持 Linux 与 Windows 单机运行。Linux 后端使用 `/proc`、POSIX 文件锁和进程组；Windows 后端使用 Win32 字节锁、进程组和带 `KILL_ON_JOB_CLOSE` 的 Job Object。两者都会校验进程创建身份以避免 PID 复用，并在取消或 Harness 异常退出时终止完整 Agent 进程树；能力检查失败时拒绝启动。
 
 最低环境：Python 3.10+、Node.js 22+、npm，以及可执行的固定 Image Agent 源码与依赖目录。默认只绑定 `127.0.0.1:18080`；如需跨主机访问，应在受信反向代理后部署并另行配置网络访问控制，不能直接把控制面暴露到公网。
 
@@ -13,10 +13,22 @@ make verify
 make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
 
-CI 在 Python 3.10 与 3.13 上执行同一组后端门禁。`make verify` 还会严格校验
+CI 在 Windows/Linux 的 Python 3.10 与 3.13 上执行同一组后端门禁。`make verify` 还会严格校验
 Python 锁文件哈希、生成并校验 `build/sbom/` 下的 Python/npm CycloneDX SBOM，
 以及执行单机存储/恢复 CI 基准。资格环境的容量 SLO 与完整基准命令见
 `docs/single-machine-capacity-slo.md`。
+
+Windows PowerShell 不需要 GNU Make：
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --require-hashes -r requirements-dev.txt
+python -m pip install --no-deps -e .
+npm --prefix frontend ci
+python -m unittest discover -s tests -v
+python -m harness
+```
 
 复制 `config/harness.example.yaml`，通过 `HARNESS_CONFIG` 指向配置文件。凭据只能由受控 API 写入 `control-data/secrets/`，不得写入 YAML、环境样例、Git 或任务工作区。
 
@@ -37,7 +49,7 @@ curl --fail http://127.0.0.1:18080/readyz
 1. 停止新写入，正常退出 Harness；确认 `readyz` 已不可用。
 2. 使用支持权限和符号链接语义的工具复制两个根目录到同一备份 revision。
 3. 保存当前 Git commit、配置文件（不含密钥）和 Image runtime revision。
-4. 恢复到空目录，保持所有者与 `0700/0600` 权限。
+4. 恢复到空目录；Linux 保持所有者与 `0700/0600` 权限，Windows 保持目录仅对运行账户和管理员可写。
 5. 使用完全相同的代码、依赖和 Image runtime revision 启动。
 6. 启动恢复会截断不完整 NDJSON 尾部、重建投影/索引、恢复凭据游标和 usage 状态，并对活动实例做不重放对账。
 7. 检查 `recovery-warnings.ndjson`、`readyz`、任务事件和 Agent job ID；不得以重新提交 start/advance 的方式“修复”恢复。

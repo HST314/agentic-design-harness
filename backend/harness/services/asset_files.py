@@ -9,15 +9,25 @@ import zipfile
 from pathlib import Path
 from typing import BinaryIO
 
+from ..storage.safe_open import open_regular_readonly
+
 
 def file_digest(path: Path) -> tuple[int, str]:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = (
+        open_regular_readonly(path)
+        if os.name == "nt"
+        else os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    )
     with os.fdopen(descriptor, "rb") as handle:
         return stream_digest(handle)
 
 
 def detect_mime(path: Path, filename: str) -> str:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = (
+        open_regular_readonly(path)
+        if os.name == "nt"
+        else os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    )
     with os.fdopen(descriptor, "rb") as handle:
         return detect_mime_stream(handle, filename)
 

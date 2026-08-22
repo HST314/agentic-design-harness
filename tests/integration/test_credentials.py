@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -91,7 +92,8 @@ class CredentialPoolTests(unittest.TestCase):
             self.assertNotIn("api_key", result["credential"])
             self.assertNotIn(expected["api_key"], json.dumps(result))
 
-        self.assertEqual(self.pool.secret_path.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(self.pool.secret_path.stat().st_mode & 0o777, 0o600)
         redacted = json.dumps(self.pool.list_redacted())
         for pair in self.pairs:
             self.assertNotIn(pair["api_key"], redacted)

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-import fcntl
+import errno
 import os
 import time
 from pathlib import Path
 
 from ..core.errors import HarnessError
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 class FileLock:
@@ -25,14 +30,18 @@ class FileLock:
             return self
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        if os.name == "nt" and os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
         deadline = time.monotonic() + self.timeout_seconds
         try:
             while True:
                 try:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._lock(descriptor)
                     self._descriptor = descriptor
                     return self
-                except BlockingIOError:
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise
                     if time.monotonic() >= deadline:
                         raise HarnessError(
                             "REVISION_CONFLICT",
@@ -47,9 +56,24 @@ class FileLock:
     def release(self) -> None:
         if self._descriptor is None:
             return
-        fcntl.flock(self._descriptor, fcntl.LOCK_UN)
-        os.close(self._descriptor)
-        self._descriptor = None
+        descriptor = self._descriptor
+        try:
+            if os.name == "nt":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+            self._descriptor = None
+
+    @staticmethod
+    def _lock(descriptor: int) -> None:
+        if os.name == "nt":
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def __enter__(self) -> FileLock:
         return self.acquire()

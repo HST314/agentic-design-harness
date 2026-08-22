@@ -6,6 +6,5 @@ port: 18080
 log_level: INFO
 lock_timeout_seconds: 5.0
 image_agent_root: ../image_agent_mvp
-image_agent_python: /usr/bin/python3
 image_agent_dependency_root: .runtime/image-agent-deps
 image_agent_revision: 0e559d0153f479c8abefb14613804b8cde486282

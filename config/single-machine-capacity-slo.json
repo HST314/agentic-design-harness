@@ -1,6 +1,6 @@
 {
   "schema_version": "single-machine-capacity-slo.v1",
-  "scope": "single writer, local POSIX filesystem, one control-plane process",
+  "scope": "single writer, local Linux or Windows filesystem, one control-plane process",
   "reference_machine": {
     "cpu": "4 dedicated x86_64 vCPU",
     "memory_gib": 16,

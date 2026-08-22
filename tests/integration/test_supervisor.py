@@ -20,6 +20,7 @@ import harness.services.process_runtime as process_runtime
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.configuration import ConfigurationService, GlobalConfigBody
 from harness.services.credentials import CredentialPoolService
+from harness.services.process_control import force_kill_process_tree
 from harness.services.process_runtime import AgentRuntimeArtifact
 from harness.services.supervisor import ProcessSpec, ProcessSupervisor, process_start_identity
 from harness.storage.atomic import atomic_write_json, read_json
@@ -141,12 +142,14 @@ class ProcessSupervisorTests(unittest.TestCase):
             record = read_json(path)
             if record["state"] in {"PREPARED", "STARTING", "RUNNING"} and record.get("pid"):
                 with suppress(ProcessLookupError):
-                    os.killpg(record["pid"], signal.SIGKILL)
+                    force_kill_process_tree(record["pid"])
         for process in self.supervisor._children.values():
             with suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=0.5)
         self.store.close()
         make_artifact_writable(self.artifact_root)
+        if os.name == "nt":
+            make_artifact_writable(self.root)
         self.temporary.cleanup()
 
     def _start(self, index: int, spec: ProcessSpec | None = None) -> dict:
@@ -246,7 +249,8 @@ class ProcessSupervisorTests(unittest.TestCase):
             / "instances"
             / "i_image_3"
         )
-        self.assertEqual(third_root.stat().st_mode & 0o777, 0o500)
+        if os.name != "nt":
+            self.assertEqual(third_root.stat().st_mode & 0o777, 0o500)
         claims = read_json(self.supervisor.port_allocator.path)["claims"]
         self.assertEqual(claims, {})
 
@@ -604,7 +608,7 @@ class ProcessSupervisorTests(unittest.TestCase):
         finally:
             conflict.close()
         self.assertNotEqual(launch["port"], 19100)
-        os.killpg(launch["pid"], signal.SIGKILL)
+        force_kill_process_tree(launch["pid"])
         deadline = time.monotonic() + 1
         while process_start_identity(launch["pid"]) is not None and time.monotonic() < deadline:
             time.sleep(0.02)
