@@ -25,6 +25,7 @@
             "IDEMPOTENCY_CONFLICT",
             "INVALID_STATE_TRANSITION",
             "ADAPTER_UNAVAILABLE",
+            "UI_LINK_REJECTED",
             "BUDGET_GATE_DENIED",
             "CREDENTIAL_PAIR_UNAVAILABLE",
             "CREDENTIAL_PAIR_INVALID",

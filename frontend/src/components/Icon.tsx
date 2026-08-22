@@ -6,6 +6,7 @@ type IconName =
   | "history"
   | "file"
   | "file-check"
+  | "external-link"
   | "inbox"
   | "menu"
   | "message"
@@ -30,6 +31,7 @@ const iconPaths: Record<IconName, React.JSX.Element> = {
   history: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5M12 7v5l3 2" /></>,
   file: <><path d="M6 2h8l4 4v16H6z" /><path d="M14 2v5h5" /></>,
   "file-check": <><path d="M6 2h8l4 4v16H6z" /><path d="M14 2v5h5M9 14l2 2 4-4" /></>,
+  "external-link": <><path d="M14 3h7v7M10 14 21 3" /><path d="M21 14v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h6" /></>,
   inbox: <path d="M4 4h16l2 11h-6l-2 3h-4l-2-3H2L4 4Z" />,
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
   message: <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z" />,

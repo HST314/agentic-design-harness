@@ -77,33 +77,38 @@ function WorkItemCard({ item, compact = false }: {
     ? `${item.pending_approvals.length} 项待审批`
     : item.alerts[0]?.message;
   return (
-    <Link
+    <article
       className={`task-card task-card--${item.business_status.toLowerCase()}${compact ? " task-card--compact" : ""}`}
-      to={{ search: detailsSearch(item) }}
-      aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，打开详情`}
     >
-      <div className="task-card__topline">
-        <span className="task-card__agent">{agentLabel(item.agent_type)}</span>
-        <span className={`task-status task-status--${item.business_status.toLowerCase()}`}>
-          <span aria-hidden="true" />{rawStatusLabel[item.raw_status] ?? item.raw_status}
-        </span>
-      </div>
-      <div>
-        <h3>{item.title}</h3>
-        <code title={item.work_item_id}>{shortId(item.work_item_id)}</code>
-      </div>
-      <dl className="task-card__facts">
-        <div><dt>阶段</dt><dd>S{item.stage.position}</dd></div>
-        <div><dt>依赖</dt><dd>{dependencyText}</dd></div>
-        <div><dt>实例</dt><dd>{item.instance_ids.length}</dd></div>
-        <div><dt>重试</dt><dd>{item.attempts.length}</dd></div>
-      </dl>
-      {attention ? <p className="task-card__attention"><Icon name="status" />{attention}</p> : null}
+      <Link
+        className="task-card__entry"
+        to={`/tasks/${encodeURIComponent(item.task_id)}/work-items/${encodeURIComponent(item.work_item_id)}`}
+        aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，${item.agent_type === "image" ? "进入 Image 工作台" : "查看能力边界"}`}
+      >
+        <div className="task-card__topline">
+          <span className="task-card__agent">{agentLabel(item.agent_type)}</span>
+          <span className={`task-status task-status--${item.business_status.toLowerCase()}`}>
+            <span aria-hidden="true" />{rawStatusLabel[item.raw_status] ?? item.raw_status}
+          </span>
+        </div>
+        <div>
+          <h3>{item.title}</h3>
+          <code title={item.work_item_id}>{shortId(item.work_item_id)}</code>
+        </div>
+        <dl className="task-card__facts">
+          <div><dt>阶段</dt><dd>S{item.stage.position}</dd></div>
+          <div><dt>依赖</dt><dd>{dependencyText}</dd></div>
+          <div><dt>实例</dt><dd>{item.instance_ids.length}</dd></div>
+          <div><dt>重试</dt><dd>{item.attempts.length}</dd></div>
+        </dl>
+        {attention ? <p className="task-card__attention"><Icon name="status" />{attention}</p> : null}
+      </Link>
       <footer>
         <span>{item.delivery_count ? `${item.delivery_count} 个交付物` : "暂无交付"}</span>
         <time dateTime={item.updated_at}>{formatTime(item.updated_at)}</time>
+        <Link className="task-card__details" to={{ search: detailsSearch(item) }}>详情</Link>
       </footer>
-    </Link>
+    </article>
   );
 }
 
@@ -319,17 +324,6 @@ export function WorkItemDetailsPanel({ taskId, workItemId }: {
   workItemId: string;
 }): React.JSX.Element {
   return <WorkItemDetailsBody taskId={taskId} workItemId={workItemId} />;
-}
-
-export function WorkItemRoutePage(): React.JSX.Element {
-  const { taskId = "", workItemId = "" } = useParams();
-  return (
-    <section className="workbench-page work-item-route" aria-labelledby="work-item-route-title">
-      <header className="workbench-page__header"><div><p className="workbench-eyebrow">逻辑子任务</p><h1 id="work-item-route-title">子任务详情</h1><p>看板与计划视图共享同一个 WorkItem 入口。</p></div></header>
-      <TaskTabs taskId={taskId} />
-      <div className="work-item-route__card"><WorkItemDetailsBody taskId={taskId} workItemId={workItemId} standalone /></div>
-    </section>
-  );
 }
 
 export function TaskBoardPage(): React.JSX.Element {

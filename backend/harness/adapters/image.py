@@ -7,7 +7,7 @@ import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, NoReturn
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
@@ -659,6 +659,32 @@ class ImageAgentAdapter(ImageObservationMixin):
         task_id = self._task_id_for_instance(instance_id)
         instance = self.store.instance.get(task_id, instance_id)
         return None if instance is None else instance.get("ui_url")
+
+    def validate_ui_url(
+        self, instance: AgentInstanceSnapshot, ui_url: str
+    ) -> ValidationResult:
+        """Allow only the exact local origin allocated to this process instance."""
+
+        errors: list[str] = []
+        process = instance.get("process")
+        try:
+            parsed = urlsplit(ui_url)
+            port = parsed.port
+        except ValueError:
+            return ValidationResult(False, ("The UI URL is malformed.",))
+        if parsed.scheme != "http":
+            errors.append("The Image workbench must use the local HTTP runtime.")
+        if parsed.hostname != self.host:
+            errors.append("The Image workbench host is outside the Adapter allowlist.")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            errors.append("The Image workbench URL contains unsupported URL components.")
+        if parsed.path not in {"", "/"}:
+            errors.append("The Image workbench path is outside the Adapter entrypoint.")
+        if not isinstance(process, dict) or process.get("state") != "RUNNING":
+            errors.append("The Image workbench process is not running.")
+        elif port != process.get("port"):
+            errors.append("The Image workbench port does not match its process allocation.")
+        return ValidationResult(not errors, tuple(errors))
 
     def recover(self, instance_snapshot: AgentInstanceSnapshot) -> AdapterRecoveryResult:
         instance_id = str(instance_snapshot["instance_id"])

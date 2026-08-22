@@ -92,6 +92,9 @@ class FakeImageAdapter:
     def get_ui_url(self, instance_id):
         return None
 
+    def validate_ui_url(self, instance, ui_url):
+        return ValidationResult(False, ("fake adapter has no UI",))
+
     def recover(self, instance_snapshot):
         return AdapterRecoveryResult(True, "RUNNING")
 

@@ -143,6 +143,20 @@ export interface WorkItemDetailResponse {
   projection_revision: string;
 }
 
+export interface AgentWorkbenchLinkResponse {
+  schema_version: "1.0";
+  task_id: string;
+  work_item_id: string;
+  instance_id: string;
+  agent_type: "image" | "ppt";
+  instance_status: string;
+  ui_url: string | null;
+  link_status: "READY" | "NO_UI_URL" | "ADAPTER_UNAVAILABLE" | "FRAME_BLOCKED";
+  embeddable: boolean;
+  frame_policy: string;
+  diagnostic: string;
+}
+
 export interface PageInfo {
   limit: number;
   order: "asc" | "desc";
@@ -450,6 +464,19 @@ export class ApiClient {
   ): Promise<WorkItemDetailResponse> {
     return this.get(
       `/api/v1/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}`,
+      signal,
+    );
+  }
+
+  instanceUiLink(
+    taskId: string,
+    workItemId: string,
+    instanceId: string,
+    signal?: AbortSignal,
+  ): Promise<AgentWorkbenchLinkResponse> {
+    const query = new URLSearchParams({ task_id: taskId, work_item_id: workItemId });
+    return this.get(
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/ui-link?${query.toString()}`,
       signal,
     );
   }

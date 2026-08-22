@@ -54,3 +54,19 @@ export const workItemDetailQuery = (taskId: string, workItemId: string) => query
   refetchIntervalInBackground: false,
   retry: false,
 });
+
+export const agentWorkbenchLinkQuery = (
+  taskId: string,
+  workItemId: string,
+  instanceId: string,
+) => queryOptions({
+  queryKey: ["agent-workbench", taskId, workItemId, instanceId],
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.instanceUiLink(
+    taskId,
+    workItemId,
+    instanceId,
+    signal,
+  ),
+  retry: false,
+  staleTime: 15_000,
+});
