@@ -49,9 +49,9 @@ class AgentRuntimeArtifact:
         ):
             _artifact_invalid("The runtime artifact root must be an absolute directory.")
         try:
-            if (
-                not self.source_root.is_dir()
-                or self.source_root.resolve(strict=True) != self.source_root
+            resolved_root = self.source_root.resolve(strict=True)
+            if not self.source_root.is_dir() or (
+                os.name != "nt" and resolved_root != self.source_root
             ):
                 _artifact_invalid("The runtime artifact root does not exist.")
         except OSError:
@@ -640,7 +640,15 @@ def tail_lines(
 
 def _open_regular_nofollow(path: Path, *, trusted_root: Path | None) -> int:
     if os.name == "nt":
-        return open_regular_readonly(path, trusted_root=trusted_root)
+        try:
+            return open_regular_readonly(path, trusted_root=trusted_root)
+        except FileNotFoundError:
+            raise
+        except OSError:
+            raise HarnessError(
+                "PATH_OUTSIDE_TASK_ROOT",
+                "The log path is not a regular file beneath the workspace root.",
+            ) from None
     if trusted_root is None:
         descriptor = os.open(
             path,

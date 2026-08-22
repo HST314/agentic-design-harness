@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
 from ..core.errors import HarnessError
+from .safe_open import is_link_or_reparse
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
@@ -41,12 +42,15 @@ def resolve_task_path(
     current = root
     for part in normalized.parts:
         current = current / part
-        if current.exists() or current.is_symlink():
-            if current.is_symlink():
-                _outside(relative_path)
-            resolved = current.resolve(strict=True)
-            if os.path.commonpath((str(root), str(resolved))) != str(root):
-                _outside(relative_path)
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        if is_link_or_reparse(current, metadata):
+            _outside(relative_path)
+        resolved = current.resolve(strict=True)
+        if os.path.commonpath((str(root), str(resolved))) != str(root):
+            _outside(relative_path)
     if require_exists and not current.exists():
         raise HarnessError(
             "ASSET_VALIDATION_FAILED",
