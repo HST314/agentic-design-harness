@@ -4,10 +4,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.adapters.image_lock import (
     default_image_agent_lock_path,
     load_image_agent_lock,
+    runtime_platform_key,
 )
 from harness.core.errors import HarnessError
 
@@ -24,7 +26,33 @@ class ImageAgentReleaseLockTests(unittest.TestCase):
         self.assertEqual(release.package_version, "1.8.2")
         self.assertEqual(release.embedded_path, "agents/image_agent_mvp")
         self.assertEqual(len(release.dependency_files), 4)
+        self.assertEqual(
+            release.runtime_dependency_tree_sha256,
+            "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
+        )
         self.assertTrue(all(len(item.sha256) == 64 for item in release.dependency_files))
+
+    def test_runtime_platform_keys_normalize_supported_architecture_names(self) -> None:
+        self.assertEqual(
+            runtime_platform_key(system="Linux", machine="x86_64"), "linux-x86_64"
+        )
+        self.assertEqual(
+            runtime_platform_key(system="Windows", machine="AMD64"), "windows-amd64"
+        )
+        with self.assertRaises(HarnessError):
+            runtime_platform_key(system="Darwin", machine="arm64")
+
+    def test_checked_in_lock_selects_the_windows_runtime_digest(self) -> None:
+        with (
+            patch("harness.adapters.image_lock.platform.system", return_value="Windows"),
+            patch("harness.adapters.image_lock.platform.machine", return_value="AMD64"),
+        ):
+            release = load_image_agent_lock(default_image_agent_lock_path())
+
+        self.assertEqual(
+            release.runtime_dependency_tree_sha256,
+            "b683e0e9bc14d7fb53203dd7c264e4741cf415642a7a0e5ef177ddba6dda607e",
+        )
 
     def test_unknown_lock_field_fails_closed(self) -> None:
         document = json.loads(default_image_agent_lock_path().read_text(encoding="utf-8"))

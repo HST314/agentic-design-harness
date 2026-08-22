@@ -102,12 +102,24 @@ def validate_lock_shape(lock: dict[str, Any]) -> None:
         "files",
         "lock_set_sha256",
         "runtime_tree_sha256",
+        "runtime_tree_sha256_by_platform",
     }:
         raise ValueError("Image Agent dependency lock fields are not canonical")
     for field in ("lock_set_sha256", "runtime_tree_sha256"):
         value = dependencies[field]
         if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
             raise ValueError(f"Image Agent {field} is invalid")
+    platform_digests = dependencies["runtime_tree_sha256_by_platform"]
+    if not isinstance(platform_digests, dict) or set(platform_digests) != {
+        "linux-x86_64",
+        "windows-amd64",
+    }:
+        raise ValueError("Image Agent runtime platform digests are not canonical")
+    for platform_key, value in platform_digests.items():
+        if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
+            raise ValueError(f"Image Agent runtime digest for {platform_key} is invalid")
+    if platform_digests["linux-x86_64"] != dependencies["runtime_tree_sha256"]:
+        raise ValueError("Image Agent legacy runtime digest differs from Linux")
     files = dependencies["files"]
     if not isinstance(files, list) or not files:
         raise ValueError("Image Agent dependency lock is empty")
