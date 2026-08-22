@@ -266,7 +266,9 @@ class CredentialPoolTests(unittest.TestCase):
         searchable.extend(
             path
             for path in self.store.layout.control_root.rglob("*")
-            if path.is_file() and self.pool.secret_path != path
+            if path.is_file()
+            and self.pool.secret_path != path
+            and self.store.layout.control_root / "locks" not in path.parents
         )
         searchable.extend(
             path
