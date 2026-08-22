@@ -142,6 +142,7 @@ def build_container(settings: HarnessSettings) -> Container:
         supervisor,
         adapters,
         configuration,
+        settings.delivery_bundle_write_targets,
     )
     task_intakes = TaskIntakeService(store, commands, assets)
     master_gateway = (

@@ -36,7 +36,7 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["WORKFLOW", "BUDGET_OVERRIDE", "ASSET_DELETION"]
+      "enum": ["WORKFLOW", "BUDGET_OVERRIDE", "ASSET_DELETION", "DELIVERY_REVIEW"]
     },
     "owner": {
       "type": "string",
