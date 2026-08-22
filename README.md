@@ -1,172 +1,245 @@
 # Agentic Design Harness
 
-单机平面设计多智能体控制平面。系统由 Master Agent 与人工共同编排任务，
-通过稳定契约管理彼此隔离的 Image、PPT 及后续专业 Agent。
+面向平面设计工作流的多智能体控制平面：统一编排专业 Agent，管理人工审批、隔离进程、受控资产、用量预算和可恢复状态。
 
-当前 `main` 已完成 RFC v0.2 的 G5 产品与发布收口：在 G4 多实例、用量和预算门禁
-上补齐稳定游标分页、公开审计投影、OpenAPI 示例、Master 调用指南、任务及实例
-生命周期入口，以及概览、实例、资源、审批、Token、事件六个统一产品视图。最终
-门禁覆盖类型检查、依赖漏洞审计、浏览器验收、真实离线 Image 闭环和 18 条证据包。
+> 当前版本：`0.2.0`（Phase 1）。已完成 Image Agent 的单机闭环；PPT 任务可以建模和展示，但 PPT Agent 尚未接入实际运行。当前版本适合本地开发、单用户验证与方案集成，不是多租户生产平台。
 
-## 当前能力
+## 项目概览
 
-- `docs/adr/`：技术栈、进程、错误、Image 映射和状态提交协议；
-- `backend/harness/api`：应用工厂、生命周期、健康/就绪与契约校验入口；
-- `backend/harness/storage`：原子 JSON/YAML、校验和 NDJSON、文件锁、八类
-  Repository、幂等记录、恢复和索引重建；
-- `backend/harness/domain`：统一命令信封、任务/输入/计划命令、冻结状态转换、
-  人工/自动启动、取消、授权降级和确定性聚合；
-- `backend/harness/services`：受控资产导入/发布、冻结审批与 FIFO 通知、完整凭据对
-  轮询、全局/实例配置、用量聚合、自动重试预算、一实例一进程监管与 durable 编排；
-- `backend/harness/adapters`：typed Adapter Protocol、显式 Registry、真实 Image
-  TaskCard 映射/隔离启动/HTTP 观测，以及 PPT 不可运行契约占位；
-- `backend/harness/api`：任务/实例、审批/收件箱、资源、usage、retry-budget、
-  config/key-pool 及实例取消接口；
-- `frontend/`：任务概览、实例、审批、资源、Token/费用/预算、事件和脱敏配置管理，
-  含响应式布局、键盘操作、防重复提交和无障碍状态反馈；
-- `contracts/v1/`：Phase 0 冻结的跨模块事实源及 consumer-first TaskCard 1.1；
-- `tests/`：契约、单元、集成和崩溃注入测试，其中原 P0 46 条保持全绿。
+传统的“一个 Agent 包办全部工作”很难同时保证进程隔离、人工控制、文件可信度和故障恢复。本项目把这些横切能力放进独立 Harness，让 Image、PPT 等专业 Agent 保持自治，并通过稳定契约接入。
 
-PPT-only 与 Image→PPT 可以被正确建模。必需 PPT 只有在其前置条件满足并被
-激活后才持久化为 `BLOCKED_UNAVAILABLE`；从一开始就是 optional 的 PPT 可
-跳过且不会伪造 `PARTIAL`。
+核心能力包括：
 
-## 本地验证
+- **任务编排**：支持 Image-only、PPT-only 和 Image → PPT 三种计划拓扑，统一管理任务、阶段和实例状态。
+- **Agent 隔离**：每个运行实例使用独立进程、端口、目录、凭据和配置快照；Harness 不导入专业 Agent 的内部 Python 包。
+- **人工审批**：提供固定 Owner 的审批流和 FIFO 收件箱，关键步骤可由人工或 Master Agent 接管。
+- **资产可信**：输入和交付均通过受控目录流转，发布时校验 MIME、大小与 SHA-256，避免直接信任外部文件路径。
+- **用量与预算**：聚合 Token、图片计费单位和费用完整性，按任务控制自动重试预算与人工越权。
+- **配置与密钥**：支持全局配置、实例配置和凭据池；公开 API 只返回脱敏信息。
+- **审计与恢复**：写操作带 Actor、幂等键和 revision；状态采用事件提交、原子快照和可重建索引。
+- **Web 控制台**：集中查看任务、实例、审批、资源、Token/费用、事件和配置；专业创作界面通过 Agent 深链打开。
 
-要求 Python 3.10+、Node.js 22+ 和 npm。Python 与 npm 依赖均由锁文件固定，
-Python 锁文件带完整制品哈希；CI 同时覆盖 Python 3.10 与 3.13。
+## 系统架构
 
-```bash
-make test
+```mermaid
+flowchart LR
+    U[人工操作员] --> WEB[Web 控制台]
+    M[Master Agent] --> API[FastAPI /api/v1]
+    WEB --> API
 
-cd frontend
-npm ci
-cd ..
+    API --> APP[应用服务与领域命令]
+    APP --> APPROVAL[审批 / 收件箱]
+    APP --> USAGE[用量 / 重试预算]
+    APP --> ASSET[资产服务]
+    APP --> REGISTRY[Adapter Registry]
 
-make check
+    REGISTRY --> IMAGE[Image Adapter]
+    REGISTRY --> PPT[PPT 契约占位]
+    IMAGE --> PROC[隔离的 Image Agent 进程]
 
-# 包含 Pyright、Python/npm 依赖漏洞审计、CycloneDX SBOM 和单机容量基准
-make verify
+    APP --> STORE[文件状态存储]
+    STORE --> CONTROL[(control-data)]
+    ASSET --> WORKSPACE[(workspace/tasks)]
 ```
 
-`make check` 依次执行运行时及 P0 契约测试、Ruff、compileall、secret scan、
-Agent import 边界检查、前端类型检查与生产构建。浏览器层测试位于
-`frontend/e2e/`，安装 Playwright Chromium 后运行：
+后端依赖方向保持为 `API → application/domain → storage/adapters`。跨模块数据结构由 `contracts/v1` 中的 JSON Schema 固定，前端类型从这些契约生成。
+
+## 运行要求
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Linux / POSIX；运行时依赖 `/proc`、`fcntl` 和进程组控制 |
+| Python | 3.10+；CI 覆盖 3.10 与 3.13 |
+| Node.js | 22+ |
+| 其他工具 | npm、GNU Make、Git |
+| Image Agent | 仅启动真实 Image 工作流时需要；源码和依赖必须使用固定版本 |
+
+Windows 和 macOS 当前不能作为正式运行主机；不满足进程隔离条件时，后端会直接拒绝启动。
+
+## 快速开始
+
+### 1. 获取代码
 
 ```bash
-cd frontend
-npm run test:e2e
+git clone https://github.com/HST314/agentic-design-harness.git
+cd agentic-design-harness
 ```
 
-真实 Image Agent 的 G2 离线门禁需要相邻的固定版本源码，并在独立目标目录安装
-其锁定依赖。它不调用外部模型服务：
+### 2. 安装依赖
 
 ```bash
-make g2-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+# 后端开发与测试依赖会安装到仓库内的 .test-deps，不污染全局环境
+make test-env
 
-# G3 人工审批 → 真实 Adapter/进程 → 受控发布 → 主任务完成门禁
-make g3-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
-
-# 生产构建 + 真实 Harness/Image 进程 + 本地确定性 Provider，无浏览器 API Mock
-make frontend-integration IMAGE_AGENT_ROOT=../image_agent_mvp
-
-# G4 三进程、凭据轮转、配置覆盖、用量、取消与无重放恢复门禁
-make g4-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
-
-# G5 全门禁：verify + G3/G4 真实离线进程 + Playwright + 18 条证据索引
-make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+# 前端依赖
+npm --prefix frontend ci
 ```
 
-需显式访问外部 Provider 时，使用独立测试凭据设置
-`HARNESS_REAL_PROVIDER_BASE_URL`、`HARNESS_REAL_PROVIDER_API_KEY`、
-`HARNESS_REAL_PROVIDER_TEXT_MODEL`、`HARNESS_REAL_PROVIDER_IMAGE_MODEL` 与
-`HARNESS_REAL_PROVIDER_VLM_MODEL`。也可将这些键写入只供本机使用的 dotenv 文件；
-兼容已有的 `MODEL_BASE_URL` / `MODEL_API_KEY` 别名，CRLF 行尾由入口安全处理，
-不需要也不应使用 Shell `source`：
+### 3. 配置后端（可选）
+
+默认配置可以直接启动空控制平面。需要自定义数据目录、监听地址或 Image Agent 路径时：
 
 ```bash
-# 只做凭据字段、Playwright 版本、Chromium revision、可执行权限和动态库预检
-make real-provider-preflight \
-  REAL_PROVIDER_ENV_FILE=/secure/provider.env
-
-# 运行真实门禁；退出码保持 Playwright 原始结果
-make real-provider-smoke \
-  IMAGE_AGENT_ROOT=../image_agent_mvp \
-  REAL_PROVIDER_ENV_FILE=/secure/provider.env
+cp config/harness.example.yaml config/harness.local.yaml
+export HARNESS_CONFIG=config/harness.local.yaml
 ```
 
-可通过 `PLAYWRIGHT_BROWSERS_PATH` 指向已安装且 revision 匹配的 Playwright 浏览器
-缓存，或通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指向匹配的 Chromium 可执行文件。
-预检找不到运行时时会给出固定安装命令。成功门禁默认原子写出
-`build/real-provider-evidence.json`，只保留版本、动作序列、终态、三类用量聚合、
-交付 MIME/SHA-256/完整性、favicon 的 200/MIME 断言，及 `requestfailed`、
-`console.error`、`pageerror`、HTTP 错误响应计数；
-真实 Key、Provider URL、请求正文和模型响应正文不会写入。构建和 Playwright 日志写入
-`build/real-provider-smoke.log`，入口直接传播子进程失败码，不依赖 `tee`。
-正式真实门禁要求 Harness 与 Image Agent 均处于已提交、无未跟踪修改的状态，证据会
-同时绑定两个 commit 和 clean-worktree 结果；开发中的脏工作树可先运行不带证据路径的
-底层脚本或确定性 `frontend-integration`，但不能发布正式真实证据。
+常用环境变量会覆盖 YAML 中的同名配置：
 
-如需另行使用管道采集日志，必须启用 `pipefail`：
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `HARNESS_HOST` | `127.0.0.1` | 后端监听地址 |
+| `HARNESS_PORT` | `18080` | 后端监听端口 |
+| `HARNESS_CONTROL_ROOT` | `control-data` | 控制状态、事件和密钥目录 |
+| `HARNESS_WORKSPACE_ROOT` | `workspace` | 任务输入与交付目录 |
+| `HARNESS_IMAGE_AGENT_ROOT` | `../image_agent_mvp` | Image Agent 源码目录 |
+| `HARNESS_IMAGE_AGENT_PYTHON` | `/usr/bin/python3` | Image Agent 解释器 |
+| `HARNESS_IMAGE_AGENT_REVISION` | 固定提交 | 允许启动的 Image Agent 版本 |
 
-```bash
-set -o pipefail
-make real-provider-smoke IMAGE_AGENT_ROOT=../image_agent_mvp | tee smoke.log
-```
+凭据不能写入 YAML 或 `.env` 后提交到 Git。请通过受控的 `/api/v1/key-pool` 接口写入，公开响应只会返回 Key ID、尾号和 Base URL 提示。
 
-该入口默认不会由常规门禁触发；执行时使用一次性 Harness 数据目录并关闭
-Playwright trace，避免持久化请求凭据。
+### 4. 启动控制平面
 
-## 启动空服务
+终端一：
 
 ```bash
 make serve
 ```
 
-默认监听 `127.0.0.1:18080`：
+启动后可访问：
 
-- `GET /healthz`：进程存活；
-- `GET /readyz`：契约注册表有效且唯一写者租约已获得；
-- `POST /api/v1/contracts/{schema}/validate`：使用 `contracts/v1` 验证载荷。
-- `POST /api/v1/tasks`、`PUT /api/v1/tasks/{id}/plan`、
-  `POST /api/v1/tasks/{id}/confirm-start`：G2 写用例；
-- `GET /api/v1/tasks`、`GET /api/v1/tasks/{id}`、`GET /api/v1/instances/{id}`：
-  控制面读取与 Image 状态刷新；
-- `GET /api/v1/instances/{id}/ui-link`：返回进程监管生成的本地工作台深链。
-- `GET /api/v1/inbox`、`GET /api/v1/approvals/{id}`、
-  `POST /api/v1/approvals/{id}/resolve`：FIFO 通知与带 revision 的审批决议；
-- `PUT /api/v1/instances/{id}/approval-mode`：只改变后续审批路由，既有 Owner 不迁移；
-- `GET /api/v1/tasks/{id}/files` 及其 `preview` / `download`：只读取已提交且实时校验
-  通过的输入和公共交付。
-- `GET /api/v1/tasks/{id}/usage`、`GET /api/v1/instances/{id}/usage`：展示可从原始
-  NDJSON 重建的用量，文字/VLM 调用保留 Token，图片调用保留数量、分辨率与模型档位
-  账单单位，并明确区分完整、部分和未上报；
-- `GET/PUT /api/v1/tasks/{id}/retry-budget`：人工修订预算；自动请求在任务锁内原子
-  检查次数、Token 和可选费用并预留，超限生成一次性人工审批；
-- `GET/PUT /api/v1/config/global`、实例 config 与 key-pool：强制全局覆盖、热应用和
-  完整凭据对管理，响应不回显明文 Key；
-- `POST /api/v1/instances/{id}/cancel`：先请求 Adapter 停止活动 job，再以进程组作为
-  权威取消边界。
-- `GET /api/v1/tasks/{id}/events`：只读公开审计投影，不暴露快照、命令载荷或幂等键；
-- 任务、审批、收件箱、资源和事件列表统一使用稳定游标分页；
-- 任务取消和实例 `start/restart/cancel/archive` 均要求 Actor、幂等键和 revision。
+- API：<http://127.0.0.1:18080>
+- 健康检查：<http://127.0.0.1:18080/healthz>
+- 就绪检查：<http://127.0.0.1:18080/readyz>
+- Swagger UI：<http://127.0.0.1:18080/docs>
+- OpenAPI：<http://127.0.0.1:18080/openapi.json>
 
-可复制 `config/harness.example.yaml` 并通过 `HARNESS_CONFIG` 指定。运行状态写入
-`control-data/`，任务工作区写入 `workspace/tasks/`，二者均不会进入版本控制。
+终端二：
 
-## 边界
+```bash
+npm --prefix frontend run dev
+```
 
-- Harness 不导入 Image/PPT Agent 的 Python 包，也不与其共享依赖环境；
-- Master 和人工只能通过领域命令/API 改变控制平面状态；
-- API Key 不进入任务卡、共享目录、事件、日志或响应；
-- 当前前端只承载控制面，专业工作流通过 Adapter 提供的 HTTP 深链打开；
-- G2/G3 门禁继续验证真实离线启动、人工审批和受控交付；G4 门禁同时保持 3 个
-  固定版本 Image 进程，验证 PID/端口/目录隔离、凭据 `1→2→3→1`、局部配置被
-  全局保存覆盖、未上报不伪造 0、控制面重启不重发 Agent job，以及单实例取消不
-  影响其他实例。
+浏览器打开 <http://127.0.0.1:18180>。Vite 会把 `/api`、`/healthz` 和 `/readyz` 代理到本地后端；如后端地址不同，启动前设置 `HARNESS_BACKEND_URL`。
 
-完整范围、状态语义与 18 条 Phase 1 验收标准见 [RFC v0.2](docs/rfc-v0.2.md)，
-测试追踪见 [Phase 1 验收矩阵](docs/verification/phase1-traceability.md)。
-Master 调用方式见 [API 指南](docs/master-api-guide.md)，部署、备份、恢复与回滚见
-[运行手册](docs/operations.md)，G5 证据入口见
-[发布验收说明](docs/verification/g5-release.md)。
+### 5. 创建第一个任务
+
+当前 Web 控制台用于管理和观察任务，任务创建与计划提交由 Master Agent 或 API 完成。下面的请求会创建一个可在控制台中看到的空任务：
+
+```bash
+curl --request POST http://127.0.0.1:18080/api/v1/tasks \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "task_id": "task_campaign_01",
+    "title": "Campaign visual",
+    "goal": "Create a reviewable campaign visual.",
+    "master_owner": "master_default",
+    "start_policy": "manual",
+    "input_manifest": "inputs/manifests/input_rev_1.json",
+    "envelope": {
+      "idempotency_key": "create_task_campaign_01",
+      "actor_type": "master",
+      "actor_id": "master_default",
+      "expected_revision": 0
+    }
+  }'
+```
+
+完整业务顺序是：创建任务 → 导入输入 → 保存计划与任务卡 → 确认启动 → 处理审批 → 验证交付。字段定义和可直接试用的请求体均可在 Swagger UI 中查看；编排规则见 [Master API 调用指南](docs/master-api-guide.md)。
+
+## 接入 Image Agent
+
+真实 Image 工作流要求 Image Agent 源码位于配置指定目录，且 Git revision 与 `image_agent_revision` 完全一致。准备其隔离依赖：
+
+```bash
+make image-agent-env IMAGE_AGENT_ROOT=../image_agent_mvp
+```
+
+先运行不调用外部模型的真实进程门禁：
+
+```bash
+make g2-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+make g3-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+```
+
+G3 覆盖“人工确认 → 真实 Adapter/进程 → 受控发布 → 主任务完成”。多实例、凭据轮转、配置覆盖、用量和取消链路使用：
+
+```bash
+make g4-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+```
+
+需要访问真实模型 Provider 时，请使用专用测试凭据文件，并先执行预检：
+
+```bash
+make real-provider-preflight \
+  REAL_PROVIDER_ENV_FILE=/secure/provider.env
+
+make real-provider-smoke \
+  IMAGE_AGENT_ROOT=../image_agent_mvp \
+  REAL_PROVIDER_ENV_FILE=/secure/provider.env
+```
+
+真实门禁会检查 Harness 与 Image Agent 的提交身份和工作树清洁度；证据不会记录 API Key、完整 Provider URL、请求正文或模型响应正文。详细变量与故障排查见 [运行手册](docs/operations.md)。
+
+## 测试与质量门禁
+
+测试脚本是发布能力的一部分，仓库精简不会删除它们。
+
+| 命令 | 用途 |
+| --- | --- |
+| `make test` | 契约、单元、集成、崩溃恢复和可用的 E2E 测试 |
+| `make check` | 测试、Ruff、compileall、密钥扫描、边界检查、前端类型检查与构建 |
+| `make verify` | `check` + Pyright + Python/npm 漏洞审计 + SBOM + 容量基准 |
+| `npm --prefix frontend run test:e2e` | Playwright 浏览器测试 |
+| `make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp` | Phase 1 完整离线发布门禁与证据索引 |
+
+`make test` 在未提供合格 Image Agent 环境时会按设计跳过真实 Agent 用例；这不等同于真实链路已通过。发布前应根据目标范围执行对应的 G2–G5 门禁。
+
+## 数据、安全与恢复
+
+- `control-data/` 保存控制状态、事件、配置投影和受限凭据；`workspace/tasks/` 保存任务输入与交付。两者默认不会进入 Git。
+- 一致备份必须同时包含上述两个目录，并在停止新写入、正常关闭 Harness 后执行。
+- 不要直接修改状态文件，也不要通过重新发送 start/advance 命令修复恢复状态；启动流程会重建安全投影并对账活动实例。
+- 默认服务只监听 `127.0.0.1`。当前没有登录、RBAC 或多租户隔离，不能直接暴露到公网；跨主机访问应置于受信反向代理和网络访问控制之后。
+- `healthz` 只代表进程存活；只有 `readyz` 返回 `ready` 才表示契约注册与唯一写者租约均已就绪。
+
+备份、升级、回滚和故障排查步骤见 [运行手册](docs/operations.md)。
+
+## 项目结构
+
+```text
+backend/harness/   FastAPI、领域命令、应用服务、Adapter 与文件状态存储
+frontend/          TypeScript/Vite 控制台与 Playwright 测试
+contracts/v1/      JSON Schema、状态/错误目录及示例
+config/            非敏感配置样例与容量 SLO
+requirements/      人工维护的 Python 顶层依赖输入
+scripts/           质量门禁、契约生成、SBOM、基准与浏览器集成入口
+tests/             契约、单元、集成、崩溃恢复、真实进程 E2E 与测试夹具
+docs/              当前仍有效的 API、运维、契约、容量与发布验收资料
+```
+
+## 关键文档
+
+- [Master API 调用指南](docs/master-api-guide.md)：命令信封、标准流程、分页和错误处理。
+- [运行手册](docs/operations.md)：安装、备份、恢复、升级、回滚和故障排查。
+- [契约版本规则](docs/contract-versioning.md)：Schema 兼容边界和升级流程。
+- [单机容量 SLO](docs/single-machine-capacity-slo.md)：适用边界、基准和容量纪律。
+- [G5 发布验收](docs/verification/g5-release.md)：完整门禁场景和证据生成。
+- [Phase 1 验收矩阵](docs/verification/phase1-traceability.md)：需求与可执行测试的映射。
+- [RFC v0.2](docs/rfc-v0.2.md)：当前契约和验收证据仍依赖的 Phase 1 设计基线。
+
+## 当前边界与路线
+
+当前版本明确不包含：
+
+- 可运行的 PPT Agent Adapter；
+- 多用户身份、RBAC、SSO 和外部通知；
+- 数据库、对象存储、多机调度和高可用；
+- 以 WebSocket 为基础的实时事件推送；
+- 公网部署所需的认证与网络安全层。
+
+后续优先级是接入真实 PPT 运行时并明确 Master 运行边界，再引入身份权限和多机存储。任何扩展都应保持 Adapter 隔离、稳定契约、受控资产和可恢复写入这四个核心约束。
+
+## 许可证
+
+仓库当前未提供开源许可证。除非仓库所有者另行授权，否则不要假设代码可用于分发或商业用途。
