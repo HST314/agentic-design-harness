@@ -17,6 +17,7 @@
 
 - [契约版本规则](contract-versioning.md)：JSON Schema 的兼容性和升级纪律。
 - [RFC v0.2](rfc-v0.2.md)：Phase 1 设计基线。
+- [工作台框架设计 v0.3](rfc-v0.3-workbench-design.md)：主任务创建、Master 工作区、子任务看板、内嵌专业工作台与迁移计划。
 - [契约目录说明](../contracts/README.md)：Schema、Catalog、示例和生成流程。
 - [后端边界](../backend/README.md)：后端分层与依赖约束。
 - [前端说明](../frontend/README.md)：Web 控制台职责和开发命令。
