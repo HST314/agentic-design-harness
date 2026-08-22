@@ -464,6 +464,27 @@ class ProcessSupervisorTests(unittest.TestCase):
         self.assertEqual(symlinked.exception.code, "PROCESS_START_FAILED")
         self.assertFalse(self.supervisor._launch_path("launch_1").exists())
 
+    def test_path_backed_artifact_open_failure_has_actionable_details(self) -> None:
+        with (
+            patch.object(
+                process_runtime,
+                "open_regular_readonly",
+                side_effect=OSError(13, "blocked"),
+            ),
+            self.assertRaises(HarnessError) as rejected,
+        ):
+            process_runtime._artifact_manifest(self.artifact_root)
+
+        self.assertEqual(rejected.exception.code, "PROCESS_START_FAILED")
+        self.assertEqual(
+            rejected.exception.details,
+            {
+                "path": "fake_agent_process.py",
+                "operation": "open",
+                "errno": 13,
+            },
+        )
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX named pipes")
     def test_runtime_artifact_rejects_special_files_without_blocking(self) -> None:
         make_artifact_writable(self.artifact_root)
