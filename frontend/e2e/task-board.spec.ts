@@ -98,7 +98,7 @@ test("shows one stable logical card per WorkItem and supports terminal filtering
   await expect(page.getByRole("heading", { name: "待审批" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "已结束" })).toBeVisible();
 
-  const runningCard = page.getByRole("link", { name: "KV 方向 A，运行中，打开详情" });
+  const runningCard = page.getByRole("link", { name: "KV 方向 A，运行中，进入 Image 工作台" });
   await expect(runningCard).toHaveCount(1);
   await expect(runningCard).toContainText("实例2");
   await expect(runningCard).toContainText("重试1");
@@ -114,7 +114,7 @@ test("shows one stable logical card per WorkItem and supports terminal filtering
 
 test("opens a refresh-safe WorkItem drawer with raw status and attempt history", async ({ page }) => {
   await page.goto("/tasks/task_board_e2e/board");
-  await page.getByRole("link", { name: "KV 方向 A，运行中，打开详情" }).click();
+  await page.locator("article.task-card").filter({ hasText: "KV 方向 A" }).getByRole("link", { name: "详情" }).click();
   await expect(page).toHaveURL(/drawer=work-item&target=work_kv_a/);
   const drawer = page.getByRole("dialog", { name: "工作台详情抽屉" });
   await expect(drawer.getByRole("heading", { name: "子任务详情" })).toBeVisible();

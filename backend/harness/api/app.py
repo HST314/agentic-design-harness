@@ -22,6 +22,7 @@ from ..core.config import HarnessSettings, load_settings
 from ..core.errors import ErrorCatalog, HarnessError
 from ..core.logging import configure_logging, redact
 from ..domain.service import TaskCommandService
+from ..services.agent_workbench import AgentWorkbenchService
 from ..services.application import HarnessApplicationService
 from ..services.approvals import ApprovalInboxService
 from ..services.assets import AssetService
@@ -58,6 +59,7 @@ class Container:
     task_intakes: TaskIntakeService
     master_threads: MasterThreadService
     work_items: WorkItemProjectionService
+    agent_workbench: AgentWorkbenchService
 
 
 class ContractValidationRequest(BaseModel):
@@ -156,6 +158,7 @@ def build_container(settings: HarnessSettings) -> Container:
         retry_budgets,
         adapters,
     )
+    agent_workbench = AgentWorkbenchService(store, adapters, work_items)
     return Container(
         settings=settings,
         contracts=contracts,
@@ -174,6 +177,7 @@ def build_container(settings: HarnessSettings) -> Container:
         task_intakes=task_intakes,
         master_threads=master_threads,
         work_items=work_items,
+        agent_workbench=agent_workbench,
     )
 
 

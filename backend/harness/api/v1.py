@@ -593,20 +593,20 @@ def build_v1_router(container: Container) -> APIRouter:
         )
 
     @router.get("/instances/{instance_id}/ui-link", tags=["instances"])
-    async def get_instance_ui_link(instance_id: str) -> dict[str, Any]:
-        def read_link() -> dict[str, Any]:
-            task_id = _task_for_instance(container, instance_id)
-            instance = container.store.instance.get(task_id, instance_id)
-            if instance is None:
-                raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
-            adapter = container.adapters.get(instance["agent_type"])
-            return {
-                "schema_version": "1.0",
-                "instance_id": instance_id,
-                "ui_url": adapter.get_ui_url(instance_id),
-            }
-
-        return await run_in_threadpool(read_link)
+    async def get_instance_ui_link(
+        instance_id: str,
+        request: Request,
+        task_id: str = Query(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$"),
+        work_item_id: str = Query(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$"),
+    ) -> dict[str, Any]:
+        harness_origin = f"{request.url.scheme}://{request.url.netloc}"
+        return await run_in_threadpool(
+            container.agent_workbench.get_link,
+            task_id,
+            work_item_id,
+            instance_id,
+            harness_origin,
+        )
 
     @router.post("/instances/{instance_id}/cancel", tags=["instances"])
     async def cancel_instance(

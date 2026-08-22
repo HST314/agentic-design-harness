@@ -50,6 +50,12 @@
       "meaning": "The task plan is valid but the required agent adapter is not available."
     },
     {
+      "code": "UI_LINK_REJECTED",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "An Agent workbench URL failed ownership, origin, or Adapter allowlist validation."
+    },
+    {
       "code": "BUDGET_GATE_DENIED",
       "http_status": 409,
       "retryable": false,
