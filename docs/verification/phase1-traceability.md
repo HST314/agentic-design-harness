@@ -100,7 +100,7 @@ claims a real PPT delivery.
 - Product UI: Playwright covers task overview, instance, resources, approvals, Token and event
   views, including keyboard navigation, 375px/landscape overflow, async disabling and error recovery.
 - Release quality: `make verify` adds full-project Pyright and Python/npm vulnerability audits;
-  startup fails closed when Linux/POSIX process primitives are unavailable.
+  startup fails closed when the selected Linux/Windows native process primitives are unavailable.
 - Operations: `docs/operations.md` specifies installation, backup, restore, log redaction,
   upgrade/rollback and single-machine limits. `docs/master-api-guide.md` freezes the Master-facing
   command, revision, pagination, error and secret-handling conventions.

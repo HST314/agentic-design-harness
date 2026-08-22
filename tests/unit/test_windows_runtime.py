@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+from harness.core.errors import HarnessError
+from harness.runtime import validate_runtime_platform
+from harness.services.process_control import process_start_identity
+from harness.storage.locks import FileLock
+
+
+@unittest.skipUnless(os.name == "nt", "requires a real Windows kernel")
+class WindowsRuntimeTests(unittest.TestCase):
+    def test_native_runtime_preflight_and_process_identity(self) -> None:
+        validate_runtime_platform()
+        self.assertIsNotNone(process_start_identity(os.getpid()))
+
+    def test_real_windows_file_lock_serializes_writers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "writer.lock"
+            with FileLock(path, 0.1), self.assertRaises(HarnessError) as blocked:
+                FileLock(path, 0.03).acquire()
+            self.assertEqual(blocked.exception.code, "REVISION_CONFLICT")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -597,7 +597,10 @@ def open_private_persistent_log(path: Path) -> Iterator[BinaryIO]:
     )
     temporary_path: Path | None = Path(temporary_name)
     try:
-        os.fchmod(descriptor, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        else:
+            temporary_path.chmod(0o600)
         os.replace(temporary_path, path)
         temporary_path = None
         with os.fdopen(descriptor, "wb") as stream:

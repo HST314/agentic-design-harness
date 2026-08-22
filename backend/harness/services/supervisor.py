@@ -4,7 +4,6 @@ from __future__ import annotations
 import http.client
 import logging
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -25,15 +24,19 @@ from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 from .configuration import ConfigurationService
 from .credentials import CredentialPoolService, ResolvedCredential
+from .process_control import (
+    process_group_contains,
+    process_start_identity,
+    terminate_process_tree,
+    wrapper_spawn_options,
+)
 from .process_runtime import (
     ACTIVE_LAUNCH_STATES,
     PinnedRuntimeArtifact,
     PortAllocator,
     ProcessSpec,
     pin_runtime_artifact,
-    process_group_exists,
     process_spec_digest,
-    process_start_identity,
     reject_credential_arguments,
     validate_launch_identity,
 )
@@ -72,7 +75,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
         self.launch_root = self.process_root / "launches"
         self.launch_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.port_allocator = PortAllocator(store, host)
-        self._children: dict[str, subprocess.Popen[bytes]] = {}
+        self._children: dict[str, subprocess.Popen[Any]] = {}
         self._lock_registry_guard = threading.Lock()
         self._instance_locks: dict[tuple[str, str], threading.RLock] = {}
         self._monitor_stop = threading.Event()
@@ -251,7 +254,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
             atomic_write_json(record_path, prepared)
             if not preserve_business_state:
                 self._transition(task_id, instance_id, "STARTING", f"{launch_id}-starting")
-            process: subprocess.Popen[bytes] | None = None
+            process: subprocess.Popen[Any] | None = None
             secret_path: Path | None = None
             try:
                 command = [
@@ -278,7 +281,11 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                         "stderr_path": str(stderr_path),
                         "handshake_path": str(handshake_path),
                         "redactions": [resolved.api_key, resolved.base_url],
-                        "inherited_fds": [pinned_artifact.source_descriptor],
+                        "inherited_fds": (
+                            [pinned_artifact.source_descriptor]
+                            if pinned_artifact.source_descriptor is not None
+                            else []
+                        ),
                     },
                     mode=0o600,
                 )
@@ -294,9 +301,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    close_fds=True,
-                    pass_fds=(pinned_artifact.source_descriptor,),
+                    **wrapper_spawn_options(pinned_artifact.source_descriptor),
                 )
                 identity = process_start_identity(process.pid)
                 if identity is None:
@@ -513,8 +518,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 and child_pid > 1
                 and process_start_identity(wrapper_pid) == wrapper_identity
                 and process_start_identity(child_pid) == child_identity
-                and os.getpgid(wrapper_pid) == wrapper_pid
-                and os.getpgid(child_pid) == wrapper_pid
+                and process_group_contains(wrapper_pid, child_pid)
             )
         except (KeyError, OSError, TypeError, ValueError):
             valid = False
@@ -538,29 +542,14 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
         child_pid = record.get("child_pid")
         if not child_pid:
             return False
-        try:
-            return (
-                process_start_identity(child_pid) == record.get("child_start_identity")
-                and os.getpgid(child_pid) == record["pid"]
-            )
-        except ProcessLookupError:
-            return False
+        return bool(
+            process_start_identity(child_pid) == record.get("child_start_identity")
+            and process_group_contains(record["pid"], child_pid)
+        )
 
     @staticmethod
     def _terminate_group(pid: int, grace_seconds: float) -> None:
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        deadline = time.monotonic() + grace_seconds
-        while time.monotonic() < deadline:
-            if not process_group_exists(pid):
-                return
-            time.sleep(0.02)
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
+        terminate_process_tree(pid, grace_seconds)
 
     def _probe(self, port: int, path: str) -> bool:
         connection = http.client.HTTPConnection(self.host, port, timeout=0.25)

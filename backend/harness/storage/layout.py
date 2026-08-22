@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from ..core.errors import HarnessError
+from .safe_open import is_link_or_reparse
 
 IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 
@@ -84,11 +85,18 @@ class StateLayout:
 
     @staticmethod
     def _ensure_directory(directory: Path) -> None:
-        if directory.is_symlink():
+        if directory.exists() and is_link_or_reparse(directory):
             raise HarnessError(
                 "PATH_OUTSIDE_TASK_ROOT", "Workspace directories cannot be symlinks."
             )
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "nt":
+            if not directory.is_dir() or is_link_or_reparse(directory):
+                raise HarnessError(
+                    "PATH_OUTSIDE_TASK_ROOT", "Workspace paths must be regular directories."
+                )
+            os.chmod(directory, 0o700)
+            return
         try:
             descriptor = os.open(
                 directory,
