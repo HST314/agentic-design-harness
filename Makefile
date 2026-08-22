@@ -10,7 +10,7 @@ REAL_PROVIDER_EVIDENCE_PATH ?= build/real-provider-evidence.json
 REAL_PROVIDER_LOG_FILE ?= build/real-provider-smoke.log
 REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(REAL_PROVIDER_ENV_FILE)",)
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence dev-setup dev-doctor dev-smoke
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -92,6 +92,15 @@ verify: check typecheck dependency-audit sbom capacity-benchmark
 
 serve: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m harness
+
+dev-setup:
+	$(PYTHON) scripts/dev.py setup
+
+dev-doctor:
+	$(PYTHON) scripts/dev.py doctor
+
+dev-smoke:
+	$(PYTHON) scripts/dev.py start --check
 
 image-agent-env: $(IMAGE_AGENT_ENV_STAMP)
 

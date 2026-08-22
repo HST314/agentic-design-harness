@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -289,6 +290,34 @@ def verify_cross_references(lock: dict[str, Any], baseline: dict[str, Any]) -> N
                 raise ValueError(f"P0 baseline gate evidence is missing: {evidence}")
 
 
+def verify_submodule_reference(lock: dict[str, Any]) -> None:
+    embedded_path = lock["embedded_path"]
+    stage = str(git_output(ROOT, "ls-files", "--stage", "--", embedded_path))
+    fields = stage.split(maxsplit=3)
+    if len(fields) != 4 or fields[0] != "160000" or fields[2] != "0":
+        raise ValueError("Image Agent embedded path is not a canonical Git submodule")
+    if fields[1] != lock["revision"] or fields[3] != embedded_path:
+        raise ValueError("Image Agent submodule pointer differs from the release lock")
+
+    modules_path = ROOT / ".gitmodules"
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with modules_path.open(encoding="utf-8") as stream:
+            parser.read_file(stream)
+    except (OSError, configparser.Error) as exc:
+        raise ValueError("cannot read canonical .gitmodules") from exc
+    section = f'submodule "{embedded_path}"'
+    if not parser.has_section(section):
+        raise ValueError("Image Agent submodule declaration is missing")
+    if set(parser[section]) != {"path", "url"}:
+        raise ValueError("Image Agent submodule declaration is not canonical")
+    if (
+        parser[section]["path"] != embedded_path
+        or parser[section]["url"] != lock["repository"]
+    ):
+        raise ValueError("Image Agent submodule origin differs from the release lock")
+
+
 def verify_image_source(lock: dict[str, Any], baseline: dict[str, Any], root: Path) -> None:
     revision = str(git_output(root, "rev-parse", "HEAD"))
     if revision != lock["revision"]:
@@ -325,18 +354,22 @@ def main() -> int:
         baseline = load_object(args.baseline)
         verify_cross_references(lock, baseline)
         verify_harness_baseline(baseline)
+        verify_submodule_reference(lock)
         for item in lock["dependencies"]["files"]:
             if item["scope"] == "harness":
                 path = ROOT / item["path"]
                 if sha256_file(path) != item["sha256"]:
                     raise ValueError(f"Harness-side Image dependency drifted: {item['path']}")
-        if args.image_agent_root is not None:
-            verify_image_source(lock, baseline, args.image_agent_root.resolve())
+        source_root = (
+            args.image_agent_root.resolve()
+            if args.image_agent_root is not None
+            else (ROOT / lock["embedded_path"]).resolve()
+        )
+        verify_image_source(lock, baseline, source_root)
     except (KeyError, OSError, subprocess.CalledProcessError, ValueError) as exc:
         print(f"Image Agent lock verification failed: {exc}", file=sys.stderr)
         return 1
-    qualifier = " and source checkout" if args.image_agent_root is not None else ""
-    print(f"P0 integration baseline, Image Agent lock{qualifier} verified.")
+    print("P0 integration baseline, Image Agent submodule and source checkout verified.")
     return 0
 
 

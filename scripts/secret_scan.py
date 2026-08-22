@@ -35,6 +35,13 @@ TEXT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
+# The pinned upstream regression fixture proves that raw authorization values are
+# discarded. Keep this allowlist exact so the same placeholder elsewhere still fails.
+ALLOWED_REDACTION_FIXTURES = {
+    Path("agents/image_agent_mvp/tests/test_refactor.py"): frozenset(
+        {"Bearer " + "sensitive-provider-value"}
+    )
+}
 
 
 def main(root: Path) -> int:
@@ -43,8 +50,13 @@ def main(root: Path) -> int:
         if not path.is_file() or path.suffix not in TEXT_SUFFIXES or set(path.parts) & SKIP_PARTS:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
+        relative = path.resolve().relative_to(root.resolve())
         for label, pattern in PATTERNS.items():
             for match in pattern.finditer(text):
+                if match.group(0) in ALLOWED_REDACTION_FIXTURES.get(
+                    relative, frozenset()
+                ):
+                    continue
                 line = text.count("\n", 0, match.start()) + 1
                 findings.append(f"{path}:{line}: {label}")
     if findings:

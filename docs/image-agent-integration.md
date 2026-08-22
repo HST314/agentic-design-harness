@@ -17,7 +17,39 @@ Agent 的已验收提交、Git tree、源码摘要、依赖摘要和发布门证
 - `external_only`：仅用于单发布周期内的紧急回滚，不是新部署方式。
 
 无论选择哪种模式，revision、包版本和内容摘要都必须与 lock 一致；路径回滚不能绕过
-版本与内容校验。P1 加入 submodule 后，`prefer_embedded` 会自动选择内嵌目录。
+版本与内容校验。当前仓库已把锁定提交作为 submodule 固定在内嵌目录，
+`prefer_embedded` 会直接选择该目录；启动时不会追踪或拉取 Image Agent 的浮动分支。
+
+## 本地初始化与启动
+
+克隆主仓库后无需手工摆放相邻源码或激活虚拟环境。启动器会初始化固定 submodule、校验
+Git 指针与源码/依赖摘要、创建 Harness Python 环境、安装 Image Agent 隔离依赖，并按
+`package-lock.json` 准备前端。锁摘要未变化时会安全跳过重复安装；前端 lock 变化或依赖
+不完整时会在启动 Vite 前自动执行 `npm ci`。
+
+Windows：
+
+```powershell
+py -3 scripts/dev.py
+```
+
+Linux：
+
+```bash
+python3 scripts/dev.py
+```
+
+需要分步排查时使用：
+
+```bash
+python3 scripts/dev.py setup
+python3 scripts/dev.py doctor
+python3 scripts/dev.py start
+```
+
+`start` 同时管理后端和前端，等待 `/healthz`、`/readyz` 与 Web 首页通过后才报告就绪；
+任一子进程提前退出或收到 Ctrl+C 时，另一进程会同步关闭。CI 使用
+`python scripts/dev.py start --check` 验证同一生产启动路径。
 
 ## DeliveryBundle 数据迁移
 
@@ -33,16 +65,11 @@ P0 只冻结契约和开关语义，不声称已经实现 P3 的双资产发布�
 
 ## 校验
 
-结构与基线校验：
+完整基线、submodule 指针、源码与依赖清单校验：
 
 ```bash
 python scripts/verify_image_agent_lock.py
 ```
 
-内嵌源码就绪后执行完整源码校验：
-
-```bash
-python scripts/verify_image_agent_lock.py --image-agent-root agents/image_agent_mvp
-```
-
-`make check` 已包含结构与基线校验；真实 Image CI 会额外校验完整源码与依赖锁集合。
+`make check` 已包含完整校验；Linux 与 Windows CI 还会执行启动器 setup、doctor 和双服务
+健康检查。若只运行 `git clone` 而没有递归拉取 submodule，先执行 `scripts/dev.py setup`。
