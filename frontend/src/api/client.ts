@@ -5,6 +5,8 @@ import type {
   ContractInboxItem,
   ContractMainTask,
   ContractStage,
+  ContractTaskIntake,
+  ContractTaskNavigationMetadata,
   ContractTokenUsageEvent,
 } from "./generated-contracts";
 
@@ -32,6 +34,50 @@ export interface TaskSummary {
   usage_completeness?: "COMPLETE" | "PARTIAL" | "NOT_REPORTED";
   has_unavailable_ppt?: boolean;
   latest_notification?: InboxItem | null;
+  pinned_at?: string | null;
+  archived_at?: string | null;
+  presentation_revision?: number;
+  intake_status?: ContractTaskIntake["status"] | null;
+}
+
+export interface CommandEnvelope {
+  idempotency_key: string;
+  actor_type: "human" | "master" | "system" | "adapter";
+  actor_id: string;
+  expected_revision: number;
+}
+
+export interface TaskIntakeAsset {
+  asset_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  description: string;
+  created_at: string;
+  integrity_status?: string;
+}
+
+export interface TaskIntakeResponse {
+  schema_version: string;
+  intake: ContractTaskIntake;
+  intake_revision: number;
+  task: ContractMainTask;
+  task_revision: number;
+  navigation?: ContractTaskNavigationMetadata | null;
+  presentation_revision?: number;
+  assets: TaskIntakeAsset[];
+}
+
+export interface TaskIntakeMutationResponse {
+  schema_version: string;
+  intake: ContractTaskIntake;
+  intake_revision: number;
+  asset?: TaskIntakeAsset;
+  removed_asset_id?: string;
+  task?: ContractMainTask;
+  task_revision?: number;
+  assets?: TaskIntakeAsset[];
 }
 
 export interface PageInfo {
@@ -249,6 +295,112 @@ export class ApiClient {
     return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}`, signal);
   }
 
+  taskIntake(taskId: string, signal?: AbortSignal): Promise<TaskIntakeResponse> {
+    return this.get(`/api/v1/task-intakes/${encodeURIComponent(taskId)}`, signal);
+  }
+
+  createTaskIntake(body: {
+    prompt: string;
+    start_policy: "manual" | "auto";
+    envelope: CommandEnvelope;
+  }): Promise<TaskIntakeResponse> {
+    return this.send("POST", "/api/v1/task-intakes", body);
+  }
+
+  removeTaskIntakeAsset(
+    taskId: string,
+    assetId: string,
+    envelope: CommandEnvelope,
+  ): Promise<TaskIntakeMutationResponse> {
+    return this.send(
+      "DELETE",
+      `/api/v1/task-intakes/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(assetId)}`,
+      { envelope },
+    );
+  }
+
+  submitTaskIntake(
+    taskId: string,
+    taskExpectedRevision: number,
+    envelope: CommandEnvelope,
+  ): Promise<TaskIntakeMutationResponse> {
+    return this.send("POST", `/api/v1/task-intakes/${encodeURIComponent(taskId)}/submit`, {
+      task_expected_revision: taskExpectedRevision,
+      envelope,
+    });
+  }
+
+  updateTaskPresentation(
+    taskId: string,
+    patch: { title?: string; pinned?: boolean; archived?: boolean; envelope: CommandEnvelope },
+  ): Promise<{
+    schema_version: string;
+    task: ContractMainTask;
+    task_revision: number;
+    navigation: ContractTaskNavigationMetadata | null;
+    presentation_revision: number;
+  }> {
+    return this.send("PATCH", `/api/v1/tasks/${encodeURIComponent(taskId)}/presentation`, patch);
+  }
+
+  uploadTaskIntakeAsset(
+    taskId: string,
+    input: {
+      file: File;
+      declaredMimeType: string;
+      description: string;
+      envelope: CommandEnvelope;
+    },
+    onProgress: (percent: number) => void,
+    signal: AbortSignal,
+  ): Promise<TaskIntakeMutationResponse> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const abort = (): void => xhr.abort();
+      xhr.open("POST", `${this.baseUrl}/api/v1/task-intakes/${encodeURIComponent(taskId)}/assets`);
+      xhr.setRequestHeader("Accept", "application/json");
+      xhr.responseType = "json";
+      xhr.upload.addEventListener("progress", (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
+        }
+      });
+      xhr.addEventListener("load", () => {
+        signal.removeEventListener("abort", abort);
+        const payload = xhr.response as
+          | TaskIntakeMutationResponse
+          | { error?: { message?: string } }
+          | null;
+        if (xhr.status >= 200 && xhr.status < 300 && payload) {
+          onProgress(100);
+          resolve(payload as TaskIntakeMutationResponse);
+          return;
+        }
+        const message = payload && "error" in payload && payload.error?.message
+          ? payload.error.message
+          : `上传失败（${xhr.status || "网络中断"}）。`;
+        reject(new ApiError(message, xhr.status));
+      });
+      xhr.addEventListener("error", () => {
+        signal.removeEventListener("abort", abort);
+        reject(new ApiError("网络错误，文件尚未确认上传。", 0));
+      });
+      xhr.addEventListener("abort", () => {
+        signal.removeEventListener("abort", abort);
+        reject(new DOMException("Upload cancelled", "AbortError"));
+      });
+      const form = new FormData();
+      form.append("file", input.file, input.file.name);
+      form.append("declared_mime_type", input.declaredMimeType);
+      form.append("description", input.description);
+      form.append("idempotency_key", input.envelope.idempotency_key);
+      form.append("actor_id", input.envelope.actor_id);
+      form.append("expected_revision", String(input.envelope.expected_revision));
+      signal.addEventListener("abort", abort, { once: true });
+      xhr.send(form);
+    });
+  }
+
   instance(instanceId: string, signal?: AbortSignal): Promise<InstanceDetailResponse> {
     return this.get(`/api/v1/instances/${encodeURIComponent(instanceId)}`, signal);
   }
@@ -409,9 +561,9 @@ export class ApiClient {
   }
 
   private async send<Response>(
-    method: "POST" | "PUT",
+    method: "DELETE" | "PATCH" | "POST" | "PUT",
     path: string,
-    body: Record<string, unknown>,
+    body: object,
   ): Promise<Response> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method,

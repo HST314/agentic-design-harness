@@ -22,6 +22,8 @@ from .repository import (
     PlanRepository,
     RetryBudgetRepository,
     StageRepository,
+    TaskIntakeRepository,
+    TaskNavigationRepository,
     TaskRepository,
     UsageRepository,
 )
@@ -97,6 +99,20 @@ class FileStateStore:
             self._validate_retry_budget,
             lock_timeout_seconds,
         )
+        self.task_intake = TaskIntakeRepository(
+            self.layout,
+            "task_intake",
+            lambda _: Path("task-intake.json"),
+            lambda value: contracts.validate("task-intake", value),
+            lock_timeout_seconds,
+        )
+        self.task_navigation = TaskNavigationRepository(
+            self.layout,
+            "task_navigation",
+            lambda _: Path("task-navigation.json"),
+            lambda value: contracts.validate("task-navigation-metadata", value),
+            lock_timeout_seconds,
+        )
         self.usage = UsageRepository(
             self.layout,
             lambda value: contracts.validate("token-usage-event", value),
@@ -113,6 +129,8 @@ class FileStateStore:
                 self.approval,
                 self.inbox,
                 self.retry_budget,
+                self.task_intake,
+                self.task_navigation,
             )
         }
 
@@ -200,6 +218,8 @@ class FileStateStore:
                 task_directory / "task.json",
                 task_directory / "plan.json",
                 task_directory / "retry-budget.json",
+                task_directory / "task-intake.json",
+                task_directory / "task-navigation.json",
                 *sorted((task_directory / "stages").glob("*.json")),
                 *sorted((task_directory / "instances").glob("*.json")),
                 *sorted((task_directory / "approvals").glob("*.json")),

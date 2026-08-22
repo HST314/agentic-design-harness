@@ -5,9 +5,9 @@ from __future__ import annotations
 import base64
 import binascii
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, File, Form, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
@@ -72,6 +72,28 @@ class SavePlanRequest(StrictRequest):
 
 class StartTaskRequest(StrictRequest):
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
+class CreateTaskIntakeRequest(StrictRequest):
+    prompt: str = Field(min_length=1, max_length=20_000)
+    start_policy: Literal["manual", "auto"] = "manual"
+    envelope: CommandEnvelope
+
+
+class RemoveTaskIntakeAssetRequest(StrictRequest):
+    envelope: CommandEnvelope
+
+
+class SubmitTaskIntakeRequest(StrictRequest):
+    task_expected_revision: int = Field(ge=1)
+    envelope: CommandEnvelope
+
+
+class UpdateTaskPresentationRequest(StrictRequest):
+    title: str | None = Field(default=None, min_length=1, max_length=256)
+    pinned: bool | None = None
+    archived: bool | None = None
     envelope: CommandEnvelope
 
 
@@ -207,6 +229,86 @@ def build_v1_router(container: Container) -> APIRouter:
             envelope=body.envelope,
         )
 
+    @router.post("/task-intakes", tags=["tasks"])
+    async def create_task_intake(body: CreateTaskIntakeRequest) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.task_intakes.create,
+            prompt=body.prompt,
+            start_policy=body.start_policy,
+            envelope=body.envelope,
+        )
+
+    @router.get("/task-intakes/{task_id}", tags=["tasks"])
+    async def get_task_intake(task_id: str) -> dict[str, Any]:
+        return await run_in_threadpool(container.task_intakes.get, task_id)
+
+    @router.post("/task-intakes/{task_id}/assets", tags=["assets"])
+    async def upload_task_intake_asset(
+        task_id: str,
+        file: Annotated[UploadFile, File()],
+        declared_mime_type: Annotated[str, Form(min_length=1, max_length=128)],
+        idempotency_key: Annotated[str, Form(min_length=1, max_length=128)],
+        actor_id: Annotated[
+            str, Form(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+        ],
+        expected_revision: Annotated[int, Form(ge=0)],
+        description: Annotated[str, Form(max_length=4_000)] = "",
+    ) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(
+                container.task_intakes.upload_asset,
+                task_id,
+                file.file,
+                filename=file.filename or "upload",
+                declared_mime_type=declared_mime_type,
+                description=description,
+                envelope=CommandEnvelope(
+                    idempotency_key=idempotency_key,
+                    actor_type="human",
+                    actor_id=actor_id,
+                    expected_revision=expected_revision,
+                ),
+            )
+        finally:
+            await file.close()
+
+    @router.delete("/task-intakes/{task_id}/assets/{asset_id}", tags=["assets"])
+    async def remove_task_intake_asset(
+        task_id: str,
+        asset_id: str,
+        body: RemoveTaskIntakeAssetRequest,
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.task_intakes.remove_asset,
+            task_id,
+            asset_id,
+            envelope=body.envelope,
+        )
+
+    @router.post("/task-intakes/{task_id}/submit", tags=["tasks"])
+    async def submit_task_intake(
+        task_id: str, body: SubmitTaskIntakeRequest
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.task_intakes.submit,
+            task_id,
+            task_expected_revision=body.task_expected_revision,
+            envelope=body.envelope,
+        )
+
+    @router.patch("/tasks/{task_id}/presentation", tags=["tasks"])
+    async def update_task_presentation(
+        task_id: str, body: UpdateTaskPresentationRequest
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.task_intakes.update_presentation,
+            task_id,
+            title=body.title,
+            pinned=body.pinned,
+            archived=body.archived,
+            envelope=body.envelope,
+        )
+
     @router.get("/tasks", tags=["tasks"])
     async def list_tasks(
         status: str | None = Query(default=None, max_length=64),
@@ -219,7 +321,7 @@ def build_v1_router(container: Container) -> APIRouter:
                 container.store.layout.control_root / "indexes" / "task-index.json"
             )
             items = [
-                item
+                _task_summary(container, item)
                 for item in index["tasks"]
                 if status is None or item["status"] == status
             ]
@@ -231,7 +333,6 @@ def build_v1_router(container: Container) -> APIRouter:
                 cursor=cursor,
                 order=order,
             )
-            page["items"] = [_task_summary(container, item) for item in page["items"]]
             return {
                 "schema_version": "1.0",
                 **page,
@@ -930,8 +1031,20 @@ def _task_summary(container: Container, index_item: dict[str, Any]) -> dict[str,
         key=lambda item: (item["created_at"], item["sequence"], item["inbox_id"]),
         reverse=True,
     )
+    intake = container.store.task_intake.get(task_id, task_id)
+    navigation = container.store.task_navigation.get(task_id, task_id)
+    projected_updated_at = max(
+        item
+        for item in (
+            index_item["updated_at"],
+            None if intake is None else intake["updated_at"],
+            None if navigation is None else navigation["updated_at"],
+        )
+        if item is not None
+    )
     return {
         **deepcopy(index_item),
+        "updated_at": projected_updated_at,
         "goal": task["goal"],
         "start_policy": task["start_policy"],
         "stage_count": 0 if plan is None else len(plan["stages"]),
@@ -944,6 +1057,10 @@ def _task_summary(container: Container, index_item: dict[str, Any]) -> dict[str,
             for stage in ([] if plan is None else plan["stages"])
         ),
         "latest_notification": deepcopy(notifications[0]) if notifications else None,
+        "pinned_at": None if navigation is None else navigation["pinned_at"],
+        "archived_at": None if navigation is None else navigation["archived_at"],
+        "presentation_revision": container.store.task_navigation.revision(task_id, task_id),
+        "intake_status": None if intake is None else intake["status"],
     }
 
 

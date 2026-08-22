@@ -39,7 +39,7 @@ export function AppRouter(): React.JSX.Element {
           <Route path="/tasks/new" element={<TaskIntakePage />} />
           <Route
             path="/tasks/:taskId/master"
-            element={<FoundationPage view="master" />}
+            element={<TaskIntakePage />}
           />
           <Route
             path="/tasks/:taskId/board"

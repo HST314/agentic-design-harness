@@ -1,0 +1,221 @@
+import { expect, test } from "@playwright/test";
+
+test.beforeEach(async ({ page }) => {
+  let created = false;
+  let submitted = false;
+  let intakeRevision = 1;
+  let taskRevision = 1;
+  let uploaded = false;
+  let historyTitle = "品牌手册更新";
+  let historyPinned: string | null = null;
+  let historyArchived: string | null = null;
+  let historyPresentationRevision = 1;
+
+  const task = () => ({
+    schema_version: "1.0",
+    task_id: "task_e2e_intake",
+    title: "秋季发布会三套主视觉方向",
+    goal: "秋季发布会三套主视觉方向",
+    master_owner: "master_default",
+    start_policy: "manual",
+    status: "DRAFT",
+    created_at: "2026-08-22T10:00:00Z",
+    updated_at: "2026-08-22T10:00:00Z",
+    input_manifest: uploaded ? "inputs/manifests/selected_task_e2e_intake.json" : "inputs/manifests/intake-empty.json",
+    plan_revision: 1,
+  });
+  const asset = {
+    asset_id: "a_imp_e2e",
+    filename: "brief.md",
+    mime_type: "text/markdown",
+    size_bytes: 22,
+    sha256: "a".repeat(64),
+    description: "发布会核心需求",
+    created_at: "2026-08-22T10:01:00Z",
+    integrity_status: "VERIFIED",
+  };
+  const response = () => ({
+    schema_version: "1.0",
+    intake: {
+      schema_version: "1.0",
+      task_id: "task_e2e_intake",
+      prompt: "秋季发布会三套主视觉方向",
+      upload_session: {
+        session_id: "upload_e2e",
+        status: submitted ? "LOCKED" : "OPEN",
+        accepted_mime_types: ["image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain", "text/markdown"],
+        max_files: 20,
+        max_total_bytes: 209715200,
+      },
+      asset_ids: uploaded ? [asset.asset_id] : [],
+      status: submitted ? "SUBMITTED" : "DRAFT",
+      start_policy: "manual",
+      revision: intakeRevision,
+      created_at: "2026-08-22T10:00:00Z",
+      updated_at: "2026-08-22T10:01:00Z",
+      submitted_at: submitted ? "2026-08-22T10:02:00Z" : null,
+    },
+    intake_revision: intakeRevision,
+    task: task(),
+    task_revision: taskRevision,
+    navigation: {
+      schema_version: "1.0",
+      task_id: "task_e2e_intake",
+      pinned_at: null,
+      archived_at: null,
+      display_order: 0,
+      revision: 1,
+      updated_at: "2026-08-22T10:00:00Z",
+    },
+    presentation_revision: 1,
+    assets: uploaded ? [asset] : [],
+  });
+
+  await page.route("**/readyz", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ready" }) });
+  });
+  await page.route("**/api/v1/tasks", async (route) => {
+    const items = [{
+      task_id: "task_history",
+      status: "SUCCEEDED",
+      title: historyTitle,
+      updated_at: "2026-08-21T08:00:00Z",
+      revision: 2,
+      pinned_at: historyPinned,
+      archived_at: historyArchived,
+      presentation_revision: historyPresentationRevision,
+    }];
+    if (created) items.unshift({
+      task_id: "task_e2e_intake",
+      status: "DRAFT",
+      title: task().title,
+      updated_at: "2026-08-22T10:01:00Z",
+      revision: taskRevision,
+      pinned_at: null,
+      archived_at: null,
+      presentation_revision: 1,
+    });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", items }) });
+  });
+  await page.route("**/api/v1/task-intakes", async (route) => {
+    created = true;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response()) });
+  });
+  await page.route("**/api/v1/task-intakes/task_e2e_intake/assets", async (route) => {
+    expect(route.request().headers()["content-type"]).toContain("multipart/form-data; boundary=");
+    expect(route.request().postDataBuffer()?.toString()).toContain("brief.md");
+    uploaded = true;
+    intakeRevision += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        intake: response().intake,
+        intake_revision: intakeRevision,
+        asset,
+      }),
+    });
+  });
+  await page.route("**/api/v1/task-intakes/task_e2e_intake/submit", async (route) => {
+    submitted = true;
+    intakeRevision += 1;
+    taskRevision += 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response()) });
+  });
+  await page.route("**/api/v1/task-intakes/task_e2e_intake", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response()) });
+  });
+  await page.route("**/api/v1/task-intakes/task_history", async (route) => {
+    await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { message: "No intake" } }) });
+  });
+  await page.route("**/api/v1/tasks/task_history/presentation", async (route) => {
+    const body = route.request().postDataJSON() as { title?: string; pinned?: boolean; archived?: boolean };
+    if (body.title !== undefined) historyTitle = body.title;
+    if (body.pinned !== undefined) historyPinned = body.pinned ? "2026-08-22T10:03:00Z" : null;
+    if (body.archived !== undefined) {
+      historyArchived = body.archived ? "2026-08-22T10:04:00Z" : null;
+      if (body.archived) historyPinned = null;
+    }
+    historyPresentationRevision += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        task: { ...task(), task_id: "task_history", title: historyTitle, status: "SUCCEEDED" },
+        task_revision: 3,
+        navigation: {
+          schema_version: "1.0",
+          task_id: "task_history",
+          pinned_at: historyPinned,
+          archived_at: historyArchived,
+          display_order: 0,
+          revision: historyPresentationRevision,
+          updated_at: "2026-08-22T10:04:00Z",
+        },
+        presentation_revision: historyPresentationRevision,
+      }),
+    });
+  });
+});
+
+test("creates, uploads, refreshes and locks a task intake entirely through the workbench", async ({ page }) => {
+  await page.goto("/tasks/new");
+  const createButton = page.getByRole("button", { name: "创建草稿" });
+  await expect(createButton).toBeDisabled();
+  await page.getByLabel("Prompt").fill("秋季发布会三套主视觉方向");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "brief.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from("# 秋季发布会需求\n"),
+  });
+  await page.getByLabel("文件说明（可选）").fill("发布会核心需求");
+  await page.getByRole("button", { name: "创建草稿并上传 1 个文件" }).click();
+
+  await expect(page).toHaveURL(/\/tasks\/task_e2e_intake\/master$/);
+  await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
+  await expect(page.getByText(/已安全上传/)).toBeVisible();
+  await expect(page.getByRole("link", { name: /秋季发布会三套主视觉方向/ })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByText("服务端草稿已恢复")).toBeVisible();
+  await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "提交任务材料" }).click();
+  await expect(page.getByText("首次材料已锁定")).toBeVisible();
+  await expect(page.getByText("已进入 Master 分析阶段")).toBeVisible();
+  await expect(page.getByText("添加图片 / PDF / TXT / MD")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.getByText("首次材料已锁定")).toBeVisible();
+  await expect(page.getByRole("button", { name: "提交任务材料" })).toHaveCount(0);
+});
+
+test("validates files locally and manages rename, pin and archive presentation state", async ({ page }) => {
+  await page.goto("/tasks/new");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "slides.pptx",
+    mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    buffer: Buffer.from("not accepted"),
+  });
+  await expect(page.getByRole("alert")).toContainText("仅支持图片、PDF、TXT 和 MD");
+
+  await page.getByLabel("打开 品牌手册更新 的任务操作").click();
+  await page.getByRole("menuitem", { name: "重命名" }).click();
+  await page.getByLabel("任务标题").fill("品牌规范 2026");
+  await page.getByRole("button", { name: "保存标题" }).click();
+  await expect(page.getByRole("link", { name: /品牌规范 2026/ })).toBeVisible();
+
+  await page.getByLabel("打开 品牌规范 2026 的任务操作").click();
+  await page.getByRole("menuitem", { name: "置顶" }).click();
+  await expect(page.getByRole("region", { name: "置顶" })).toContainText("品牌规范 2026");
+
+  await page.getByLabel("打开 品牌规范 2026 的任务操作").click();
+  await page.getByRole("menuitem", { name: "归档" }).click();
+  await expect(page.getByRole("link", { name: /品牌规范 2026/ })).toHaveCount(0);
+  await page.getByRole("searchbox", { name: "搜索主任务" }).fill("品牌规范");
+  await expect(page.getByRole("region", { name: "归档搜索结果" })).toContainText("品牌规范 2026");
+  await page.getByLabel("打开 品牌规范 2026 的任务操作").click();
+  await page.getByRole("menuitem", { name: "恢复" }).click();
+  await expect(page.getByRole("link", { name: /品牌规范 2026/ })).toBeVisible();
+});
