@@ -28,7 +28,10 @@ class ImageAgentReleaseLockTests(unittest.TestCase):
         self.assertEqual(len(release.dependency_files), 4)
         self.assertEqual(
             release.runtime_dependency_tree_sha256,
-            "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
+            {
+                "linux-x86_64": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
+                "windows-amd64": "b683e0e9bc14d7fb53203dd7c264e4741cf415642a7a0e5ef177ddba6dda607e",
+            }[runtime_platform_key()],
         )
         self.assertTrue(all(len(item.sha256) == 64 for item in release.dependency_files))
 
