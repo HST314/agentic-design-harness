@@ -314,8 +314,8 @@ function NewTaskIntakePage(): React.JSX.Element {
         <div className="workbench-intake-footer">
           <fieldset>
             <legend>启动方式</legend>
-            <label><input type="radio" name="start-policy" value="manual" checked={startPolicy === "manual"} onChange={() => setStartPolicy("manual")} />确认计划后运行</label>
-            <label><input type="radio" name="start-policy" value="auto" checked={startPolicy === "auto"} onChange={() => setStartPolicy("auto")} />计划校验后自动运行</label>
+            <label><input type="radio" name="start-policy" value="manual" checked={startPolicy === "manual"} onChange={() => setStartPolicy("manual")} />人工确认计划后运行</label>
+            <label><input type="radio" name="start-policy" value="auto" checked={startPolicy === "auto"} onChange={() => setStartPolicy("auto")} />自动生成计划，人工确认后运行</label>
           </fieldset>
           <button type="submit" className="workbench-primary-button" disabled={create.isPending || !prompt.trim()}>
             {create.isPending ? "正在创建草稿…" : uploads.length ? `创建草稿并上传 ${uploads.length} 个文件` : "创建草稿"}
@@ -494,7 +494,7 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
           {remove.isError ? <p className="workbench-inline-error" role="alert">{remove.error.message}</p> : null}
         </section>
         <div className="workbench-intake-footer">
-          <div><span className="workbench-footer-label">启动方式</span><strong>{data.intake.start_policy === "manual" ? "确认计划后运行" : "计划校验后自动运行"}</strong></div>
+          <div><span className="workbench-footer-label">启动方式</span><strong>{data.intake.start_policy === "manual" ? "人工确认计划后运行" : "自动生成计划，人工确认后运行"}</strong></div>
           {!locked ? <button type="button" className="workbench-primary-button" disabled={activeUploads || failedUploads || submit.isPending || remove.isPending} onClick={() => submit.mutate()}>{submit.isPending ? "正在锁定并提交…" : "提交任务材料"}</button> : null}
         </div>
         {failedUploads ? <p className="workbench-inline-error" role="alert">请重试或移除失败文件后再提交。</p> : null}
