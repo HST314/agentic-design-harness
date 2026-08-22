@@ -458,15 +458,13 @@ function ProposalCard({
       {proposal.status === "PENDING_CONFIRMATION" ? (
         <footer className="master-proposal__actions">
           <div>
-            <strong>{startPolicy === "manual" ? "人工确认模式" : "自动运行模式"}</strong>
-            <span>{startPolicy === "manual" ? "确认前不会创建或启动运行实例。" : "系统会执行同样的预算、凭据与 Adapter 门禁。"}</span>
+            <strong>{startPolicy === "manual" ? "人工确认模式" : "自动规划 · 人工启动"}</strong>
+            <span>{startPolicy === "manual" ? "审阅或调整计划后，由你确认才会创建或启动实例。" : "计划已自动生成；审阅或调整后，仍需由你确认才会创建或启动实例。"}</span>
           </div>
-          {startPolicy === "manual" ? (
-            <div>
-              <button type="button" className="workbench-secondary-button" onClick={onAdjust}>要求调整</button>
-              <button type="button" className="workbench-primary-button" disabled={confirming} onClick={(event) => onConfirm(event.currentTarget)}>{confirming ? "正在确认…" : "确认并运行"}</button>
-            </div>
-          ) : <span className="master-auto-badge"><Icon name="status" />自动校验中</span>}
+          <div>
+            <button type="button" className="workbench-secondary-button" onClick={onAdjust}>要求调整</button>
+            <button type="button" className="workbench-primary-button" disabled={confirming} onClick={(event) => onConfirm(event.currentTarget)}>{confirming ? "正在确认…" : "确认并运行"}</button>
+          </div>
         </footer>
       ) : null}
     </section>
@@ -475,12 +473,14 @@ function ProposalCard({
 
 function ConfirmDialog({
   proposal,
+  taskRevision,
   open,
   pending,
   onCancel,
   onConfirm,
 }: {
   proposal: ContractPlanProposal | null;
+  taskRevision: number | null;
   open: boolean;
   pending: boolean;
   onCancel: () => void;
@@ -500,17 +500,17 @@ function ConfirmDialog({
       requestAnimationFrame(() => returnFocusRef.current?.focus());
     }
   }, [open]);
-  if (!proposal) return null;
+  if (!proposal || taskRevision === null) return null;
   return (
     <dialog ref={ref} className="master-confirm-dialog" aria-labelledby="master-confirm-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}>
       <div className="workbench-drawer__header"><div><p className="workbench-eyebrow">最终确认</p><h2 id="master-confirm-title">启动计划 r{proposal.revision}</h2></div></div>
       <div className="master-confirm-dialog__body">
         <p>确认后将绑定当前计划、全部任务卡和主任务的准确修订，分配凭据并启动满足门禁的实例。任一版本变化都会拒绝启动并要求重新审阅。</p>
-        <dl><div><dt>计划修订</dt><dd>r{proposal.revision}</dd></div><div><dt>任务卡</dt><dd>{proposal.execution_cards.length}</dd></div><div><dt>预计实例</dt><dd>{proposal.work_items.length}</dd></div></dl>
+        <dl><div><dt>主任务修订</dt><dd>r{taskRevision}</dd></div><div><dt>计划修订</dt><dd>r{proposal.revision}</dd></div><div><dt>任务卡</dt><dd>{proposal.execution_cards.length}</dd></div><div><dt>预计实例</dt><dd>{proposal.work_items.length}</dd></div></dl>
         <ul className="master-confirm-dialog__cards" aria-label="确认的任务卡修订">
-          {proposal.execution_cards.map((card) => <li key={card.card_id}><code>{card.card_id}</code><strong>r{card.revision}</strong></li>)}
+          {proposal.execution_cards.map((card) => <li key={card.card_id}><span><code>{card.card_id}</code><small>实例 {card.instance_id}</small></span><strong>r{card.revision}</strong></li>)}
         </ul>
-        <p className="master-confirm-dialog__warning"><Icon name="status" />运行真实模型可能产生费用；启动仍受凭据、预算与 Adapter 服务端门禁约束。</p>
+        <p className="master-confirm-dialog__warning"><Icon name="status" />点击“确认并启动”表示你已知晓本次运行可能产生真实模型费用；启动仍受凭据、预算与 Adapter 服务端门禁约束。</p>
         <div className="workbench-dialog-actions">
           <button type="button" className="workbench-secondary-button" disabled={pending} onClick={onCancel}>返回审阅</button>
           <button type="button" className="workbench-primary-button" disabled={pending} onClick={onConfirm}>{pending ? "正在启动…" : "确认并启动"}</button>
@@ -691,7 +691,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         onCancel={() => { if (!reviseCard.isPending) closeCardEditor(); }}
         onSave={(editable) => { if (editingCard) reviseCard.mutate({ card: editingCard, editable }); }}
       />
-      <ConfirmDialog proposal={confirmReview?.proposal ?? null} open={confirmReview !== null} pending={confirm.isPending} onCancel={closeConfirmReview} onConfirm={() => confirm.mutate()} />
+      <ConfirmDialog proposal={confirmReview?.proposal ?? null} taskRevision={confirmReview?.taskRevision ?? null} open={confirmReview !== null} pending={confirm.isPending} onCancel={closeConfirmReview} onConfirm={() => confirm.mutate()} />
     </section>
   );
 }

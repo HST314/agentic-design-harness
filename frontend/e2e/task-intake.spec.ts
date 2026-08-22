@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
   let created = false;
+  let startPolicy: "manual" | "auto" = "manual";
   let submitted = false;
   let intakeRevision = 1;
   let taskRevision = 1;
@@ -17,7 +18,7 @@ test.beforeEach(async ({ page }) => {
     title: "秋季发布会三套主视觉方向",
     goal: "秋季发布会三套主视觉方向",
     master_owner: "master_default",
-    start_policy: "manual",
+    start_policy: startPolicy,
     status: "DRAFT",
     created_at: "2026-08-22T10:00:00Z",
     updated_at: "2026-08-22T10:00:00Z",
@@ -49,7 +50,7 @@ test.beforeEach(async ({ page }) => {
       },
       asset_ids: uploaded ? [asset.asset_id] : [],
       status: submitted ? "SUBMITTED" : "DRAFT",
-      start_policy: "manual",
+      start_policy: startPolicy,
       revision: intakeRevision,
       created_at: "2026-08-22T10:00:00Z",
       updated_at: "2026-08-22T10:01:00Z",
@@ -135,6 +136,8 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", items }) });
   });
   await page.route("**/api/v1/task-intakes", async (route) => {
+    const body = route.request().postDataJSON() as { start_policy: "manual" | "auto" };
+    startPolicy = body.start_policy;
     created = true;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response()) });
   });
@@ -228,6 +231,16 @@ test("creates, uploads, refreshes and locks a task intake entirely through the w
   await page.reload();
   await expect(page.getByText("引用已有资源（创建提交后不可追加上传）")).toBeVisible();
   await expect(page.getByRole("button", { name: "提交任务材料" })).toHaveCount(0);
+});
+
+test("describes auto planning as requiring human confirmation before execution", async ({ page }) => {
+  await page.goto("/tasks/new");
+  await page.getByLabel("自动生成计划，人工确认后运行").check();
+  await page.getByLabel("Prompt").fill("秋季发布会三套主视觉方向");
+  await page.getByRole("button", { name: "创建草稿" }).click();
+
+  await expect(page).toHaveURL(/\/tasks\/task_e2e_intake\/master$/);
+  await expect(page.getByText("自动生成计划，人工确认后运行", { exact: true })).toBeVisible();
 });
 
 test("validates files locally and manages rename, pin and archive presentation state", async ({ page }) => {
