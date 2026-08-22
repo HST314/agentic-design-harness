@@ -116,14 +116,20 @@ class PinnedRuntimeArtifact:
     source_root: Path
     entrypoint_relpath: str
 
+    def verify_current(self) -> None:
+        """Fail before side effects if a portable path-backed pin has changed."""
+
+        if self.source_descriptor is None:
+            current_manifest = tuple(_artifact_manifest(self.source_root))
+            if digest_json(list(current_manifest)) != self.identity.source_manifest_sha256:
+                _artifact_invalid("The runtime artifact changed before process creation.")
+
     def execution_command(self, command: list[str]) -> list[str]:
         configured_entrypoint = str(
             self.source_root / PurePosixPath(self.entrypoint_relpath)
         )
         if self.source_descriptor is None:
-            current_manifest = tuple(_artifact_manifest(self.source_root))
-            if digest_json(list(current_manifest)) != self.identity.source_manifest_sha256:
-                _artifact_invalid("The runtime artifact changed before process creation.")
+            self.verify_current()
             if configured_entrypoint not in command:
                 _artifact_invalid("The process command does not use the artifact entrypoint.")
             return command
@@ -672,7 +678,8 @@ class PortAllocator:
 
 def port_is_available(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
-        candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if os.name != "nt":
+            candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             candidate.bind((host, port))
         except OSError:

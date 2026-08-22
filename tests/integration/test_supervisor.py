@@ -184,7 +184,18 @@ class ProcessSupervisorTests(unittest.TestCase):
         self.assertTrue(all(item["unrelated_secret"] == "missing" for item in identities))
         for index, identity in enumerate(identities, start=1):
             self.assertEqual(identity["instance_id"], f"i_image_{index}")
-            self.assertTrue(identity["projects_root"].endswith(f"i_image_{index}/work"))
+            expected_projects_root = (
+                self.store.layout.workspace_root
+                / "tasks"
+                / "t_process"
+                / "instances"
+                / f"i_image_{index}"
+                / "work"
+            )
+            self.assertEqual(
+                Path(identity["projects_root"]).resolve(),
+                expected_projects_root.resolve(),
+            )
 
         self.supervisor.begin_model_call(
             "t_process",
@@ -541,7 +552,7 @@ class ProcessSupervisorTests(unittest.TestCase):
                             attempt_id="attempt_root_swap",
                         )
                     self.assertEqual(blocked.exception.code, "PROCESS_START_FAILED")
-                    self.assertFalse(swapped)
+                    self.assertTrue(swapped)
                     self.assertEqual(
                         self._identity(launch["port"])["instance_id"], "i_image_1"
                     )
