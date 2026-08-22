@@ -19,7 +19,8 @@ from ..services.asset_files import (
     file_digest,
     stream_digest,
 )
-from ..storage.atomic import fsync_directory
+from ..storage.atomic import fsync_directory, set_permissions
+from ..storage.safe_open import open_regular_readonly
 
 _PNG_PARAMETERS = {
     "format": "PNG",
@@ -37,6 +38,14 @@ def stage_final_delivery(
     *,
     expected_sha256: str,
 ) -> None:
+    if os.name == "nt":
+        _stage_final_delivery_portable(
+            project_root,
+            relative,
+            destination,
+            expected_sha256=expected_sha256,
+        )
+        return
     directory_flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -90,7 +99,7 @@ def stage_final_delivery(
             temporary.unlink(missing_ok=True)
         else:
             os.replace(temporary, destination)
-            os.chmod(destination, 0o640)
+            set_permissions(destination, 0o640)
     except HarnessError:
         raise
     except OSError:
@@ -101,6 +110,60 @@ def stage_final_delivery(
     finally:
         temporary.unlink(missing_ok=True)
         for descriptor in (temporary_fd, source_fd, delivery_fd, root_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _stage_final_delivery_portable(
+    project_root: Path,
+    relative: PurePosixPath,
+    destination: Path,
+    *,
+    expected_sha256: str,
+) -> None:
+    source_path = project_root.joinpath(*relative.parts)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.stage.tmp")
+    source_fd = temporary_fd = -1
+    try:
+        source_fd = open_regular_readonly(source_path, trusted_root=project_root)
+        digest = hashlib.sha256()
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        with os.fdopen(source_fd, "rb") as source, os.fdopen(temporary_fd, "wb") as output:
+            source_fd = temporary_fd = -1
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if digest.hexdigest() != expected_sha256:
+            raise HarnessError("ASSET_CORRUPTED", "The finalized Image delivery digest is invalid.")
+        if destination.exists():
+            current_fd = open_regular_readonly(destination, trusted_root=destination.parent)
+            with os.fdopen(current_fd, "rb") as current:
+                current_digest = hashlib.sha256(current.read()).hexdigest()
+            if current_digest != expected_sha256:
+                raise HarnessError(
+                    "ASSET_CORRUPTED", "The staged Image delivery changed after collection."
+                )
+            temporary.unlink(missing_ok=True)
+        else:
+            os.replace(temporary, destination)
+            set_permissions(destination, 0o640)
+    except HarnessError:
+        raise
+    except OSError:
+        raise HarnessError(
+            "ASSET_VALIDATION_FAILED",
+            "The finalized Image delivery could not be staged safely.",
+        ) from None
+    finally:
+        temporary.unlink(missing_ok=True)
+        for descriptor in (temporary_fd, source_fd):
             if descriptor >= 0:
                 os.close(descriptor)
 
@@ -150,7 +213,7 @@ def normalize_image_delivery(
                 dir=destination.parent,
             )
             temporary = Path(temporary_name)
-            os.fchmod(descriptor, 0o600)
+            set_permissions(temporary, 0o600, descriptor=descriptor)
             with os.fdopen(descriptor, "w+b") as output_stream:
                 with Image.open(source_stream) as opened:
                     width, height = opened.size
@@ -178,7 +241,7 @@ def normalize_image_delivery(
                 os.fsync(output_stream.fileno())
 
         assert temporary is not None
-        os.chmod(temporary, 0o640)
+        set_permissions(temporary, 0o640)
         derived_size, derived_sha256 = file_digest(temporary)
         if detect_mime(temporary, destination.name) != "image/png":
             raise HarnessError(
@@ -195,7 +258,7 @@ def normalize_image_delivery(
                     "The derived Image delivery changed after conversion.",
                 ) from None
         else:
-            os.chmod(destination, 0o640)
+            set_permissions(destination, 0o640)
             fsync_directory(destination.parent)
         return {
             "path": destination,

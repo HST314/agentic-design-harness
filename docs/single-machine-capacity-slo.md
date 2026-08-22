@@ -2,7 +2,7 @@
 
 ## 适用边界
 
-本 SLO 只覆盖单进程、单写者、Linux/POSIX、本地支持 `fsync` 的 SSD。参考机器为 4 个独占 x86_64 vCPU、16 GiB 内存；网络文件系统、共享卷、多进程写入和跨主机 Agent 不在承诺范围内。
+本 SLO 覆盖单进程、单写者、Linux 或 Windows、本地 SSD。Linux 使用文件与目录 `fsync`，Windows 使用已刷新文件加 NTFS 原子替换；网络文件系统、共享卷、多进程写入和跨主机 Agent 不在承诺范围内。参考机器为 4 个独占 x86_64 vCPU、16 GiB 内存。
 
 支持包络定义在 `config/single-machine-capacity-slo.json`：最多 1,000 个保留任务、每任务 25 个控制面事件、100 个活动任务、30 个并发专业 Agent 实例、10 GiB 控制面元数据。单任务资产仍受运行配置中的文件/任务字节上限约束，不计入本存储基准。
 

@@ -14,12 +14,19 @@ from typing import Any, BinaryIO, NoReturn, cast
 from urllib.parse import quote
 
 from ..core.errors import HarnessError
-from ..storage.atomic import atomic_write_json, digest_json, fsync_directory, read_json
+from ..storage.atomic import (
+    atomic_write_json,
+    digest_json,
+    fsync_directory,
+    read_json,
+    set_permissions,
+)
 from ..storage.layout import validate_identifier
 from ..storage.locks import FileLock
 from ..storage.ndjson import append_record, recover_records
 from ..storage.paths import normalized_relative_path, resolve_task_path
 from ..storage.repository import utc_now
+from ..storage.safe_open import is_link_or_reparse, open_regular_readonly
 from ..storage.store import FileStateStore
 from .asset_browser import (
     browser_roots,
@@ -116,9 +123,16 @@ class AssetService(AssetRecoveryMixin):
         idempotency_key: str,
         crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
-        if source_path.is_symlink() or not source_path.is_file():
+        if (
+            not source_path.is_file()
+            or (source_path.exists() and is_link_or_reparse(source_path))
+        ):
             self._invalid("The import source must be a regular non-symlink file.")
-        descriptor = os.open(source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = (
+            open_regular_readonly(source_path)
+            if os.name == "nt"
+            else os.open(source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        )
         with os.fdopen(descriptor, "rb") as stream:
             return self._import_stream(
                 task_id,
@@ -818,9 +832,13 @@ class AssetService(AssetRecoveryMixin):
         )
 
     def _copy_file(self, source: Path, destination: Path, limit: int) -> tuple[int, str]:
-        if source.is_symlink() or not source.is_file():
+        if not source.is_file() or (source.exists() and is_link_or_reparse(source)):
             self._invalid("The source must be a regular non-symlink file.")
-        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = (
+            open_regular_readonly(source)
+            if os.name == "nt"
+            else os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        )
         with os.fdopen(descriptor, "rb") as stream:
             return self._copy_stream(stream, destination, limit)
 
@@ -833,7 +851,7 @@ class AssetService(AssetRecoveryMixin):
         size = 0
         digest = hashlib.sha256()
         try:
-            os.fchmod(descriptor, 0o600)
+            set_permissions(temporary, 0o600, descriptor=descriptor)
             with os.fdopen(descriptor, "wb") as output:
                 while chunk := stream.read(1024 * 1024):
                     size += len(chunk)
@@ -844,7 +862,7 @@ class AssetService(AssetRecoveryMixin):
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, destination)
-            os.chmod(destination, 0o640)
+            set_permissions(destination, 0o640)
             fsync_directory(destination.parent)
         except BaseException:
             temporary.unlink(missing_ok=True)

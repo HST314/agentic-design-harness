@@ -15,7 +15,9 @@ from ..core.errors import HarnessError
 from ..storage.atomic import atomic_write_json, digest_json, read_json
 from ..storage.locks import FileLock
 from ..storage.repository import utc_now
+from ..storage.safe_open import is_link_or_reparse, open_regular_readonly
 from ..storage.store import FileStateStore
+from .process_control import process_tree_exists
 
 ACTIVE_LAUNCH_STATES = frozenset({"PREPARED", "STARTING", "RUNNING"})
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
@@ -43,7 +45,7 @@ class AgentRuntimeArtifact:
             _artifact_invalid("The runtime artifact id or revision is invalid.")
         if (
             not self.source_root.is_absolute()
-            or self.source_root.is_symlink()
+            or (self.source_root.exists() and is_link_or_reparse(self.source_root))
         ):
             _artifact_invalid("The runtime artifact root must be an absolute directory.")
         try:
@@ -63,7 +65,10 @@ class AgentRuntimeArtifact:
             _artifact_relative_path(relative_path)
         if self.environment_root is not None and (
             not self.environment_root.is_absolute()
-            or self.environment_root.is_symlink()
+            or (
+                self.environment_root.exists()
+                and is_link_or_reparse(self.environment_root)
+            )
             or not self.environment_root.is_dir()
         ):
             _artifact_invalid("The runtime environment root is invalid.")
@@ -106,7 +111,7 @@ class PinnedRuntimeArtifact:
     """An inspected artifact root held open through process creation."""
 
     identity: AgentRuntimeIdentity
-    source_descriptor: int
+    source_descriptor: int | None
     source_root: Path
     entrypoint_relpath: str
 
@@ -114,6 +119,13 @@ class PinnedRuntimeArtifact:
         configured_entrypoint = str(
             self.source_root / PurePosixPath(self.entrypoint_relpath)
         )
+        if self.source_descriptor is None:
+            current_manifest = tuple(_artifact_manifest(self.source_root))
+            if digest_json(list(current_manifest)) != self.identity.source_manifest_sha256:
+                _artifact_invalid("The runtime artifact changed before process creation.")
+            if configured_entrypoint not in command:
+                _artifact_invalid("The process command does not use the artifact entrypoint.")
+            return command
         descriptor_entrypoint = (
             f"/proc/self/fd/{self.source_descriptor}/{self.entrypoint_relpath}"
         )
@@ -126,9 +138,9 @@ class PinnedRuntimeArtifact:
         return rewritten
 
     def close(self) -> None:
-        if self.source_descriptor >= 0:
+        if self.source_descriptor is not None and self.source_descriptor >= 0:
             os.close(self.source_descriptor)
-            self.source_descriptor = -1
+            self.source_descriptor = None
 
     def __enter__(self) -> PinnedRuntimeArtifact:
         return self
@@ -219,16 +231,29 @@ def pin_runtime_artifact(spec: ProcessSpec) -> PinnedRuntimeArtifact:
 
     spec.validate()
     artifact = spec.runtime_artifact
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
     try:
-        descriptor = os.open(artifact.source_root, flags)
-    except OSError:
-        _artifact_invalid("The runtime artifact root cannot be opened safely.")
-    try:
-        root_stat = os.fstat(descriptor)
-        if root_stat.st_mode & 0o222:
+        try:
+            if os.name == "nt":
+                root_stat = artifact.source_root.lstat()
+                if is_link_or_reparse(artifact.source_root, root_stat):
+                    _artifact_invalid("The runtime artifact root cannot be opened safely.")
+                manifest = tuple(_artifact_manifest(artifact.source_root))
+            else:
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                descriptor = os.open(artifact.source_root, flags)
+                root_stat = os.fstat(descriptor)
+                manifest = tuple(_artifact_manifest(descriptor))
+        except OSError:
+            _artifact_invalid("The runtime artifact root cannot be opened safely.")
+        if not stat.S_ISDIR(root_stat.st_mode):
+            _artifact_invalid("The runtime artifact root cannot be opened safely.")
+        if _artifact_entry_is_writable(root_stat):
             _artifact_invalid("The runtime artifact root must be read-only.")
-        manifest = tuple(_artifact_manifest(descriptor))
         manifest_by_path = {item["path"]: item for item in manifest}
         required_paths = {artifact.entrypoint_relpath, *artifact.dependency_lock_relpaths}
         if not required_paths.issubset(manifest_by_path):
@@ -270,13 +295,17 @@ def pin_runtime_artifact(spec: ProcessSpec) -> PinnedRuntimeArtifact:
             entrypoint_relpath=artifact.entrypoint_relpath,
         )
     except BaseException:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
         raise
 
 
-def _artifact_manifest(descriptor: int) -> list[dict[str, Any]]:
+def _artifact_manifest(root: int | Path) -> list[dict[str, Any]]:
     manifest: list[dict[str, Any]] = []
-    _walk_artifact(descriptor, PurePosixPath(), manifest)
+    if isinstance(root, int):
+        _walk_artifact(root, PurePosixPath(), manifest)
+    else:
+        _walk_artifact_path(root, PurePosixPath(), manifest)
     if not manifest:
         _artifact_invalid("The runtime artifact cannot be empty.")
     return manifest
@@ -307,7 +336,7 @@ def _walk_artifact(
         try:
             before = os.fstat(child_fd)
             relative = prefix / name
-            if before.st_mode & 0o222:
+            if _artifact_entry_is_writable(before):
                 _artifact_invalid("Every runtime artifact entry must be read-only.")
             if stat.S_ISDIR(before.st_mode):
                 _walk_artifact(child_fd, relative, manifest)
@@ -345,6 +374,67 @@ def _walk_artifact(
             os.close(child_fd)
 
 
+def _walk_artifact_path(
+    root: Path,
+    prefix: PurePosixPath,
+    manifest: list[dict[str, Any]],
+) -> None:
+    current = root / Path(*prefix.parts)
+    try:
+        entries = sorted(os.scandir(current), key=lambda entry: entry.name)
+    except OSError:
+        _artifact_invalid("The runtime artifact directory cannot be enumerated.")
+    for entry in entries:
+        path = Path(entry.path)
+        relative = prefix / entry.name
+        try:
+            before = entry.stat(follow_symlinks=False)
+            if is_link_or_reparse(path, before):
+                _artifact_invalid(
+                    "The runtime artifact contains a symlink or unreadable entry."
+                )
+            if _artifact_entry_is_writable(before):
+                _artifact_invalid("Every runtime artifact entry must be read-only.")
+            if stat.S_ISDIR(before.st_mode):
+                _walk_artifact_path(root, relative, manifest)
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                _artifact_invalid("Runtime artifacts may contain only directories and files.")
+            descriptor = open_regular_readonly(path, trusted_root=root)
+            try:
+                digest = hashlib.sha256()
+                with os.fdopen(os.dup(descriptor), "rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            ):
+                _artifact_invalid("A runtime artifact file changed during inspection.")
+            manifest.append(
+                {
+                    "path": relative.as_posix(),
+                    "device": before.st_dev,
+                    "inode": before.st_ino,
+                    "size_bytes": before.st_size,
+                    "mode": stat.S_IMODE(before.st_mode),
+                    "sha256": digest.hexdigest(),
+                }
+            )
+        except OSError:
+            _artifact_invalid("The runtime artifact contains a symlink or unreadable entry.")
+
+
 def _artifact_relative_path(value: str) -> PurePosixPath:
     candidate = PurePosixPath(value)
     if (
@@ -356,6 +446,17 @@ def _artifact_relative_path(value: str) -> PurePosixPath:
     ):
         _artifact_invalid("A runtime artifact path is invalid.")
     return candidate
+
+
+def _artifact_entry_is_writable(metadata: os.stat_result) -> bool:
+    if os.name == "nt":
+        if stat.S_ISDIR(metadata.st_mode):
+            # The DOS read-only bit on directories does not enforce directory
+            # immutability. Runtime file hashes are the authoritative boundary.
+            return False
+        readonly_flag = getattr(stat, "FILE_ATTRIBUTE_READONLY", 0x1)
+        return not bool(getattr(metadata, "st_file_attributes", 0) & readonly_flag)
+    return bool(metadata.st_mode & 0o222)
 
 
 def _artifact_invalid(message: str) -> NoReturn:
@@ -392,7 +493,11 @@ def validate_launch_identity(
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = (
+            open_regular_readonly(path)
+            if os.name == "nt"
+            else os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        )
         with os.fdopen(descriptor, "rb") as handle:
             while chunk := handle.read(1024 * 1024):
                 digest.update(chunk)
@@ -510,13 +615,7 @@ def port_is_available(host: str, port: int) -> bool:
 
 
 def process_group_exists(process_group_id: int) -> bool:
-    try:
-        os.killpg(process_group_id, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+    return process_tree_exists(process_group_id)
 
 
 def tail_lines(
@@ -540,6 +639,8 @@ def tail_lines(
 
 
 def _open_regular_nofollow(path: Path, *, trusted_root: Path | None) -> int:
+    if os.name == "nt":
+        return open_regular_readonly(path, trusted_root=trusted_root)
     if trusted_root is None:
         descriptor = os.open(
             path,
@@ -585,18 +686,3 @@ def _open_regular_nofollow(path: Path, *, trusted_root: Path | None) -> int:
             "PATH_OUTSIDE_TASK_ROOT", "Only regular no-follow log files may be read."
         )
     return descriptor
-
-
-def process_start_identity(pid: int) -> str | None:
-    try:
-        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        closing = raw.rfind(")")
-        fields = raw[closing + 2 :].split()
-        if len(fields) < 20 or fields[0] == "Z":
-            return None
-        start_ticks = fields[19]
-        boot_path = Path("/proc/sys/kernel/random/boot_id")
-        boot_id = boot_path.read_text(encoding="utf-8").strip() if boot_path.exists() else "boot"
-        return hashlib.sha256(f"{boot_id}:{start_ticks}".encode()).hexdigest()
-    except (OSError, ValueError):
-        return None

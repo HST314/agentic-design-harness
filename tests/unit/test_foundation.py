@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import stat
 import tempfile
 import unittest
@@ -42,8 +43,9 @@ class FoundationTests(unittest.TestCase):
             atomic_write_yaml(yaml_path, {"revision": 2})
             self.assertEqual(json.loads(json_path.read_text()), {"revision": 1})
             self.assertEqual(yaml.safe_load(yaml_path.read_text()), {"revision": 2})
-            self.assertEqual(stat.S_IMODE(json_path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(yaml_path.stat().st_mode), 0o600)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(json_path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(yaml_path.stat().st_mode), 0o600)
 
     def test_log_redaction_handles_keys_and_values(self) -> None:
         value = redact(
@@ -62,9 +64,9 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             HarnessSettings(log_level="verbose")
 
-    def test_runtime_preflight_accepts_linux_and_fails_closed_elsewhere(self) -> None:
+    def test_runtime_preflight_accepts_supported_host_and_rejects_unknown_kernel(self) -> None:
         validate_runtime_platform()
         with patch("harness.runtime.sys.platform", "darwin"), self.assertRaisesRegex(
-            RuntimeError, "Linux /proc semantics"
+            RuntimeError, "supported Linux or Windows kernel"
         ):
             validate_runtime_platform()

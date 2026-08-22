@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import stat
 import tempfile
 import time
@@ -13,7 +12,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
-from harness.services.process_runtime import process_start_identity
+from harness.services.process_control import force_kill_process_tree, process_start_identity
 from harness.storage.repository import utc_now
 
 from tests.e2e import test_g3_real_image_agent as g3_fixtures
@@ -249,7 +248,7 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                         "process"
                     ]
                     container.supervisor.close()
-                    os.killpg(int(victim_process["pid"]), signal.SIGKILL)
+                    force_kill_process_tree(int(victim_process["pid"]))
                     self._wait_for_process_loss(int(victim_process["pid"]))
 
                 recovered_app = create_app(settings)

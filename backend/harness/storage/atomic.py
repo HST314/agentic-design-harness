@@ -26,11 +26,25 @@ def digest_json(value: Any) -> str:
 
 
 def fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        # Windows cannot open a directory through ``os.open``.  The file data
+        # itself is flushed before ``os.replace``; NTFS then provides atomic
+        # name replacement, which is the strongest stdlib guarantee available.
+        return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def set_permissions(path: Path, mode: int, *, descriptor: int | None = None) -> None:
+    """Apply the platform's available private/read-only file protection."""
+
+    if descriptor is not None and hasattr(os, "fchmod"):
+        os.fchmod(descriptor, mode)
+        return
+    os.chmod(path, mode)
 
 
 def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
@@ -43,7 +57,7 @@ def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
     temporary_path = Path(temporary_name)
     descriptor_open = True
     try:
-        os.fchmod(descriptor, mode)
+        set_permissions(temporary_path, mode, descriptor=descriptor)
         handle = os.fdopen(descriptor, "wb", closefd=True)
         descriptor_open = False
         with handle:
@@ -51,7 +65,7 @@ def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
-        os.chmod(path, mode)
+        set_permissions(path, mode)
         fsync_directory(path.parent)
     except BaseException:
         if descriptor_open:

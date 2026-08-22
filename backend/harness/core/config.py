@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ class HarnessSettings(BaseModel):
     lock_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     contracts_root: Path = Path("contracts/v1")
     image_agent_root: Path = Path("../image_agent_mvp")
-    image_agent_python: Path = Path("/usr/bin/python3")
+    image_agent_python: Path = Field(default_factory=lambda: Path(sys.executable))
     image_agent_dependency_root: Path = Path(".runtime/image-agent-deps")
     image_agent_revision: str = Field(
         default="0e559d0153f479c8abefb14613804b8cde486282",

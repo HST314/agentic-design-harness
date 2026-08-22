@@ -7,11 +7,14 @@ on:
 
 jobs:
   backend_matrix:
-    name: backend (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: backend (${{ matrix.os }}, ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONPATH: backend
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -20,14 +23,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --require-hashes -r requirements-dev.txt
-      - run: PYTHONPATH=backend python -m unittest discover -s tests -v
+      - run: python -m unittest discover -s tests -v
       - run: python -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash tests/e2e
       - run: python -m pyright backend/harness
       - run: python -m compileall -q backend/harness scripts tests
       - run: python scripts/secret_scan.py .
       - run: python scripts/check_agent_import_boundary.py backend/harness
       - run: python scripts/generate_frontend_contracts.py --check
-      - run: PYTHONPATH=backend python scripts/benchmark_storage_recovery.py --profile ci
+      - run: python scripts/benchmark_storage_recovery.py --profile ci
       - run: python -m pip_audit -r requirements-runtime.txt --require-hashes --disable-pip --progress-spinner off
 
   backend:
