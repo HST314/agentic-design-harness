@@ -108,6 +108,40 @@ jobs:
       - run: python scripts/dev.py doctor
       - run: python scripts/dev.py start --check --timeout 60
 
+  p6_platform_acceptance:
+    name: P6 acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: python scripts/dev.py setup
+      - name: Run P6 platform acceptance without paid Provider calls
+        run: >-
+          python scripts/run_p6_platform_acceptance.py
+          --output build/p6-platform-${{ runner.os }}.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p6-platform-${{ runner.os }}
+          path: build/p6-platform-${{ runner.os }}.json
+          if-no-files-found: error
+
   documentation:
     name: documentation and examples
     runs-on: ubuntu-latest
@@ -190,7 +224,7 @@ jobs:
   release-gate:
     name: release gate
     if: ${{ always() }}
-    needs: [backend, frontend, launcher, documentation, workbench-real-image, supply-chain]
+    needs: [backend, frontend, launcher, p6_platform_acceptance, documentation, workbench-real-image, supply-chain]
     runs-on: ubuntu-latest
     steps:
       - name: Require every release job to pass
@@ -198,6 +232,7 @@ jobs:
           BACKEND_RESULT: ${{ needs.backend.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           LAUNCHER_RESULT: ${{ needs.launcher.result }}
+          P6_PLATFORM_RESULT: ${{ needs.p6_platform_acceptance.result }}
           DOCUMENTATION_RESULT: ${{ needs.documentation.result }}
           REAL_IMAGE_RESULT: ${{ needs.workbench-real-image.result }}
           SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
@@ -205,6 +240,7 @@ jobs:
           test "$BACKEND_RESULT" = success
           test "$FRONTEND_RESULT" = success
           test "$LAUNCHER_RESULT" = success
+          test "$P6_PLATFORM_RESULT" = success
           test "$DOCUMENTATION_RESULT" = success
           test "$REAL_IMAGE_RESULT" = success
           test "$SUPPLY_CHAIN_RESULT" = success
