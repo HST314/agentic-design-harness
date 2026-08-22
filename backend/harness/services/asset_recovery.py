@@ -15,6 +15,7 @@ from ..storage.locks import FileLock
 from ..storage.ndjson import append_record, recover_records
 from ..storage.paths import normalized_relative_path, resolve_task_path
 from ..storage.repository import utc_now
+from ..storage.safe_open import is_link_or_reparse
 from .asset_files import detect_mime, file_digest, kind_for_mime
 
 CrashHook = Callable[[str], None]
@@ -145,12 +146,17 @@ class AssetRecoveryMixin:
         destination_parts = normalized_relative_path(record["destination_relpath"])
         shared_root = resolve_task_path(workspace, "resources/shared")
         destination_directory = shared_root / record["asset_id"]
-        if destination_directory.is_symlink():
+        if destination_directory.exists() and is_link_or_reparse(destination_directory):
             self._invalid("The publication directory cannot be a symlink.")
         destination_directory.mkdir(mode=0o700, exist_ok=True)
-        if destination_directory.is_symlink() or not destination_directory.is_dir():
+        if is_link_or_reparse(destination_directory) or not destination_directory.is_dir():
             self._invalid("The publication directory is invalid.")
-        if destination_directory != workspace.joinpath(*destination_parts.parts[:-1]):
+        expected_directory = workspace.joinpath(*destination_parts.parts[:-1])
+        try:
+            destination_matches = destination_directory.samefile(expected_directory)
+        except OSError:
+            destination_matches = False
+        if not destination_matches:
             self._invalid("The publication destination does not match its asset identity.")
         destination = resolve_task_path(
             workspace,
@@ -188,7 +194,7 @@ class AssetRecoveryMixin:
             atomic_write_json(record_path, record)
             if crash_hook:
                 crash_hook("after_temporary_copy")
-        if not temporary.is_file() or temporary.is_symlink():
+        if not temporary.is_file() or is_link_or_reparse(temporary):
             self._corrupted(record["asset_id"])
         if destination.exists():
             if not self._same_regular_file(temporary, destination):

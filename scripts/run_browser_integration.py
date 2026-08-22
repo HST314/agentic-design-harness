@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -601,6 +602,13 @@ def open_private_persistent_log(path: Path) -> Iterator[BinaryIO]:
             os.fchmod(descriptor, 0o600)
         else:
             temporary_path.chmod(0o600)
+        if os.name == "nt":
+            original_descriptor = descriptor
+            descriptor = -1
+            descriptor = _reopen_windows_file_with_delete_sharing(
+                temporary_path,
+                original_descriptor,
+            )
         os.replace(temporary_path, path)
         temporary_path = None
         with os.fdopen(descriptor, "wb") as stream:
@@ -612,6 +620,52 @@ def open_private_persistent_log(path: Path) -> Iterator[BinaryIO]:
         if temporary_path is not None:
             with suppress(FileNotFoundError):
                 temporary_path.unlink()
+
+
+def _reopen_windows_file_with_delete_sharing(path: Path, descriptor: int) -> int:
+    """Reopen a temporary file so Windows permits atomic replacement while open."""
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    os.close(descriptor)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        0x40000000,  # GENERIC_WRITE
+        0x00000001 | 0x00000002 | 0x00000004,  # read, write, and delete sharing
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080 | 0x00200000,  # normal file, do not follow reparse points
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise OSError(ctypes.get_last_error(), f"cannot reopen private log: {path}")
+    try:
+        reopened = msvcrt.open_osfhandle(
+            handle,
+            os.O_WRONLY | getattr(os, "O_BINARY", 0),
+        )
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+    if not stat.S_ISREG(os.fstat(reopened).st_mode):
+        os.close(reopened)
+        raise OSError(f"private log temporary path is not a regular file: {path}")
+    return reopened
 
 
 def run_logged(
