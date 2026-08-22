@@ -77,7 +77,18 @@ class RealImageAgentG2Tests(unittest.TestCase):
                         "answer_clarification", detail["observation"]["capabilities"]
                     )
 
-                    link = client.get(f"/api/v1/instances/{instance_id}/ui-link")
+                    work_items = client.get(
+                        "/api/v1/tasks/t_g2_real_image/work-items"
+                    )
+                    self.assertEqual(work_items.status_code, 200, work_items.text)
+                    work_item_id = work_items.json()["items"][0]["work_item_id"]
+                    link = client.get(
+                        f"/api/v1/instances/{instance_id}/ui-link",
+                        params={
+                            "task_id": "t_g2_real_image",
+                            "work_item_id": work_item_id,
+                        },
+                    )
                     self.assertEqual(link.status_code, 200, link.text)
                     ui_url = link.json()["ui_url"]
                     self.assertTrue(ui_url.startswith("http://127.0.0.1:"))

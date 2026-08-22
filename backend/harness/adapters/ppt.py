@@ -72,6 +72,11 @@ class PptAgentContractAdapter:
     def get_ui_url(self, instance_id: str) -> str | None:
         return None
 
+    def validate_ui_url(
+        self, instance: AgentInstanceSnapshot, ui_url: str
+    ) -> ValidationResult:
+        return ValidationResult(False, ("The PPT workbench is unavailable.",))
+
     def recover(self, instance_snapshot: AgentInstanceSnapshot) -> AdapterRecoveryResult:
         return AdapterRecoveryResult(recovered=True, status="UNAVAILABLE")
 

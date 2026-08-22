@@ -4,9 +4,10 @@
 
 - `/` 与 `/tasks/new` 进入工作台新任务壳；
 - `/tasks/:taskId/master|board|plan` 使用统一主任务历史、上下文栏和按需抽屉；
+- `/tasks/:taskId/work-items/:workItemId` 对 Image WorkItem 打开受控 iframe 工作台，对 PPT 显示真实不可用边界；
 - 既有 `/tasks`、任务详情、实例、收件箱与设置路由继续承载已验收功能。
 
-专业 Agent 工作台仍只接受 Adapter 提供的受控入口，不在前端接收任意用户 URL。
+专业 Agent 工作台仍只接受 Adapter 提供的受控入口，不在前端接收任意用户 URL。实例归属、进程端口 allowlist 和 frame 策略由后端验证，具体边界见 [Image Agent 内嵌工作台](../docs/agent-workbench.md)。
 
 首次启动请先阅读[安装与启动指南](../docs/getting-started.md)。前端依赖 `18080` 上的后端 API；仅启动 Vite 会导致界面请求失败。
 

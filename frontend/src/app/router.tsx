@@ -6,11 +6,11 @@ import {
   Routes,
 } from "react-router-dom";
 import { TaskIntakePage } from "../features/task-intake/TaskIntakePage";
+import { AgentWorkbenchPage } from "../features/agent-workbench/AgentWorkbenchPage";
 import { MasterRoutePage } from "../features/master-thread/MasterThreadPage";
 import {
   TaskBoardPage,
   TaskPlanPage,
-  WorkItemRoutePage,
 } from "../features/task-board/TaskBoardPage";
 import { AppShell } from "../layout/AppShell";
 
@@ -56,7 +56,7 @@ export function AppRouter(): React.JSX.Element {
           />
           <Route
             path="/tasks/:taskId/work-items/:workItemId"
-            element={<WorkItemRoutePage />}
+            element={<AgentWorkbenchPage />}
           />
         </Route>
         <Route path="*" element={<LegacyRoute />} />

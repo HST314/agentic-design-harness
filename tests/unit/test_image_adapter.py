@@ -102,6 +102,23 @@ class ImageAdapterTests(unittest.TestCase):
         self.assertNotIn("schema_version", mapped)
         self.assertNotIn("credential_pair_ref", digest_json(mapped))
 
+    def test_ui_url_allowlist_binds_host_port_and_running_process(self) -> None:
+        instance = {
+            "process": {"state": "RUNNING", "port": 19001},
+        }
+        self.assertTrue(
+            self.adapter.validate_ui_url(instance, "http://127.0.0.1:19001/").valid
+        )
+        for value in (
+            "https://127.0.0.1:19001/",
+            "http://public.example:19001/",
+            "http://127.0.0.1:19002/",
+            "http://127.0.0.1:19001/admin",
+            "http://user@127.0.0.1:19001/",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(self.adapter.validate_ui_url(instance, value).valid)
+
     def test_unknown_phase_or_capability_fails_closed(self) -> None:
         view = {
             "manifest": {"failed_step": None},
