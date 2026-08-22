@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -82,6 +83,31 @@ jobs:
       - run: npm run test:e2e
         working-directory: frontend
 
+  launcher:
+    name: launcher (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python scripts/dev.py setup
+      - run: python scripts/dev.py doctor
+      - run: python scripts/dev.py start --check --timeout 60
+
   workbench-real-image:
     name: workbench real Image closure
     needs: [backend, frontend]
@@ -90,32 +116,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: pip
-      - name: Read locked Image revision
-        id: image-lock
-        shell: bash
-        run: echo "revision=$(python scripts/verify_image_agent_lock.py --print-revision)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: HST314/image_agent_mvp
-          ref: ${{ steps.image-lock.outputs.revision }}
-          path: .runtime/image-agent-source
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Verify locked Image source and dependency manifests
-        run: python scripts/verify_image_agent_lock.py --image-agent-root .runtime/image-agent-source
+        run: python scripts/verify_image_agent_lock.py
       - run: npm ci
         working-directory: frontend
       - run: npx playwright install --with-deps chromium
         working-directory: frontend
       - name: Run production workbench against pinned Image runtime
-        run: make frontend-integration IMAGE_AGENT_ROOT=.runtime/image-agent-source
+        run: make frontend-integration
 
   supply-chain:
     runs-on: ubuntu-latest
@@ -142,17 +160,19 @@ jobs:
   release-gate:
     name: release gate
     if: ${{ always() }}
-    needs: [backend, frontend, workbench-real-image, supply-chain]
+    needs: [backend, frontend, launcher, workbench-real-image, supply-chain]
     runs-on: ubuntu-latest
     steps:
       - name: Require every release job to pass
         env:
           BACKEND_RESULT: ${{ needs.backend.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          LAUNCHER_RESULT: ${{ needs.launcher.result }}
           REAL_IMAGE_RESULT: ${{ needs.workbench-real-image.result }}
           SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
         run: |
           test "$BACKEND_RESULT" = success
           test "$FRONTEND_RESULT" = success
+          test "$LAUNCHER_RESULT" = success
           test "$REAL_IMAGE_RESULT" = success
           test "$SUPPLY_CHAIN_RESULT" = success
