@@ -1,0 +1,41 @@
+{
+  "schema_version": "single-machine-capacity-slo.v1",
+  "scope": "single writer, local POSIX filesystem, one control-plane process",
+  "reference_machine": {
+    "cpu": "4 dedicated x86_64 vCPU",
+    "memory_gib": 16,
+    "storage": "local SSD with fsync support",
+    "python_versions": ["3.10", "3.13"]
+  },
+  "supported_envelope": {
+    "tasks": 1000,
+    "events_per_task": 25,
+    "active_tasks": 100,
+    "concurrent_agent_instances": 30,
+    "control_data_gib": 10
+  },
+  "qualification_profile": {
+    "tasks": 1000,
+    "events_per_task": 25,
+    "list_samples": 100,
+    "thresholds": {
+      "task_create_p95_ms": 500,
+      "task_update_p95_ms": 500,
+      "task_index_read_p95_ms": 250,
+      "cold_recovery_ms": 30000,
+      "control_bytes_per_task": 1048576
+    }
+  },
+  "ci_profile": {
+    "tasks": 20,
+    "events_per_task": 3,
+    "list_samples": 10,
+    "thresholds": {
+      "task_create_p95_ms": 2000,
+      "task_update_p95_ms": 2000,
+      "task_index_read_p95_ms": 1000,
+      "cold_recovery_ms": 10000,
+      "control_bytes_per_task": 1048576
+    }
+  }
+}

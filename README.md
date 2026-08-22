@@ -33,7 +33,8 @@ PPT-only 与 Image→PPT 可以被正确建模。必需 PPT 只有在其前置�
 
 ## 本地验证
 
-要求 Python 3.10+、Node.js 22+ 和 npm。Python 与 npm 依赖均由锁文件固定。
+要求 Python 3.10+、Node.js 22+ 和 npm。Python 与 npm 依赖均由锁文件固定，
+Python 锁文件带完整制品哈希；CI 同时覆盖 Python 3.10 与 3.13。
 
 ```bash
 make test
@@ -44,7 +45,7 @@ cd ..
 
 make check
 
-# 包含 Pyright 与 Python/npm 依赖漏洞审计
+# 包含 Pyright、Python/npm 依赖漏洞审计、CycloneDX SBOM 和单机容量基准
 make verify
 ```
 

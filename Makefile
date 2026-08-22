@@ -10,7 +10,7 @@ REAL_PROVIDER_EVIDENCE_PATH ?= build/real-provider-evidence.json
 REAL_PROVIDER_LOG_FILE ?= build/real-provider-smoke.log
 REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(REAL_PROVIDER_ENV_FILE)",)
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit boundary-check check verify serve frontend-check frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -32,11 +32,25 @@ boundary-check:
 
 dependency-audit: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m pip_audit \
-		-r requirements-runtime.txt --disable-pip --no-deps --progress-spinner off \
+		-r requirements-runtime.txt --require-hashes --disable-pip \
+		--progress-spinner off \
 		--cache-dir "$(TEST_DEPS)/.pip-audit-cache"
 	npm --prefix frontend audit --omit=dev --audit-level=high
 
-frontend-check:
+sbom: test-env
+	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) scripts/generate_sbom.py
+
+contract-check:
+	$(PYTHON) scripts/generate_frontend_contracts.py --check
+
+frontend-contracts:
+	$(PYTHON) scripts/generate_frontend_contracts.py
+
+capacity-benchmark: test-env
+	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) scripts/benchmark_storage_recovery.py \
+		--profile ci --output build/capacity-benchmark.json
+
+frontend-check: contract-check
 	npm --prefix frontend run check
 	npm --prefix frontend run build
 
@@ -67,7 +81,7 @@ real-provider-smoke: real-provider-preflight image-agent-env
 
 check: test lint compile secret-scan boundary-check frontend-check
 
-verify: check typecheck dependency-audit
+verify: check typecheck dependency-audit sbom capacity-benchmark
 
 serve: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m harness
@@ -116,5 +130,6 @@ $(TEST_ENV_STAMP): requirements-dev.txt
 		echo "Python interpreter '$(PYTHON)' was not found; override it with make PYTHON=/path/to/python3." >&2; \
 		exit 127; \
 	}
-	$(PYTHON) -m pip install --disable-pip-version-check --upgrade --target "$(TEST_DEPS)" -r requirements-dev.txt
+	$(PYTHON) -m pip install --disable-pip-version-check --require-hashes --upgrade \
+		--target "$(TEST_DEPS)" -r requirements-dev.txt
 	@touch $(TEST_ENV_STAMP)

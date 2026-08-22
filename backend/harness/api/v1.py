@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,6 +13,7 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response, StreamingResponse
 
+from ..adapters.types import AgentInstanceSnapshot, StageSnapshot, TaskCard
 from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
 from ..storage.atomic import read_json
@@ -304,9 +305,9 @@ def build_v1_router(container: Container) -> APIRouter:
         return await run_in_threadpool(
             container.application.save_plan_and_create_instances,
             task_id,
-            stages=body.stages,
-            instances=body.instances,
-            task_cards=body.task_cards,
+            stages=cast(list[StageSnapshot], body.stages),
+            instances=cast(list[AgentInstanceSnapshot], body.instances),
+            task_cards=cast(list[TaskCard], body.task_cards),
             providers=body.providers,
             operation_id=body.operation_id,
             envelope=body.envelope,

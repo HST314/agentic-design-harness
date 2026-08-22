@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ..services.process_runtime import ProcessSpec
+from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,8 +18,8 @@ class ValidationResult:
 
 @dataclass(frozen=True, slots=True)
 class PrepareRequest:
-    instance: dict[str, Any]
-    task_card: dict[str, Any]
+    instance: AgentInstanceSnapshot
+    task_card: TaskCard
     task_root: Path
     config_ref: Path
     credential_ref: tuple[str, int]
@@ -53,7 +54,7 @@ class AgentAdapter(Protocol):
     agent_type: str
     available: bool
 
-    def validate_task_card(self, card: dict[str, Any]) -> ValidationResult: ...
+    def validate_task_card(self, card: TaskCard) -> ValidationResult: ...
 
     def prepare(self, request: PrepareRequest) -> ProcessSpec: ...
 
@@ -81,12 +82,12 @@ class AgentAdapter(Protocol):
         operation_id: str,
     ) -> AdapterCommandResult: ...
 
-    def collect_deliveries(self, instance_id: str) -> list[dict[str, Any]]: ...
+    def collect_deliveries(self, instance_id: str) -> list[DeliveryCandidate]: ...
 
     def collect_usage(
         self, instance_id: str, cursor: str | None
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[UsageEvent]: ...
 
     def get_ui_url(self, instance_id: str) -> str | None: ...
 
-    def recover(self, instance_snapshot: dict[str, Any]) -> AdapterRecoveryResult: ...
+    def recover(self, instance_snapshot: AgentInstanceSnapshot) -> AdapterRecoveryResult: ...

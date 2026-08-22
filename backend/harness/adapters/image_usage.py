@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from ..core.errors import HarnessError
 from ..storage.atomic import digest_json
 from ..storage.layout import validate_identifier
+from .types import BillingUnit, UsageEvent
 
 _CURSOR = re.compile(r"^usage_([1-9][0-9]*)_[0-9a-f]{16}$")
 _CALL_TYPES = frozenset({"reasoning_llm", "vision_language_model", "text_to_image_model"})
@@ -77,7 +78,7 @@ def map_usage_page(
     task_id: str,
     instance_id: str,
     credential_pair_ref: str | None,
-) -> tuple[list[dict[str, Any]], int, bool]:
+) -> tuple[list[UsageEvent], int, bool]:
     """Validate one producer page and map it without estimating missing facts."""
 
     items = page.get("items")
@@ -91,7 +92,7 @@ def map_usage_page(
         or len(items) > 500
     ):
         _protocol_error("The Image usage page is malformed.")
-    events: list[dict[str, Any]] = []
+    events: list[UsageEvent] = []
     sequence = previous
     for item in items:
         if not isinstance(item, dict):
@@ -121,7 +122,7 @@ def _map_usage_item(
     task_id: str,
     instance_id: str,
     credential_pair_ref: str | None,
-) -> dict[str, Any]:
+) -> UsageEvent:
     usage_id = item.get("usage_id")
     request_id = item.get("request_id")
     provider_request_id = item.get("provider_request_id")
@@ -161,7 +162,7 @@ def _map_usage_item(
         "total_tokens": 0,
     }
     sequence = int(item["sequence"])
-    return {
+    return cast(UsageEvent, {
         "schema_version": "1.1",
         "event_id": f"usage_{sequence}_{digest_json([instance_id, usage_id])[:16]}",
         "task_id": task_id,
@@ -178,7 +179,7 @@ def _map_usage_item(
         "billing_units": billing_units,
         "raw_usage": raw_usage,
         "occurred_at": _utc_timestamp(item.get("timestamp")),
-    }
+    })
 
 
 def _token_usage(value: Any) -> dict[str, int] | None:
@@ -197,10 +198,10 @@ def _token_usage(value: Any) -> dict[str, int] | None:
     return {key: int(value[key]) for key in _TOKEN_FIELDS}
 
 
-def _billing_units(value: Any) -> list[dict[str, Any]]:
+def _billing_units(value: Any) -> list[BillingUnit]:
     if not isinstance(value, list) or len(value) > 64:
         _protocol_error("The Image billing units are malformed.")
-    units: list[dict[str, Any]] = []
+    units: list[BillingUnit] = []
     for item in value:
         if (
             not isinstance(item, dict)
@@ -213,7 +214,7 @@ def _billing_units(value: Any) -> list[dict[str, Any]]:
             or not _safe_json(item)
         ):
             _protocol_error("The Image billing units are malformed.")
-        units.append(item)
+        units.append(cast(BillingUnit, item))
     return units
 
 

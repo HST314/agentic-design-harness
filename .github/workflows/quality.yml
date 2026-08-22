@@ -6,22 +6,40 @@ on:
   pull_request:
 
 jobs:
-  backend:
+  backend_matrix:
+    name: backend (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
       - run: PYTHONPATH=backend python -m unittest discover -s tests -v
       - run: python -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash tests/e2e
-      - run: pyright backend/harness
+      - run: python -m pyright backend/harness
       - run: python -m compileall -q backend/harness scripts tests
       - run: python scripts/secret_scan.py .
       - run: python scripts/check_agent_import_boundary.py backend/harness
-      - run: pip-audit -r requirements-runtime.txt --disable-pip --no-deps --progress-spinner off
+      - run: python scripts/generate_frontend_contracts.py --check
+      - run: PYTHONPATH=backend python scripts/benchmark_storage_recovery.py --profile ci
+      - run: python -m pip_audit -r requirements-runtime.txt --require-hashes --disable-pip --progress-spinner off
+
+  backend:
+    name: backend
+    needs: backend_matrix
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every supported Python version to pass
+        env:
+          BACKEND_MATRIX_RESULT: ${{ needs.backend_matrix.result }}
+        run: test "$BACKEND_MATRIX_RESULT" = success
 
   frontend:
     runs-on: ubuntu-latest
@@ -44,3 +62,25 @@ jobs:
         working-directory: frontend
       - run: npm run test:e2e
         working-directory: frontend
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: npm ci
+        working-directory: frontend
+      - run: python scripts/generate_sbom.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cyclonedx-sbom
+          path: build/sbom/*.cdx.json

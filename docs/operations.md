@@ -7,11 +7,16 @@
 最低环境：Python 3.10+、Node.js 22+、npm，以及可执行的固定 Image Agent 源码与依赖目录。默认只绑定 `127.0.0.1:18080`；如需跨主机访问，应在受信反向代理后部署并另行配置网络访问控制，不能直接把控制面暴露到公网。
 
 ```bash
-python3 -m pip install -r requirements-dev.txt
+python3 -m pip install --require-hashes -r requirements-dev.txt
 npm --prefix frontend ci
 make verify
 make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 ```
+
+CI 在 Python 3.10 与 3.13 上执行同一组后端门禁。`make verify` 还会严格校验
+Python 锁文件哈希、生成并校验 `build/sbom/` 下的 Python/npm CycloneDX SBOM，
+以及执行单机存储/恢复 CI 基准。资格环境的容量 SLO 与完整基准命令见
+`docs/single-machine-capacity-slo.md`。
 
 复制 `config/harness.example.yaml`，通过 `HARNESS_CONFIG` 指向配置文件。凭据只能由受控 API 写入 `control-data/secrets/`，不得写入 YAML、环境样例、Git 或任务工作区。
 
