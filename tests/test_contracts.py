@@ -7,13 +7,12 @@ import unittest
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError
 from referencing import Registry, Resource
-
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS = ROOT / "contracts" / "v1"
@@ -203,7 +202,7 @@ def validate_requirement_lifecycle(
     )
     activation_fact_required = (
         item["status"] in activated_statuses
-        or item["status"] == "UNAVAILABLE" and unavailable_activation_required
+        or (item["status"] == "UNAVAILABLE" and unavailable_activation_required)
     )
     if activation_fact_required and first_activated_at is None:
         raise SemanticContractError("activated child lacks first activation fact")
@@ -420,6 +419,105 @@ def validate_asset_semantics(asset: dict[str, Any]) -> None:
         )
 
 
+def validate_work_item_semantics(work_item: dict[str, Any]) -> None:
+    current_instance_id = work_item["current_instance_id"]
+    if current_instance_id is not None and current_instance_id not in work_item["instance_ids"]:
+        raise SemanticContractError("current instance is absent from work item history")
+    if work_item["work_item_id"] in work_item["depends_on"]:
+        raise SemanticContractError("work item cannot depend on itself")
+
+
+def validate_plan_proposal_semantics(proposal: dict[str, Any]) -> None:
+    task_id = proposal["task_id"]
+    stages = proposal["stages"]
+    stage_by_id = {stage["stage_id"]: stage for stage in stages}
+    if len(stage_by_id) != len(stages):
+        raise SemanticContractError("plan proposal has duplicate stage ids")
+    positions = sorted(stage["position"] for stage in stages)
+    if positions != list(range(1, len(stages) + 1)):
+        raise SemanticContractError("plan proposal stage positions must be consecutive")
+    for stage in stages:
+        for dependency in stage["depends_on"]:
+            dependency_stage = stage_by_id.get(dependency)
+            if dependency_stage is None:
+                raise SemanticContractError("plan proposal references an unknown stage")
+            if dependency_stage["position"] >= stage["position"]:
+                raise SemanticContractError("plan proposal stage dependency is not earlier")
+
+    work_items = proposal["work_items"]
+    work_item_by_id = {item["work_item_id"]: item for item in work_items}
+    if len(work_item_by_id) != len(work_items):
+        raise SemanticContractError("plan proposal has duplicate work item ids")
+    for item in work_items:
+        validate_work_item_semantics(item)
+        if item["task_id"] != task_id:
+            raise SemanticContractError("work item belongs to another task")
+        stage = stage_by_id.get(item["stage_id"])
+        if stage is None:
+            raise SemanticContractError("work item references an unknown stage")
+        if item["agent_type"] != stage["type"]:
+            raise SemanticContractError("work item type differs from its stage")
+        for dependency in item["depends_on"]:
+            dependency_item = work_item_by_id.get(dependency)
+            if dependency_item is None:
+                raise SemanticContractError("work item references an unknown dependency")
+            dependency_stage = stage_by_id[dependency_item["stage_id"]]
+            if dependency_stage["position"] > stage["position"]:
+                raise SemanticContractError("work item depends on a later stage")
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(work_item_id: str) -> None:
+        if work_item_id in visiting:
+            raise SemanticContractError("work item dependencies contain a cycle")
+        if work_item_id in visited:
+            return
+        visiting.add(work_item_id)
+        for dependency in work_item_by_id[work_item_id]["depends_on"]:
+            visit(dependency)
+        visiting.remove(work_item_id)
+        visited.add(work_item_id)
+
+    for work_item_id in work_item_by_id:
+        visit(work_item_id)
+
+    cards = proposal["execution_cards"]
+    card_by_id = {card["card_id"]: card for card in cards}
+    if len(card_by_id) != len(cards):
+        raise SemanticContractError("plan proposal has duplicate execution card ids")
+    referenced_card_ids = [
+        card_id for item in work_items for card_id in item["task_card_ids"]
+    ]
+    if len(referenced_card_ids) != len(set(referenced_card_ids)):
+        raise SemanticContractError("execution card belongs to multiple work items")
+    if set(referenced_card_ids) != set(card_by_id):
+        raise SemanticContractError("work items and execution cards do not match")
+    for item in work_items:
+        for card_id in item["task_card_ids"]:
+            card = card_by_id[card_id]
+            if card["task_id"] != task_id:
+                raise SemanticContractError("execution card belongs to another task")
+            if card["stage_id"] != item["stage_id"]:
+                raise SemanticContractError("execution card stage differs from work item")
+            if card["agent_type"] != item["agent_type"]:
+                raise SemanticContractError("execution card type differs from work item")
+            if card["instance_id"] not in item["instance_ids"]:
+                raise SemanticContractError("execution card instance is absent from work item")
+            serialize_public_task_card(card)
+
+    created_at = datetime.fromisoformat(proposal["created_at"].replace("Z", "+00:00"))
+    updated_at = datetime.fromisoformat(proposal["updated_at"].replace("Z", "+00:00"))
+    if updated_at < created_at:
+        raise SemanticContractError("plan proposal update predates creation")
+    if proposal["confirmed_at"] is not None:
+        confirmed_at = datetime.fromisoformat(
+            proposal["confirmed_at"].replace("Z", "+00:00")
+        )
+        if not created_at <= confirmed_at <= updated_at:
+            raise SemanticContractError("plan proposal confirmation is outside its timeline")
+
+
 def validate_plan_semantics(plan: dict[str, Any]) -> None:
     """Validate invariants that span multiple JSON Schema objects."""
 
@@ -617,10 +715,15 @@ class SchemaTests(unittest.TestCase):
     def test_standalone_object_examples_pass(self) -> None:
         examples = {
             "imported-asset.json": "asset-manifest.schema.json",
+            "master-message.json": "master-message.schema.json",
             "published-asset.json": "asset-manifest.schema.json",
             "published-delivery.json": "delivery.schema.json",
             "pending-approval.json": "approval-request.schema.json",
+            "plan-proposal.json": "plan-proposal.schema.json",
+            "task-intake.json": "task-intake.schema.json",
+            "task-navigation-metadata.json": "task-navigation-metadata.schema.json",
             "token-usage.json": "token-usage-event.schema.json",
+            "work-item.json": "work-item.schema.json",
         }
         self.assertEqual(
             {path.name for path in OBJECT_EXAMPLES.glob("*.json")},
@@ -636,6 +739,10 @@ class SchemaTests(unittest.TestCase):
                     validate_delivery_semantics(document)
                 elif example_name == "token-usage.json":
                     validate_usage_semantics(document)
+                elif example_name == "work-item.json":
+                    validate_work_item_semantics(document)
+                elif example_name == "plan-proposal.json":
+                    validate_plan_proposal_semantics(document)
 
     def test_root_contracts_use_current_schema_version(self) -> None:
         catalog = load_json(CATALOGS / "schema-versions.json")
@@ -645,6 +752,53 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(example=path.relative_to(CONTRACTS)):
                 document = load_json(path)
                 self.assertEqual(document["schema_version"], current)
+
+
+class WorkbenchContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.work_item = load_json(OBJECT_EXAMPLES / "work-item.json")
+        self.proposal = load_json(OBJECT_EXAMPLES / "plan-proposal.json")
+        self.intake = load_json(OBJECT_EXAMPLES / "task-intake.json")
+        self.navigation = load_json(
+            OBJECT_EXAMPLES / "task-navigation-metadata.json"
+        )
+
+    def test_current_instance_must_be_in_work_item_history(self) -> None:
+        self.work_item["current_instance_id"] = "instance_unknown"
+        with self.assertRaisesRegex(
+            SemanticContractError, "absent from work item history"
+        ):
+            validate_work_item_semantics(self.work_item)
+
+    def test_plan_proposal_references_are_closed_and_acyclic(self) -> None:
+        validate_plan_proposal_semantics(self.proposal)
+        self.proposal["work_items"][0]["depends_on"] = ["work_unknown"]
+        with self.assertRaisesRegex(
+            SemanticContractError, "unknown dependency"
+        ):
+            validate_plan_proposal_semantics(self.proposal)
+
+    def test_plan_proposal_card_must_match_its_work_item(self) -> None:
+        self.proposal["execution_cards"][0]["instance_id"] = "instance_unknown"
+        with self.assertRaisesRegex(
+            SemanticContractError, "absent from work item"
+        ):
+            validate_plan_proposal_semantics(self.proposal)
+
+    def test_submitted_intake_locks_upload_session(self) -> None:
+        self.intake["status"] = "SUBMITTED"
+        self.intake["submitted_at"] = "2026-08-22T09:05:00Z"
+        with self.assertRaises(ValidationError):
+            validate("task-intake.schema.json", self.intake)
+        self.intake["upload_session"]["status"] = "LOCKED"
+        validate("task-intake.schema.json", self.intake)
+
+    def test_archived_navigation_metadata_cannot_remain_pinned(self) -> None:
+        self.navigation["archived_at"] = "2026-08-22T09:05:00Z"
+        with self.assertRaises(ValidationError):
+            validate("task-navigation-metadata.schema.json", self.navigation)
+        self.navigation["pinned_at"] = None
+        validate("task-navigation-metadata.schema.json", self.navigation)
 
 
 class TopologyTests(unittest.TestCase):
@@ -1289,7 +1443,7 @@ class BoundaryTests(unittest.TestCase):
 
 
 class CatalogTests(unittest.TestCase):
-    STATUS_SCHEMA_BY_DOMAIN = {
+    STATUS_SCHEMA_BY_DOMAIN: ClassVar[dict[str, str]] = {
         "main_task": "main-task.schema.json",
         "stage": "stage.schema.json",
         "agent_instance": "agent-instance.schema.json",
