@@ -765,22 +765,10 @@ test("settings keep credentials redacted and clear submitted secrets", async ({ 
   await expect(page.getByRole("heading", { name: "Ark 与 Image Agent 设置" })).toBeVisible();
   await expect(page.getByText("-1234", { exact: true })).toBeVisible();
   const secret = "browser-only-secret";
-  const keyPool = page.getByLabel("替换凭据池（JSON 数组）");
-  await keyPool.fill(JSON.stringify([
-    {
-      credential_pair_id: "cred_new",
-      provider: "fake",
-      key_id: "key_new",
-      base_url: "https://provider.invalid/v1",
-      api_key: secret,
-      api_key_env: "FAKE_API_KEY",
-      base_url_env: "FAKE_BASE_URL",
-      revision: 1,
-      enabled: true,
-    },
-  ]));
-  await page.getByRole("button", { name: "安全保存凭据池" }).click();
-  await expect(page.getByLabel("替换凭据池（JSON 数组）")).toHaveValue("");
+  const apiKey = page.getByLabel("Ark API Key");
+  await apiKey.fill(secret);
+  await page.getByRole("button", { name: "安全保存 Ark 凭据" }).click();
+  await expect(apiKey).toHaveValue("");
   await expect(page.locator("body")).not.toContainText(secret);
 });
 
