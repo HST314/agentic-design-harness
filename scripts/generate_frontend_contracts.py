@@ -162,7 +162,8 @@ def _source_digest() -> str:
     for path in sorted(CONTRACTS.rglob("*.json")):
         digest.update(path.relative_to(CONTRACTS).as_posix().encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        normalized = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        digest.update(normalized.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()
 
