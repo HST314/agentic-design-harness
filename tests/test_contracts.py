@@ -716,6 +716,7 @@ class SchemaTests(unittest.TestCase):
         examples = {
             "imported-asset.json": "asset-manifest.schema.json",
             "master-message.json": "master-message.schema.json",
+            "master-thread.json": "master-thread.schema.json",
             "published-asset.json": "asset-manifest.schema.json",
             "published-delivery.json": "delivery.schema.json",
             "pending-approval.json": "approval-request.schema.json",
@@ -1572,7 +1573,7 @@ class CatalogTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                item["http_status"] in {400, 404, 409, 422, 500}
+                item["http_status"] in {400, 404, 409, 422, 500, 502, 503}
                 for item in errors
             )
         )

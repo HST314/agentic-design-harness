@@ -5,6 +5,7 @@
 - [安装与启动指南](getting-started.md)：首次安装、Windows/Linux 命令、双终端启动和配置。
 - [常见问题排查](troubleshooting.md)：404、Python 环境、前端代理、端口和就绪状态。
 - [Master API 调用指南](master-api-guide.md)：标准编排流程、命令信封、分页与错误处理。
+- [Master Gateway 接入契约](master-gateway.md)：真实编排服务的 HTTP 契约、幂等与确认恢复语义。
 
 ## 运维与发布
 

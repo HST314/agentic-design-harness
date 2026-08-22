@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -30,6 +31,8 @@ class HarnessSettings(BaseModel):
         default="0e559d0153f479c8abefb14613804b8cde486282",
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
     )
+    master_gateway_url: str | None = None
+    master_gateway_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
     @field_validator("log_level")
     @classmethod
@@ -38,6 +41,23 @@ class HarnessSettings(BaseModel):
         if normalized not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("unsupported log level")
         return normalized
+
+    @field_validator("master_gateway_url")
+    @classmethod
+    def validate_master_gateway_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("master_gateway_url must be an HTTP(S) service root")
+        return value.rstrip("/")
 
     def resolve_from(self, project_root: Path) -> HarnessSettings:
         updates: dict[str, Any] = {}
@@ -66,6 +86,8 @@ _ENV_MAP = {
     "HARNESS_IMAGE_AGENT_PYTHON": "image_agent_python",
     "HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT": "image_agent_dependency_root",
     "HARNESS_IMAGE_AGENT_REVISION": "image_agent_revision",
+    "HARNESS_MASTER_GATEWAY_URL": "master_gateway_url",
+    "HARNESS_MASTER_GATEWAY_TIMEOUT_SECONDS": "master_gateway_timeout_seconds",
 }
 
 

@@ -97,6 +97,22 @@ class UpdateTaskPresentationRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class MasterAssetReference(StrictRequest):
+    asset_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    manifest_relpath: str = Field(min_length=1, max_length=512)
+
+
+class AppendMasterMessageRequest(StrictRequest):
+    content: str = Field(min_length=1, max_length=20_000)
+    asset_refs: list[MasterAssetReference] = Field(default_factory=list, max_length=20)
+    envelope: CommandEnvelope
+
+
+class ConfirmPlanProposalRequest(StrictRequest):
+    task_expected_revision: int = Field(ge=1)
+    envelope: CommandEnvelope
+
+
 class InstanceOperationRequest(StrictRequest):
     model_config = ConfigDict(
         extra="forbid",
@@ -289,9 +305,54 @@ def build_v1_router(container: Container) -> APIRouter:
     async def submit_task_intake(
         task_id: str, body: SubmitTaskIntakeRequest
     ) -> dict[str, Any]:
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             container.task_intakes.submit,
             task_id,
+            task_expected_revision=body.task_expected_revision,
+            envelope=body.envelope,
+        )
+        await run_in_threadpool(container.master_threads.ensure_intake_started, task_id)
+        return result
+
+    @router.get("/tasks/{task_id}/master/messages", tags=["master"])
+    async def get_master_messages(task_id: str) -> dict[str, Any]:
+        return await run_in_threadpool(container.master_threads.get_session, task_id)
+
+    @router.post("/tasks/{task_id}/master/messages", tags=["master"])
+    async def append_master_message(
+        task_id: str, body: AppendMasterMessageRequest
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.master_threads.append_message,
+            task_id,
+            content=body.content,
+            asset_refs=[item.model_dump(mode="json") for item in body.asset_refs],
+            envelope=body.envelope,
+        )
+
+    @router.get("/tasks/{task_id}/plan-proposals/latest", tags=["master"])
+    async def get_latest_plan_proposal(task_id: str) -> dict[str, Any]:
+        session = await run_in_threadpool(container.master_threads.get_session, task_id)
+        return {
+            "schema_version": "1.0",
+            "proposal": session["latest_proposal"],
+            "task_revision": session["task_revision"],
+            "thread_revision": session["thread_revision"],
+        }
+
+    @router.post(
+        "/tasks/{task_id}/plan-proposals/{proposal_revision}/confirm",
+        tags=["master"],
+    )
+    async def confirm_plan_proposal(
+        task_id: str,
+        proposal_revision: int,
+        body: ConfirmPlanProposalRequest,
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.master_threads.confirm_plan,
+            task_id,
+            proposal_revision,
             task_expected_revision=body.task_expected_revision,
             envelope=body.envelope,
         )

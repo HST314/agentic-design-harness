@@ -7,6 +7,7 @@ import {
 } from "react-router-dom";
 import { FoundationPage } from "../features/workbench/FoundationPage";
 import { TaskIntakePage } from "../features/task-intake/TaskIntakePage";
+import { MasterRoutePage } from "../features/master-thread/MasterThreadPage";
 import { AppShell } from "../layout/AppShell";
 
 function LegacyRoute(): React.JSX.Element {
@@ -39,7 +40,7 @@ export function AppRouter(): React.JSX.Element {
           <Route path="/tasks/new" element={<TaskIntakePage />} />
           <Route
             path="/tasks/:taskId/master"
-            element={<TaskIntakePage />}
+            element={<MasterRoutePage />}
           />
           <Route
             path="/tasks/:taskId/board"
