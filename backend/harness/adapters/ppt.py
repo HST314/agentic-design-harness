@@ -13,13 +13,14 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
+from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
 
 
 class PptAgentContractAdapter:
     agent_type = "ppt"
     available = False
 
-    def validate_task_card(self, card: dict[str, Any]) -> ValidationResult:
+    def validate_task_card(self, card: TaskCard) -> ValidationResult:
         errors = () if card.get("agent_type") == self.agent_type else (
             "Task card agent_type must be ppt.",
         )
@@ -60,18 +61,18 @@ class PptAgentContractAdapter:
     ) -> AdapterCommandResult:
         self._unavailable(instance_id)
 
-    def collect_deliveries(self, instance_id: str) -> list[dict[str, Any]]:
+    def collect_deliveries(self, instance_id: str) -> list[DeliveryCandidate]:
         self._unavailable(instance_id)
 
     def collect_usage(
         self, instance_id: str, cursor: str | None
-    ) -> list[dict[str, Any]]:
+    ) -> list[UsageEvent]:
         self._unavailable(instance_id)
 
     def get_ui_url(self, instance_id: str) -> str | None:
         return None
 
-    def recover(self, instance_snapshot: dict[str, Any]) -> AdapterRecoveryResult:
+    def recover(self, instance_snapshot: AgentInstanceSnapshot) -> AdapterRecoveryResult:
         return AdapterRecoveryResult(recovered=True, status="UNAVAILABLE")
 
     @staticmethod

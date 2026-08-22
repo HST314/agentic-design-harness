@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ class UsageService:
         self,
         task_id: str,
         instance_id: str,
-        events: list[dict[str, Any]],
+        events: Sequence[Mapping[str, Any]],
         *,
         source: str,
         cursor: str | None = None,
@@ -63,7 +64,7 @@ class UsageService:
             staged: dict[str, dict[str, Any]] = {}
             duplicates = 0
             for raw in events:
-                event = deepcopy(raw)
+                event = dict(deepcopy(raw))
                 self._validate_event(task_id, instance, event)
                 previous = staged.get(event["event_id"], existing.get(event["event_id"]))
                 if previous is not None:

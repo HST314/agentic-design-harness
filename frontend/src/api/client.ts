@@ -1,5 +1,15 @@
+import type {
+  ContractAgentInstance,
+  ContractApprovalRequest,
+  ContractAssetManifest,
+  ContractInboxItem,
+  ContractMainTask,
+  ContractStage,
+  ContractTokenUsageEvent,
+} from "./generated-contracts";
+
 export interface HealthResponse {
-  status: string;
+  status: "ok";
   version: string;
 }
 
@@ -14,7 +24,7 @@ export interface TaskSummary {
   updated_at: string;
   revision: number;
   goal?: string;
-  start_policy?: string;
+  start_policy?: ContractMainTask["start_policy"];
   stage_count?: number;
   instance_count?: number;
   instance_status_counts?: Record<string, number>;
@@ -31,37 +41,10 @@ export interface PageInfo {
   next_cursor: string | null;
 }
 
-export interface AgentInstance {
-  instance_id: string;
-  task_id: string;
-  agent_type: string;
-  status: string;
-  required: boolean;
-  approval_mode: string;
-  config_revision: number;
-  credential_pair_ref: string;
-  credential_pair_revision: number;
-  ui_url: string | null;
-  process: { pid: number; port: number; state: string; started_at: string } | null;
-  delivery_rejection?: {
-    code: string;
-    message: string;
-    details: Record<string, unknown>;
-    rejected_at: string;
-    retryable: boolean;
-  } | null;
-}
+export type AgentInstance = ContractAgentInstance;
 
 export interface TaskPlan {
-  stages: Array<{
-    stage_id: string;
-    type: string;
-    position: number;
-    depends_on: string[];
-    status: string;
-    required: boolean;
-    instance_ids: string[];
-  }>;
+  stages: ContractStage[];
   instances: AgentInstance[];
 }
 
@@ -113,18 +96,7 @@ export interface AuditEvent {
   occurred_at: string;
 }
 
-export interface Approval {
-  approval_id: string;
-  task_id: string;
-  instance_id: string;
-  step_id: string;
-  kind: string;
-  owner: "human" | "master";
-  status: "PENDING" | "APPROVED" | "REJECTED";
-  payload_ref: string;
-  created_at: string;
-  sequence: number;
-  revision: number;
+export interface Approval extends ContractApprovalRequest {
   decision?: string;
   action?: string | null;
 }
@@ -139,21 +111,7 @@ export interface ApprovalDetailResponse {
   };
 }
 
-export interface InboxItem {
-  inbox_id: string;
-  task_id: string;
-  instance_id: string | null;
-  approval_id: string | null;
-  kind: string;
-  owner: "human" | "master";
-  status: "UNREAD" | "READ" | "HANDLED";
-  title: string;
-  message: string;
-  deep_link: string;
-  created_at: string;
-  sequence: number;
-  revision: number;
-}
+export type InboxItem = ContractInboxItem;
 
 export interface TaskFile {
   relative_path: string;
@@ -166,14 +124,7 @@ export interface TaskFile {
 
 export interface AssetManifest {
   integrity_status: string;
-  manifest: {
-    asset_id: string;
-    producer_instance_id: string | null;
-    role: string;
-    relative_path: string;
-    description: string;
-    created_at: string;
-  };
+  manifest: ContractAssetManifest;
 }
 
 export interface TokenTotals {
@@ -224,7 +175,7 @@ export interface UsageSummary {
     provider?: string;
     model: string;
     call_type?: string;
-    usage_basis?: "tokens" | "image_units" | "mixed";
+    usage_basis?: ContractTokenUsageEvent["usage_basis"];
     billing_units?: Array<{
       unit: string;
       quantity: number;
