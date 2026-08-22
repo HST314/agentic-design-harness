@@ -208,6 +208,18 @@ class CredentialPoolWriteRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class SettingsPreflightRequest(StrictRequest):
+    expected_config_revision: int = Field(ge=1)
+
+
+class PaidSmokeRequest(StrictRequest):
+    credential_pair_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    credential_pair_revision: int = Field(ge=1)
+    cost_confirmation: Literal[True]
+    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
 class ReassignCredentialRequest(StrictRequest):
     credential_pair_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     credential_pair_revision: int = Field(ge=1)
@@ -851,11 +863,66 @@ def build_v1_router(container: Container) -> APIRouter:
         manifests = await run_in_threadpool(
             container.assets.list_bundle_manifests, task_id
         )
+        reviews = []
+        approvals = await run_in_threadpool(
+            container.approvals.list_approvals,
+            task_id=task_id,
+            owner="human",
+        )
+        for approval in approvals:
+            if approval["kind"] != "DELIVERY_REVIEW":
+                continue
+            details = await run_in_threadpool(
+                container.approvals.get_approval, approval["approval_id"]
+            )
+            bundle_id = details["payload"].get("bundle_id")
+            if isinstance(bundle_id, str):
+                reviews.append(
+                    {
+                        "bundle_id": bundle_id,
+                        "approval": details["approval"],
+                        "approval_revision": details["approval_revision"],
+                    }
+                )
         return {
             "schema_version": "1.0",
             "candidates": candidates,
             "manifests": manifests,
+            "reviews": reviews,
         }
+
+    @router.get(
+        "/tasks/{task_id}/delivery-bundles/{bundle_id}/preview", tags=["assets"]
+    )
+    async def preview_delivery_bundle(
+        task_id: str,
+        bundle_id: str,
+        asset: Literal["image", "design_note"] = Query(),
+    ) -> Response:
+        candidates = await run_in_threadpool(
+            container.application.list_delivery_bundle_candidates, task_id
+        )
+        candidate = next(
+            (item for item in candidates if item["bundle_id"] == bundle_id), None
+        )
+        if candidate is None:
+            raise HarnessError("VALIDATION_ERROR", "The delivery candidate does not exist.")
+        preview = await run_in_threadpool(
+            container.assets.preview_delivery_candidate,
+            task_id,
+            candidate["instance_id"],
+            candidate[asset],
+        )
+        content = preview["content"]
+        return Response(
+            content=content.encode("utf-8") if isinstance(content, str) else content,
+            media_type=preview["mime_type"],
+            headers={
+                "Cache-Control": "no-store, private",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+            },
+        )
 
     @router.post("/tasks/{task_id}/assets", tags=["assets"])
     async def import_task_asset(
@@ -1004,6 +1071,25 @@ def build_v1_router(container: Container) -> APIRouter:
             container.credentials.configure_pool, body.pairs
         )
         return {"schema_version": "1.0", **result}
+
+    @router.post("/config/diagnostics/preflight", tags=["configuration"])
+    async def preflight_settings(body: SettingsPreflightRequest) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.settings_diagnostics.preflight,
+            body.expected_config_revision,
+        )
+
+    @router.post("/config/diagnostics/paid-smoke", tags=["configuration"])
+    async def run_paid_smoke(body: PaidSmokeRequest) -> dict[str, Any]:
+        _require_human(body.envelope, "Only a human may confirm a paid Provider smoke run.")
+        return await run_in_threadpool(
+            container.settings_diagnostics.run_paid_smoke,
+            expected_config_revision=body.envelope.expected_revision,
+            credential_pair_id=body.credential_pair_id,
+            credential_pair_revision=body.credential_pair_revision,
+            operation_id=body.operation_id,
+            actor=Actor(body.envelope.actor_type, body.envelope.actor_id),
+        )
 
     @router.post(
         "/instances/{instance_id}/reassign-credential-pair",

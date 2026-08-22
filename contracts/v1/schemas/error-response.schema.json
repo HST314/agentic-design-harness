@@ -35,6 +35,7 @@
             "PROCESS_START_FAILED",
             "MASTER_UNAVAILABLE",
             "MASTER_RUN_FAILED",
+            "PROVIDER_DIAGNOSTIC_FAILED",
             "INTERNAL_ERROR"
           ]
         },

@@ -110,6 +110,12 @@
       "meaning": "The configured Master Gateway rejected or failed a planning run."
     },
     {
+      "code": "PROVIDER_DIAGNOSTIC_FAILED",
+      "http_status": 502,
+      "retryable": false,
+      "meaning": "An explicitly confirmed real-provider diagnostic did not return a verifiable result."
+    },
+    {
       "code": "INTERNAL_ERROR",
       "http_status": 500,
       "retryable": false,

@@ -30,7 +30,7 @@ function taskLabel(task: TaskSummary): string {
 }
 
 function taskIdFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/tasks\/([^/]+)\/(?:master|board|plan|work-items)/);
+  const match = pathname.match(/^\/tasks\/([^/]+)\/(?:master|board|plan|deliveries|work-items)/);
   if (!match?.[1]) return null;
   try {
     return decodeURIComponent(match[1]);

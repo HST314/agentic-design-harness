@@ -100,6 +100,7 @@ export function TaskTabs({ taskId }: { taskId: string }): React.JSX.Element {
       <NavLink to={`${base}/master`}><Icon name="message" />Master</NavLink>
       <NavLink to={`${base}/board`}><Icon name="board" />看板</NavLink>
       <NavLink to={`${base}/plan`}><Icon name="plan" />计划</NavLink>
+      <NavLink to={`${base}/deliveries`}><Icon name="file-check" />交付</NavLink>
     </nav>
   );
 }
