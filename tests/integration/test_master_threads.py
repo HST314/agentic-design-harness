@@ -183,6 +183,7 @@ class MasterThreadApiTests(unittest.TestCase):
                     f"/api/v1/tasks/{task_id}/plan-proposals/1/confirm",
                     json={
                         "task_expected_revision": adjusted_session["task_revision"],
+                        "expected_card_revisions": {"card_master_1": 1},
                         "envelope": self._envelope("stale-confirm", 1),
                     },
                 )
@@ -193,6 +194,7 @@ class MasterThreadApiTests(unittest.TestCase):
                     f"/api/v1/tasks/{task_id}/plan-proposals/2/confirm",
                     json={
                         "task_expected_revision": adjusted_session["task_revision"],
+                        "expected_card_revisions": {"card_master_2": 1},
                         "envelope": self._envelope("confirm-current", 2),
                     },
                 )
@@ -205,6 +207,143 @@ class MasterThreadApiTests(unittest.TestCase):
                 self.assertIn("save_plan_proposal", commands)
                 self.assertIn("confirm_plan_proposal", commands)
                 self.assertIn("append_plan_confirmation_message", commands)
+
+    def test_task_card_edit_creates_a_new_plan_revision_and_requires_exact_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self._app(Path(temporary))
+            application = RecordingApplication()
+            app.state.container.master_threads.gateway = RecordingGateway()
+            app.state.container.master_threads.application = application
+            app.state.container.master_threads.credentials = EnabledCredentials()
+            with TestClient(app) as client:
+                task_id = self._create_submit(client, "manual")
+                first = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                card = first["latest_proposal"]["execution_cards"][0]
+                request = {
+                    "expected_proposal_revision": 1,
+                    "expected_card_revision": 1,
+                    "objective": "生成更克制的自然光主视觉。",
+                    "instructions": ["遵守品牌安全区。", "整体降低饱和度。"],
+                    "input_assets": card["input_assets"],
+                    "expected_deliveries": card["expected_deliveries"],
+                    "parameters": {
+                        "usage_context": "发布会主屏",
+                        "aspect_ratio": "16:9",
+                        "variants": 2,
+                    },
+                    "envelope": self._envelope("revise-card-1", 1),
+                }
+                revised = client.patch(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/task-cards/{card['card_id']}",
+                    json=request,
+                )
+                self.assertEqual(revised.status_code, 200, revised.text)
+                session = revised.json()
+                proposal = session["latest_proposal"]
+                self.assertEqual(proposal["revision"], 2)
+                self.assertEqual(proposal["status"], "PENDING_CONFIRMATION")
+                self.assertEqual(proposal["execution_cards"][0]["revision"], 2)
+                self.assertEqual(
+                    proposal["execution_cards"][0]["objective"],
+                    "生成更克制的自然光主视觉。",
+                )
+                self.assertIn("请重新审阅后确认", session["messages"][-1]["content"])
+                proposals = app.state.container.store.plan_proposal.list(task_id)
+                self.assertEqual(
+                    {item["revision"]: item["status"] for item in proposals},
+                    {1: "SUPERSEDED", 2: "PENDING_CONFIRMATION"},
+                )
+
+                replay = client.patch(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/task-cards/{card['card_id']}",
+                    json=request,
+                )
+                self.assertEqual(replay.status_code, 200, replay.text)
+                self.assertEqual(
+                    replay.json()["latest_proposal"]["proposal_id"],
+                    proposal["proposal_id"],
+                )
+
+                stale_review = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/2/confirm",
+                    json={
+                        "task_expected_revision": session["task_revision"],
+                        "expected_card_revisions": {card["card_id"]: 1},
+                        "envelope": self._envelope("confirm-stale-card", 2),
+                    },
+                )
+                self.assertEqual(stale_review.status_code, 409, stale_review.text)
+                self.assertEqual(stale_review.json()["error"]["code"], "REVISION_CONFLICT")
+                self.assertEqual(application.saved, [])
+
+                confirmed = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/2/confirm",
+                    json={
+                        "task_expected_revision": session["task_revision"],
+                        "expected_card_revisions": {card["card_id"]: 2},
+                        "envelope": self._envelope("confirm-reviewed-card", 2),
+                    },
+                )
+                self.assertEqual(confirmed.status_code, 200, confirmed.text)
+                self.assertEqual(confirmed.json()["proposal"]["status"], "CONFIRMED")
+                self.assertEqual(
+                    application.saved[0]["task_cards"][0]["objective"],
+                    "生成更克制的自然光主视觉。",
+                )
+
+    def test_task_card_edit_revalidates_secrets_manifests_and_delivery_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self._app(Path(temporary))
+            app.state.container.master_threads.gateway = RecordingGateway()
+            with TestClient(app) as client:
+                task_id = self._create_submit(client, "manual")
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                card = session["latest_proposal"]["execution_cards"][0]
+                base = {
+                    "expected_proposal_revision": 1,
+                    "expected_card_revision": 1,
+                    "objective": card["objective"],
+                    "instructions": card["instructions"],
+                    "input_assets": card["input_assets"],
+                    "expected_deliveries": card["expected_deliveries"],
+                    "parameters": card["parameters"],
+                }
+                invalid_requests = [
+                    {
+                        **base,
+                        "objective": "api_key=abcdefgh12345678",
+                        "envelope": self._envelope("reject-card-secret", 1),
+                    },
+                    {
+                        **base,
+                        "input_assets": [{
+                            **card["input_assets"][0],
+                            "manifest_relpath": (
+                                f"resources/manifests/{card['input_assets'][0]['asset_id']}.json"
+                            ),
+                        }],
+                        "envelope": self._envelope("reject-card-manifest", 1),
+                    },
+                    {
+                        **base,
+                        "expected_deliveries": [{
+                            **card["expected_deliveries"][0],
+                            "accepted_mime_types": ["image/PNG"],
+                        }],
+                        "envelope": self._envelope("reject-card-mime", 1),
+                    },
+                ]
+                for request in invalid_requests:
+                    with self.subTest(key=request["envelope"]["idempotency_key"]):
+                        response = client.patch(
+                            f"/api/v1/tasks/{task_id}/plan-proposals/1/task-cards/{card['card_id']}",
+                            json=request,
+                        )
+                        self.assertIn(response.status_code, {400, 422}, response.text)
+
+                proposals = app.state.container.store.plan_proposal.list(task_id)
+                self.assertEqual(len(proposals), 1)
+                self.assertEqual(proposals[0]["status"], "PENDING_CONFIRMATION")
 
     def test_auto_mode_uses_the_same_gates_and_confirms_without_human_api(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -248,6 +387,7 @@ class MasterThreadApiTests(unittest.TestCase):
                         task_id,
                         1,
                         task_expected_revision=session["task_revision"],
+                        expected_card_revisions={"card_master_1": 1},
                         envelope=CommandEnvelope.model_validate(
                             self._envelope("confirm-before-crash", 1)
                         ),

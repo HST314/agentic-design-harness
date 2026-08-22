@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import secrets
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, NoReturn
@@ -34,7 +36,7 @@ from .image_lock import (
     default_image_agent_lock_path,
     load_image_agent_lock,
 )
-from .image_observation import ImageObservationMixin
+from .image_observation import MANAGED_ADAPTER_HEADER, ImageObservationMixin
 from .image_runtime import (
     IMAGE_ENTRYPOINT,
     IMAGE_WEB_REQUIREMENTS,
@@ -136,12 +138,42 @@ class ImageAgentAdapter(ImageObservationMixin):
         runtime_root = instance_root / "runtime"
         atomic_write_json(runtime_root / "image-task-card.json", image_card, mode=0o640)
         state_path = self._state_path(task_id, instance_id)
+        control_path = runtime_root / "managed-control.json"
+        if control_path.exists():
+            control = read_json(control_path)
+        elif state_path.exists():
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The prepared Image runtime lost its managed control file.",
+                {"instance_id": instance_id},
+            )
+        else:
+            control = {
+                "schema_version": "1.0",
+                "instance_id": instance_id,
+                "request_key": secrets.token_urlsafe(32),
+            }
+            atomic_write_json(control_path, control, mode=0o600)
+        managed_request_key = control.get("request_key")
+        if (
+            control.get("instance_id") != instance_id
+            or not isinstance(managed_request_key, str)
+            or len(managed_request_key) < 32
+        ):
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The Image runtime managed control file is invalid.",
+                {"instance_id": instance_id},
+            )
         expected_state = {
             "schema_version": "1.0",
             "task_id": task_id,
             "instance_id": instance_id,
             "task_card_sha256": digest_json(image_card),
             "source_revision": self.revision,
+            "managed_request_key_sha256": hashlib.sha256(
+                managed_request_key.encode("utf-8")
+            ).hexdigest(),
             "project_created": False,
             "operation_id": None,
             "job_id": None,
@@ -149,7 +181,13 @@ class ImageAgentAdapter(ImageObservationMixin):
         }
         if state_path.exists():
             current = read_json(state_path)
-            immutable = ("task_id", "instance_id", "task_card_sha256", "source_revision")
+            immutable = (
+                "task_id",
+                "instance_id",
+                "task_card_sha256",
+                "source_revision",
+                "managed_request_key_sha256",
+            )
             if any(current.get(key) != expected_state[key] for key in immutable):
                 raise HarnessError(
                     "IDEMPOTENCY_CONFLICT",
@@ -184,6 +222,9 @@ class ImageAgentAdapter(ImageObservationMixin):
             public_environment={
                 "IMAGE_AGENT_FRONT_PROJECTS_ROOT": str(instance_root / "work"),
                 "IMAGE_AGENT_MODEL_LIBRARY": str(artifact_root / "configs" / "model_library.yaml"),
+                "IMAGE_AGENT_MANAGED_MODE": "1",
+                "IMAGE_AGENT_MANAGED_PROJECT_ID": instance_id,
+                "IMAGE_AGENT_CONTROL_FILE": str(control_path),
                 "PYTHONPATH": str(artifact_root / "_dependencies"),
             },
             health_path="/api/health",
@@ -293,10 +334,22 @@ class ImageAgentAdapter(ImageObservationMixin):
                 base_url, "GET", f"/api/projects/{instance_id}", allow_404=True
             )
             if existing is None:
+                control = read_json(
+                    self.store.layout.initialize_instance(task_id, instance_id)
+                    / "runtime"
+                    / "managed-control.json"
+                )
+                managed_request_key = control.get("request_key")
+                if not isinstance(managed_request_key, str) or len(managed_request_key) < 32:
+                    raise HarnessError(
+                        "PROCESS_START_FAILED",
+                        "The Image runtime managed control file is invalid.",
+                        {"instance_id": instance_id},
+                    )
                 self._request(
                     base_url,
                     "POST",
-                    "/api/projects",
+                    "/api/managed/projects",
                     {
                         "project_id": instance_id,
                         "task_card": card,
@@ -304,6 +357,7 @@ class ImageAgentAdapter(ImageObservationMixin):
                         "defer_run": True,
                     },
                     expected_statuses=(201,),
+                    headers={MANAGED_ADAPTER_HEADER: managed_request_key},
                 )
             state["project_created"] = True
             self._write_state(task_id, instance_id, state)

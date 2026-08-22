@@ -25,7 +25,7 @@ make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
 | 真实 Image 浏览器闭环 | `make frontend-integration` | 生产前端、真实 Harness、真实 Image 进程和本地确定性 Provider；浏览器不拦截 API |
 | 双平台 CI | `quality / release-gate` | Linux/Windows 后端、前端单测、构建和 Chromium 回归全部成功，Linux 再执行真实 Image 闭环 |
 
-CI 的 Image 基线固定为 `image_agent_mvp` 1.8.2、提交 `0e559d0153f479c8abefb14613804b8cde486282`。升级该基线必须显式更新工作流、重新运行真实闭环并审阅契约差异；不得使用浮动分支冒充可复现发布。
+CI 的 Image 基线固定为 `image_agent_mvp` 1.8.2、提交 `4a958099e0452190f7bdd576e8e8a3a4f54c6000`。升级该基线必须显式更新工作流、重新运行真实闭环并审阅契约差异；不得使用浮动分支冒充可复现发布。
 
 ## RFC v0.3 证据
 

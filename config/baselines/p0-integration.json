@@ -42,9 +42,9 @@
     },
     "image_agent": {
       "repository": "https://github.com/HST314/image_agent_mvp.git",
-      "revision": "0e559d0153f479c8abefb14613804b8cde486282",
-      "git_tree": "f189d24d50162daaa01bfc3e0fc72f395e50da8d",
-      "source_content_sha256": "ade81f5bf339b4c8d16755876d49fccc1ba6c783434d7432294449fdc7ba10fb",
+      "revision": "4a958099e0452190f7bdd576e8e8a3a4f54c6000",
+      "git_tree": "f40c93f4ffbdcafd43d2479942fa6a2e24051439",
+      "source_content_sha256": "c58bb261076299af784f6c65c2da8e6e43cb569a5844ace44f39bd624bffb796",
       "dependency_lock_set_sha256": "e2f66966ed45fe0a1df6f6323f38875a9f5db4e5f4030aee7e74875765e5b17d",
       "runtime_dependency_tree_sha256": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
       "gate_result": {

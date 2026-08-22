@@ -839,6 +839,32 @@
 .master-work-items code { display: block; overflow: hidden; color: var(--color-muted-foreground); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .master-agent-chip { padding: 3px 7px; border-radius: var(--radius-sm); color: var(--color-primary-strong); background: var(--color-primary-softer); font-weight: 700; }
 
+.master-task-cards { margin-top: var(--space-6); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+.master-task-cards__heading { display: flex; align-items: end; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-3); }
+.master-task-cards__heading h3 { margin: 0; font-size: 18px; }
+.master-task-cards__heading > span { color: var(--color-muted-foreground); font-size: 12px; }
+.master-task-cards__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+
+.master-task-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-muted-surface); }
+.master-task-card > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.master-task-card > header > div { display: flex; align-items: center; gap: var(--space-2); }
+.master-task-card > header button { display: inline-flex; align-items: center; gap: var(--space-2); }
+.master-task-card > header svg { width: 16px; height: 16px; }
+.master-task-card__revision { color: var(--color-muted-foreground); font-size: 12px; font-weight: 700; }
+.master-task-card h3 { margin: var(--space-3) 0 var(--space-1); font-size: 16px; }
+.master-task-card__objective { margin: 0; line-height: 1.6; }
+.master-task-card__parameters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); margin: var(--space-3) 0; }
+.master-task-card__parameters div { min-width: 0; padding: var(--space-2); border-radius: var(--radius-sm); background: var(--color-surface); }
+.master-task-card__parameters dt { color: var(--color-muted-foreground); font-size: 12px; }
+.master-task-card__parameters dd { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 650; }
+.master-task-card__details { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); }
+.master-task-card__details section { min-width: 0; }
+.master-task-card__details h4 { margin: 0 0 var(--space-1); font-size: 12px; }
+.master-task-card__details ul { margin: 0; padding-left: 18px; color: var(--color-muted-foreground); font-size: 12px; line-height: 1.55; }
+.master-task-card__details p { margin: 0; color: var(--color-muted-foreground); font-size: 12px; }
+.master-task-card__details code { overflow-wrap: anywhere; white-space: normal; }
+.master-task-card__id { display: block; margin-top: var(--space-3); overflow: hidden; color: var(--color-muted-foreground); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
 .master-proposal__actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-top: var(--space-6); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
 .master-proposal__actions strong,
 .master-proposal__actions span { display: block; }
@@ -888,10 +914,57 @@
 .master-confirm-dialog::backdrop { background: var(--color-scrim); }
 .master-confirm-dialog__body { display: grid; gap: var(--space-4); padding: var(--space-4); }
 .master-confirm-dialog__body > p { margin: 0; color: var(--color-muted-foreground); line-height: 1.6; }
-.master-confirm-dialog dl { display: grid; grid-template-columns: 1fr 1fr; margin: 0; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+.master-confirm-dialog dl { display: grid; grid-template-columns: repeat(3, 1fr); margin: 0; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
 .master-confirm-dialog dl div { padding: var(--space-3); }
 .master-confirm-dialog dt { color: var(--color-muted-foreground); font-size: 12px; }
 .master-confirm-dialog dd { margin: var(--space-1) 0 0; font-size: 18px; font-weight: 750; }
+.master-confirm-dialog__cards { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.master-confirm-dialog__cards li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--color-muted-surface); }
+.master-confirm-dialog__cards code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.master-confirm-dialog__warning { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--color-warning); border-radius: var(--radius-sm); color: var(--color-foreground) !important; background: var(--color-warning-soft); }
+.master-confirm-dialog__warning svg { width: 18px; height: 18px; flex: 0 0 auto; color: var(--color-warning); }
+
+.master-card-editor {
+  inset: 0 0 0 auto;
+  width: min(760px, 100vw);
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  color: var(--color-foreground);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-overlay);
+}
+.master-card-editor::backdrop { background: var(--color-scrim); }
+.master-card-editor > form { height: 100%; display: flex; flex-direction: column; }
+.master-card-editor__body { min-height: 0; flex: 1; display: grid; align-content: start; gap: var(--space-4); overflow: auto; padding: var(--space-4); }
+.master-card-editor__notice { margin: 0; padding: var(--space-3); border-radius: var(--radius-sm); color: var(--color-primary-strong); background: var(--color-primary-softer); font-size: 13px; line-height: 1.6; }
+.master-card-editor__body > label,
+.master-card-editor__body fieldset label { display: grid; gap: var(--space-2); color: var(--color-foreground); font-size: 13px; font-weight: 700; }
+.master-card-editor__body > label textarea,
+.master-card-editor__body fieldset input:not([type="checkbox"]),
+.master-card-editor__body fieldset select { width: 100%; min-height: 44px; padding: 9px 11px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-foreground); background: var(--color-surface); font: inherit; }
+.master-card-editor__body > label textarea { resize: vertical; line-height: 1.6; }
+.master-card-editor__body > fieldset { margin: 0; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+.master-card-editor__body > fieldset > legend { padding: 0 var(--space-1); font-size: 14px; font-weight: 750; }
+.master-card-editor__assets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+.master-card-editor__assets label { min-height: 52px; grid-template-columns: auto minmax(0, 1fr); align-items: center; padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.master-card-editor__assets strong,
+.master-card-editor__assets small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.master-card-editor__assets small { margin-top: 2px; color: var(--color-muted-foreground); font-weight: 500; }
+.master-card-editor__deliveries { display: grid; gap: var(--space-3); }
+.master-card-editor__deliveries > fieldset { display: grid; grid-template-columns: 0.7fr 1fr 1.4fr; gap: var(--space-3); margin: 0; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-muted-surface); }
+.master-card-editor__deliveries > fieldset > legend { padding: 0 var(--space-1); font-size: 12px; font-weight: 750; }
+.master-card-editor__checkbox { min-height: 44px; display: flex !important; grid-template-columns: none; flex-direction: row; align-items: center; }
+.master-card-editor__deliveries .workbench-text-button { justify-self: start; min-height: 44px; padding: 0; border: 0; color: var(--color-danger); background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
+.master-card-editor__deliveries .workbench-text-button:disabled { color: var(--color-unavailable); cursor: not-allowed; }
+.master-card-editor__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.master-card-editor__wide { grid-column: 1 / -1; }
+.master-card-editor__actions { padding: var(--space-4); border-top: 1px solid var(--color-border); background: var(--color-surface); }
 
 .workbench-drawer {
   position: fixed;
@@ -1341,6 +1414,12 @@
   .master-proposal__actions { display: grid; }
   .master-stage-list { display: grid; }
   .master-work-items { grid-template-columns: 1fr; }
+  .master-task-cards__heading { display: grid; }
+  .master-task-cards__grid,
+  .master-task-card__details,
+  .master-card-editor__assets,
+  .master-card-editor__deliveries > fieldset,
+  .master-card-editor__grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
