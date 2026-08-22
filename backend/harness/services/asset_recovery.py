@@ -45,7 +45,7 @@ class AssetRecoveryMixin:
                     elif record.get("transaction_type") == "publication":
                         results.append(self._resume_publication(record_path, None))
                     elif record.get("transaction_type") == "publication_batch":
-                        results.append(self._resume_publication_batch(record_path))
+                        results.append(self._resume_publication_batch(record_path, None))
                 workspace = self.store.layout.workspace_root / "tasks" / task_id
                 for temporary in workspace.glob("resources/shared/*/.*.tmp"):
                     publication_id = temporary.name[1:-4]
@@ -291,10 +291,34 @@ class AssetRecoveryMixin:
         manifest_temporary.unlink(missing_ok=True)
         return deepcopy(manifest)
 
-    def _resume_publication_batch(self, record_path: Path) -> dict[str, Any]:
+    def _resume_publication_batch(
+        self, record_path: Path, crash_hook: CrashHook | None = None
+    ) -> dict[str, Any]:
         record = read_json(record_path)
         task_id = record["task_id"]
         batch_id = record["batch_id"]
+        bundle_manifest = record["request"].get("bundle_manifest")
+        bundle_path = None
+        if bundle_manifest is not None:
+            self.store.contracts.validate("bundle-manifest", bundle_manifest)
+            if (
+                bundle_manifest["task_id"] != task_id
+                or bundle_manifest["instance_id"] != record["instance_id"]
+                or bundle_manifest["publication_batch_id"] != batch_id
+            ):
+                raise HarnessError(
+                    "ASSET_VALIDATION_FAILED",
+                    "The publication batch contains an invalid bundle manifest.",
+                )
+            workspace = self.store.layout.initialize_task(task_id)[1]
+            bundle_path = (
+                workspace / "resources" / "bundles" / f"{bundle_manifest['bundle_id']}.json"
+            )
+            if bundle_path.exists() and read_json(bundle_path) != bundle_manifest:
+                raise HarnessError(
+                    "IDEMPOTENCY_CONFLICT",
+                    "The bundle manifest path already contains another bundle.",
+                )
         committed = self._publication_batch_event(task_id, batch_id)
         if committed is not None:
             if committed["request_sha256"] != record["request_sha256"]:
@@ -311,6 +335,8 @@ class AssetRecoveryMixin:
                     }
                 )
                 atomic_write_json(record_path, record)
+            if bundle_path is not None and not bundle_path.exists():
+                atomic_write_json(bundle_path, bundle_manifest, mode=0o440)
             return deepcopy(committed)
 
         asset_ids = []
@@ -331,6 +357,10 @@ class AssetRecoveryMixin:
                 )
             self._verify_manifest_file(task_id, publication["manifest"])
             asset_ids.append(item["asset_id"])
+        if bundle_path is not None and not bundle_path.exists():
+            atomic_write_json(bundle_path, bundle_manifest, mode=0o440)
+        if crash_hook:
+            crash_hook("after_bundle_manifest_write")
         now = utc_now()
         event = {
             "event_id": f"evt_{uuid.uuid4().hex}",
@@ -342,7 +372,11 @@ class AssetRecoveryMixin:
             "request_sha256": record["request_sha256"],
             "occurred_at": now,
         }
+        if bundle_manifest is not None:
+            event["bundle_id"] = bundle_manifest["bundle_id"]
         append_record(self._event_path(task_id), event)
+        if crash_hook:
+            crash_hook("after_publication_batch_event")
         record.update({"state": "COMMITTED", "committed_at": now, "result": event})
         atomic_write_json(record_path, record)
         return deepcopy(event)

@@ -568,6 +568,8 @@ class AssetService(AssetRecoveryMixin):
         *,
         batch_id: str,
         manifests: list[dict[str, Any]],
+        bundle_manifest: dict[str, Any] | None = None,
+        crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
         """Commit one visibility gate for a fully validated set of publications."""
 
@@ -585,6 +587,20 @@ class AssetService(AssetRecoveryMixin):
         ordered = sorted(manifests, key=lambda item: item["asset_id"])
         if len({item["asset_id"] for item in ordered}) != len(ordered):
             self._invalid("A publication batch cannot contain duplicate assets.")
+        if bundle_manifest is not None:
+            self.store.contracts.validate("bundle-manifest", bundle_manifest)
+            if (
+                bundle_manifest["task_id"] != task_id
+                or bundle_manifest["instance_id"] != instance_id
+                or bundle_manifest["publication_batch_id"] != batch_id
+            ):
+                self._invalid("The bundle manifest does not belong to its publication batch.")
+            referenced = {
+                bundle_manifest["image_asset"]["asset_id"],
+                bundle_manifest["design_note_asset"]["asset_id"],
+            }
+            if referenced != {item["asset_id"] for item in ordered}:
+                self._invalid("The bundle manifest must reference exactly its two batch assets.")
         request = {
             "task_id": task_id,
             "instance_id": instance_id,
@@ -598,6 +614,8 @@ class AssetService(AssetRecoveryMixin):
                 for item in ordered
             ],
         }
+        if bundle_manifest is not None:
+            request["bundle_manifest"] = deepcopy(bundle_manifest)
         record_path = self._transaction_dir(task_id) / f"{batch_id}.json"
         with FileLock(self._asset_lock(task_id), self.store.lock_timeout_seconds):
             if record_path.exists():
@@ -616,7 +634,7 @@ class AssetService(AssetRecoveryMixin):
                     "created_at": utc_now(),
                 }
                 atomic_write_json(record_path, record)
-            return self._resume_publication_batch(record_path)
+            return self._resume_publication_batch(record_path, crash_hook)
 
     def list_publication_batch(
         self, task_id: str, instance_id: str, batch_id: str
@@ -681,6 +699,30 @@ class AssetService(AssetRecoveryMixin):
             manifest = event["manifest"]
             status = self._integrity_status(task_id, manifest["asset_id"])
             values.append({"manifest": deepcopy(manifest), "integrity_status": status})
+        return values
+
+    def list_bundle_manifests(self, task_id: str) -> list[dict[str, Any]]:
+        """List only bundle manifests whose shared publication batch is committed."""
+
+        self._require_task(task_id)
+        workspace = self.initialize_task_workspace(task_id)
+        root = workspace / "resources" / "bundles"
+        values: list[dict[str, Any]] = []
+        for path in sorted(root.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            manifest = read_json(path)
+            self.store.contracts.validate("bundle-manifest", manifest)
+            if manifest["task_id"] != task_id or path.name != f"{manifest['bundle_id']}.json":
+                self._invalid("A bundle manifest has an invalid task owner or filename.")
+            committed = self._publication_batch_event(
+                task_id, manifest["publication_batch_id"]
+            )
+            if committed is None or committed.get("bundle_id") != manifest["bundle_id"]:
+                continue
+            self.verify_asset(task_id, manifest["image_asset"]["asset_id"])
+            self.verify_asset(task_id, manifest["design_note_asset"]["asset_id"])
+            values.append(deepcopy(manifest))
         return values
 
     def verify_asset(self, task_id: str, asset_id: str) -> dict[str, Any]:
