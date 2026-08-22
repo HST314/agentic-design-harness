@@ -62,6 +62,8 @@ class StateLayout:
             workspace_task / "inputs" / "manifests",
             workspace_task / "resources" / "shared",
             workspace_task / "resources" / "manifests",
+            workspace_task / "resources" / "bundles",
+            workspace_task / "deliveries" / "candidates",
             workspace_task / "instances",
             workspace_task / "approvals",
         )

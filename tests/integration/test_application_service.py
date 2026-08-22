@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
 
 from harness.adapters import (
@@ -47,6 +48,7 @@ class FakeImageAdapter:
         self.advance_calls = []
         self.observation = AdapterObservation("RUNNING")
         self.deliveries = []
+        self.delivery_bundles = []
         self.advance_delay = 0.0
         self.advance_accepted = True
 
@@ -85,6 +87,9 @@ class FakeImageAdapter:
 
     def collect_deliveries(self, instance_id):
         return self.deliveries
+
+    def collect_delivery_bundles(self, instance_id):
+        return self.delivery_bundles
 
     def collect_usage(self, instance_id, cursor):
         return []
@@ -972,6 +977,217 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
         self.assertEqual(self.application.recover(), [])
         self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
+
+    def test_bundle_delivery_waits_for_human_and_publishes_two_assets_atomically(self) -> None:
+        task_id = "t_bundle_delivery"
+        self._running_image_task(task_id, 1)
+        self.application.delivery_bundle_write_targets = (True, True)
+        image = b"\x89PNG\r\n\x1a\nbundle-final-image"
+        note = b"# Branch design note\n\nImmutable delivery rationale.\n"
+        alternate_image = b"\x89PNG\r\n\x1a\nalternate-branch-image"
+        alternate_note = b"# Alternate branch note\n"
+        instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
+        (instance_root / "outputs" / "bundle-image.png").write_bytes(image)
+        (instance_root / "outputs" / "bundle-note.md").write_bytes(note)
+        (instance_root / "outputs" / "alternate-image.png").write_bytes(alternate_image)
+        (instance_root / "outputs" / "alternate-note.md").write_bytes(alternate_note)
+        card = self.store.plan.get(task_id, task_id)["task_cards"][0]
+        candidate = {
+            "schema_version": "1.0",
+            "bundle_id": "bundle_branch_main_01",
+            "task_id": task_id,
+            "work_item_id": "work_bundle_main_01",
+            "instance_id": "i_image_1",
+            "task_card_revision": card["revision"],
+            "branch_id": "main",
+            "checkpoint_id": "checkpoint_0123456789abcdef01234567",
+            "image": {
+                "private_relative_path": "instances/i_image_1/outputs/bundle-image.png",
+                "mime_type": "image/png",
+                "size_bytes": len(image),
+                "sha256": hashlib.sha256(image).hexdigest(),
+                "width": 1920,
+                "height": 1080,
+            },
+            "design_note": {
+                "private_relative_path": "instances/i_image_1/outputs/bundle-note.md",
+                "mime_type": "text/markdown",
+                "size_bytes": len(note),
+                "sha256": hashlib.sha256(note).hexdigest(),
+            },
+            "status": "PENDING_CONFIRMATION",
+            "created_at": "2026-08-22T17:00:00Z",
+            "decided_at": None,
+            "actor": None,
+            "publication_batch_id": None,
+        }
+        alternate = deepcopy(candidate)
+        alternate.update(
+            bundle_id="bundle_branch_alternate_02",
+            branch_id="branch_alternate",
+            checkpoint_id="checkpoint_89abcdef0123456701234567",
+            created_at="2026-08-22T17:01:00Z",
+        )
+        alternate["image"].update(
+            private_relative_path="instances/i_image_1/outputs/alternate-image.png",
+            size_bytes=len(alternate_image),
+            sha256=hashlib.sha256(alternate_image).hexdigest(),
+        )
+        alternate["design_note"].update(
+            private_relative_path="instances/i_image_1/outputs/alternate-note.md",
+            size_bytes=len(alternate_note),
+            sha256=hashlib.sha256(alternate_note).hexdigest(),
+        )
+        self.fake_adapter.delivery_bundles = [candidate, alternate]
+        self.fake_adapter.observation = AdapterObservation(
+            "RUNNING", step_id="completed", details={"completed": True}
+        )
+
+        observed = self.application.observe_instance(task_id, "i_image_1")
+        self.assertEqual(observed["instance"]["status"], "WAITING_APPROVAL")
+        self.assertEqual(self.assets.list_assets(task_id), [])
+        self.assertEqual(self.assets.list_bundle_manifests(task_id), [])
+        approval = observed["delivery"]["approval"]
+        alternate_approval = observed["delivery"]["approvals"][1]
+        self.assertEqual(approval["approval"]["kind"], "DELIVERY_REVIEW")
+
+        resolved = self.application.resolve_approval(
+            approval["approval"]["approval_id"],
+            decision="APPROVED",
+            action="publish_bundle",
+            payload={},
+            operation_id="publish_bundle_main_01",
+            envelope=envelope(
+                "publish-bundle-main-01", approval["approval_revision"]
+            ),
+        )
+
+        self.assertEqual(resolved["instance"]["status"], "SUCCEEDED")
+        self.assertEqual(resolved["candidate"]["status"], "PUBLISHED")
+        assets = self.assets.list_assets(task_id)
+        self.assertEqual(
+            {(item["manifest"]["role"], item["manifest"]["mime_type"]) for item in assets},
+            {("final_artwork", "image/png"), ("design_note", "text/markdown")},
+        )
+        bundles = self.assets.list_bundle_manifests(task_id)
+        self.assertEqual(len(bundles), 1)
+        self.assertEqual(bundles[0]["bundle_id"], candidate["bundle_id"])
+        alternate_resolved = self.application.resolve_approval(
+            alternate_approval["approval"]["approval_id"],
+            decision="APPROVED",
+            action="publish_bundle",
+            payload={},
+            operation_id="publish_bundle_alternate_02",
+            envelope=envelope(
+                "publish-bundle-alternate-02",
+                alternate_approval["approval_revision"],
+            ),
+        )
+        self.assertEqual(alternate_resolved["instance"]["status"], "SUCCEEDED")
+        self.assertEqual(len(self.assets.list_assets(task_id)), 4)
+        self.assertEqual(
+            {item["bundle_id"] for item in self.assets.list_bundle_manifests(task_id)},
+            {candidate["bundle_id"], alternate["bundle_id"]},
+        )
+        replay = self.application.resolve_approval(
+            approval["approval"]["approval_id"],
+            decision="APPROVED",
+            action="publish_bundle",
+            payload={},
+            operation_id="publish_bundle_main_01",
+            envelope=envelope(
+                "publish-bundle-main-01", approval["approval_revision"]
+            ),
+        )
+        self.assertEqual(replay["bundle_manifest"], resolved["bundle_manifest"])
+        self.assertEqual(len(self.assets.list_assets(task_id)), 4)
+
+    def test_bundle_publication_recovers_after_manifest_write_without_half_visibility(
+        self,
+    ) -> None:
+        task_id = "t_bundle_crash_recovery"
+        self._running_image_task(task_id, 1)
+        self.application.delivery_bundle_write_targets = (False, True)
+        image = b"\x89PNG\r\n\x1a\ncrash-safe-image"
+        note = b"# Crash-safe note\n"
+        instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
+        (instance_root / "outputs" / "crash-image.png").write_bytes(image)
+        (instance_root / "outputs" / "crash-note.md").write_bytes(note)
+        candidate = {
+            "schema_version": "1.0",
+            "bundle_id": "bundle_crash_safe_01",
+            "task_id": task_id,
+            "work_item_id": "work_crash_safe_01",
+            "instance_id": "i_image_1",
+            "task_card_revision": 1,
+            "branch_id": "branch_crash",
+            "checkpoint_id": "checkpoint_fedcba987654321001234567",
+            "image": {
+                "private_relative_path": "instances/i_image_1/outputs/crash-image.png",
+                "mime_type": "image/png",
+                "size_bytes": len(image),
+                "sha256": hashlib.sha256(image).hexdigest(),
+                "width": 1200,
+                "height": 800,
+            },
+            "design_note": {
+                "private_relative_path": "instances/i_image_1/outputs/crash-note.md",
+                "mime_type": "text/markdown",
+                "size_bytes": len(note),
+                "sha256": hashlib.sha256(note).hexdigest(),
+            },
+            "status": "PENDING_CONFIRMATION",
+            "created_at": "2026-08-22T17:10:00Z",
+            "decided_at": None,
+            "actor": None,
+            "publication_batch_id": None,
+        }
+        self.fake_adapter.delivery_bundles = [candidate]
+        self.fake_adapter.observation = AdapterObservation(
+            "RUNNING", step_id="completed", details={"completed": True}
+        )
+        approval = self.application.observe_instance(task_id, "i_image_1")["delivery"][
+            "approval"
+        ]
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_bundle_manifest_write":
+                raise SimulatedCrash(checkpoint)
+
+        resolve_envelope = envelope(
+            "publish-crash-safe-bundle", approval["approval_revision"]
+        )
+        with self.assertRaises(SimulatedCrash):
+            self.application.resolve_approval(
+                approval["approval"]["approval_id"],
+                decision="APPROVED",
+                action="publish_bundle",
+                payload={},
+                operation_id="publish_crash_safe_bundle",
+                envelope=resolve_envelope,
+                crash_hook=crash,
+            )
+
+        self.assertEqual(self.assets.list_assets(task_id), [])
+        self.assertEqual(self.assets.list_bundle_manifests(task_id), [])
+        self.assertEqual(
+            self.application.list_delivery_bundle_candidates(task_id)[0]["status"],
+            "PENDING_CONFIRMATION",
+        )
+
+        recovered = self.application.recover()
+        result = next(
+            item for item in recovered if item["operation_id"] == "publish_crash_safe_bundle"
+        )
+        self.assertEqual(result["status"], "RECOVERED")
+        self.assertEqual(len(self.assets.list_assets(task_id)), 2)
+        self.assertEqual(len(self.assets.list_bundle_manifests(task_id)), 1)
+        self.assertEqual(
+            self.application.list_delivery_bundle_candidates(task_id)[0]["status"],
+            "PUBLISHED",
+        )
+        self.assertEqual(self.application.recover(), [])
+        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 3)
 
     def test_delivery_contract_consumes_each_candidate_once_and_rejects_extras(self) -> None:
         task_id = "t_delivery_contract_cardinality"

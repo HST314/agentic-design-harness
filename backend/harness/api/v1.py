@@ -843,6 +843,20 @@ def build_v1_router(container: Container) -> APIRouter:
         )
         return {"schema_version": "1.0", **page, "assets": assets}
 
+    @router.get("/tasks/{task_id}/delivery-bundles", tags=["assets"])
+    async def list_delivery_bundles(task_id: str) -> dict[str, Any]:
+        candidates = await run_in_threadpool(
+            container.application.list_delivery_bundle_candidates, task_id
+        )
+        manifests = await run_in_threadpool(
+            container.assets.list_bundle_manifests, task_id
+        )
+        return {
+            "schema_version": "1.0",
+            "candidates": candidates,
+            "manifests": manifests,
+        }
+
     @router.post("/tasks/{task_id}/assets", tags=["assets"])
     async def import_task_asset(
         task_id: str, body: ImportAssetRequest

@@ -30,7 +30,7 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
-from .image_delivery import normalize_image_delivery, stage_final_delivery
+from .image_delivery import image_dimensions, normalize_image_delivery, stage_final_delivery
 from .image_lock import (
     ImageAgentReleaseLock,
     default_image_agent_lock_path,
@@ -47,7 +47,13 @@ from .image_workflow import (
     HARNESS_CAPABILITIES,
     map_advance_payload,
 )
-from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
+from .types import (
+    AgentInstanceSnapshot,
+    DeliveryBundleCandidate,
+    DeliveryCandidate,
+    TaskCard,
+    UsageEvent,
+)
 
 _PACKAGE_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 _ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
@@ -586,6 +592,195 @@ class ImageAgentAdapter(ImageObservationMixin):
                 "updated_model_bindings": sorted(updates),
             },
         )
+
+    def collect_delivery_bundles(self, instance_id: str) -> list[DeliveryBundleCandidate]:
+        """Stage and validate every immutable branch candidate exposed by Image Agent."""
+
+        task_id = self._task_id_for_instance(instance_id)
+        base_url = self._base_url(task_id, instance_id)
+        response = self._request(
+            base_url,
+            "POST",
+            f"/api/projects/{instance_id}/delivery/candidates/finalize",
+        )
+        raw_candidates = None if response is None else response.get("candidates")
+        if not isinstance(raw_candidates, list):
+            self._protocol_error("Image Agent returned an invalid delivery candidate list.")
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            raise HarnessError("VALIDATION_ERROR", "The Image instance has no task plan.")
+        card = next(
+            (item for item in plan["task_cards"] if item["instance_id"] == instance_id),
+            None,
+        )
+        if card is None:
+            raise HarnessError("VALIDATION_ERROR", "The Image instance has no task card.")
+        expected = [
+            item
+            for item in card["expected_deliveries"]
+            if item["required"] and item["kind"] == "image"
+        ]
+        if len(expected) != 1:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "The Image delivery cannot be mapped to one required final image role.",
+            )
+        instance_root = self.store.layout.initialize_instance(task_id, instance_id)
+        project_root = instance_root / "work" / instance_id
+        candidates: list[DeliveryBundleCandidate] = []
+        seen: set[str] = set()
+        for marker in raw_candidates:
+            if not isinstance(marker, dict):
+                self._protocol_error("Image Agent returned a malformed delivery candidate.")
+            bundle_id = marker.get("bundle_id")
+            checkpoint_id = marker.get("checkpoint_id")
+            raw_branch_id = marker.get("branch_id")
+            files = marker.get("files")
+            image_descriptor = marker.get("image")
+            note_descriptor = marker.get("design_note")
+            if (
+                not isinstance(bundle_id, str)
+                or not isinstance(checkpoint_id, str)
+                or not isinstance(raw_branch_id, str)
+                or not isinstance(files, dict)
+                or not isinstance(image_descriptor, dict)
+                or not isinstance(note_descriptor, dict)
+                or bundle_id in seen
+            ):
+                self._protocol_error("Image Agent returned a malformed delivery candidate.")
+            validate_identifier(bundle_id, "bundle_id")
+            validate_identifier(checkpoint_id, "checkpoint_id")
+            branch_id = (
+                raw_branch_id
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,127}", raw_branch_id)
+                else f"branch_{hashlib.sha256(raw_branch_id.encode('utf-8')).hexdigest()[:24]}"
+            )
+            image_relative = normalized_relative_path(str(files.get("image", "")))
+            note_relative = normalized_relative_path(str(files.get("markdown", "")))
+            if (
+                len(image_relative.parts) != 2
+                or image_relative.parts[0] != "delivery"
+                or len(note_relative.parts) != 2
+                or note_relative.parts[0] != "delivery"
+            ):
+                self._protocol_error("Image Agent delivery path escaped its delivery directory.")
+            image_sha256 = image_descriptor.get("sha256")
+            note_sha256 = note_descriptor.get("sha256")
+            if (
+                not isinstance(image_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", image_sha256) is None
+                or not isinstance(note_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", note_sha256) is None
+            ):
+                self._protocol_error("Image Agent returned an invalid candidate digest.")
+            image_output = instance_root / "outputs" / f"{bundle_id}-image{image_relative.suffix}"
+            note_output = instance_root / "outputs" / f"{bundle_id}-design-note.md"
+            stage_final_delivery(
+                project_root,
+                image_relative,
+                image_output,
+                expected_sha256=image_sha256,
+            )
+            stage_final_delivery(
+                project_root,
+                note_relative,
+                note_output,
+                expected_sha256=note_sha256,
+            )
+            normalized = normalize_image_delivery(
+                image_output,
+                accepted_mime_types=tuple(expected[0]["accepted_mime_types"]),
+            )
+            image_candidate = self.assets.inspect_delivery(
+                task_id,
+                instance_id,
+                source_relative_path=(
+                    f"instances/{instance_id}/"
+                    f"{normalized['path'].relative_to(instance_root).as_posix()}"
+                ),
+                role=expected[0]["role"],
+                description=f"Image Agent branch {raw_branch_id} final artwork.",
+                expected_sha256=normalized["sha256"],
+                derivation=normalized["derivation"],
+            )
+            note_candidate = self.assets.inspect_delivery(
+                task_id,
+                instance_id,
+                source_relative_path=(
+                    f"instances/{instance_id}/"
+                    f"{note_output.relative_to(instance_root).as_posix()}"
+                ),
+                role="design_note",
+                description=f"Image Agent branch {raw_branch_id} Markdown design note.",
+                expected_sha256=note_sha256,
+            )
+            if note_candidate["mime_type"] != "text/markdown":
+                self._protocol_error("Image Agent candidate note is not Markdown.")
+            width, height = image_dimensions(normalized["path"])
+            candidate: DeliveryBundleCandidate = {
+                "schema_version": "1.0",
+                "bundle_id": bundle_id,
+                "task_id": task_id,
+                "work_item_id": self._work_item_id(task_id, plan, card),
+                "instance_id": instance_id,
+                "task_card_revision": card["revision"],
+                "branch_id": branch_id,
+                "checkpoint_id": checkpoint_id,
+                "image": {
+                    "private_relative_path": image_candidate["source_relative_path"],
+                    "mime_type": image_candidate["mime_type"],
+                    "size_bytes": image_candidate["size_bytes"],
+                    "sha256": image_candidate["sha256"],
+                    "width": width,
+                    "height": height,
+                },
+                "design_note": {
+                    "private_relative_path": note_candidate["source_relative_path"],
+                    "mime_type": "text/markdown",
+                    "size_bytes": note_candidate["size_bytes"],
+                    "sha256": note_candidate["sha256"],
+                },
+                "status": "PENDING_CONFIRMATION",
+                "created_at": str(marker.get("created_at", "")),
+                "decided_at": None,
+                "actor": None,
+                "publication_batch_id": None,
+            }
+            self.contracts.validate("delivery-bundle-candidate", candidate)
+            seen.add(bundle_id)
+            candidates.append(candidate)
+        return sorted(
+            candidates,
+            key=lambda item: (item["branch_id"], item["checkpoint_id"], item["bundle_id"]),
+        )
+
+    def _work_item_id(
+        self,
+        task_id: str,
+        plan: dict[str, Any],
+        card: TaskCard,
+    ) -> str:
+        confirmed = [
+            item
+            for item in self.store.plan_proposal.list(task_id)
+            if item["status"] == "CONFIRMED"
+            and item["revision"] == plan["task"]["plan_revision"]
+        ]
+        for proposal in sorted(confirmed, key=lambda item: item["updated_at"], reverse=True):
+            match = next(
+                (
+                    item
+                    for item in proposal["work_items"]
+                    if card["instance_id"] in item.get("instance_ids", [])
+                    or item.get("current_instance_id") == card["instance_id"]
+                    or card["card_id"] in item.get("task_card_ids", [])
+                ),
+                None,
+            )
+            if match is not None:
+                return str(match["work_item_id"])
+        identity = hashlib.sha256(card["card_id"].encode("utf-8")).hexdigest()[:24]
+        return f"work_{identity}"
 
     def collect_deliveries(self, instance_id: str) -> list[DeliveryCandidate]:
         task_id = self._task_id_for_instance(instance_id)
