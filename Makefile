@@ -10,7 +10,7 @@ REAL_PROVIDER_EVIDENCE_PATH ?= build/real-provider-evidence.json
 REAL_PROVIDER_LOG_FILE ?= build/real-provider-smoke.log
 REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(REAL_PROVIDER_ENV_FILE)",)
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence dev-setup dev-doctor dev-smoke
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check docs-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e evidence dev-setup dev-doctor dev-smoke
 
 test: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -45,6 +45,9 @@ sbom: test-env
 
 contract-check:
 	$(PYTHON) scripts/generate_frontend_contracts.py --check
+
+docs-check:
+	$(PYTHON) scripts/check_docs.py
 
 frontend-contracts:
 	$(PYTHON) scripts/generate_frontend_contracts.py
@@ -86,7 +89,7 @@ real-provider-smoke: real-provider-preflight image-agent-env
 		--evidence-path "$(REAL_PROVIDER_EVIDENCE_PATH)" \
 		--log-file "$(REAL_PROVIDER_LOG_FILE)"
 
-check: test lint compile secret-scan boundary-check lock-check frontend-check
+check: test lint compile secret-scan boundary-check lock-check docs-check frontend-check
 
 verify: check typecheck dependency-audit sbom capacity-benchmark
 
@@ -135,12 +138,10 @@ g4-e2e: test-env image-agent-env
 g5-e2e:
 	G5_MAKE="$(MAKE)" G5_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
 		$(PYTHON) scripts/run_g5_gate.py
-	$(PYTHON) scripts/generate_phase1_evidence.py
-	$(PYTHON) scripts/generate_workbench_evidence.py
+	$(PYTHON) scripts/generate_release_evidence.py
 
 evidence:
-	$(PYTHON) scripts/generate_phase1_evidence.py
-	$(PYTHON) scripts/generate_workbench_evidence.py
+	$(PYTHON) scripts/generate_release_evidence.py
 
 test-env: $(TEST_ENV_STAMP)
 

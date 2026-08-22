@@ -34,9 +34,8 @@
         "status": "PASSED",
         "command": "make g5-e2e",
         "evidence": [
-          "docs/verification/workbench-f5-evidence-manifest.json",
-          "docs/verification/phase1-evidence-manifest.json",
-          ".github/workflows/quality.yml"
+          ".github/workflows/quality.yml",
+          "scripts/run_g5_gate.py"
         ]
       }
     },
@@ -53,7 +52,7 @@
         "accepted_by_harness_revision": "5fddb81c6008377e0f0bfc3640563a7085c789e3",
         "evidence": [
           ".github/workflows/quality.yml",
-          "docs/verification/workbench-f5-release.md"
+          "scripts/run_browser_integration.py"
         ]
       }
     }

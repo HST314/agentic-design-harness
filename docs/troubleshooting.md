@@ -1,67 +1,53 @@
-# 常见问题排查
+# 故障排查
 
-先确认所有命令都在仓库根目录执行，并区分两个本地服务：后端 API 使用 `18080`，Web 控制台使用 `18180`。
+先回到仓库根目录并运行诊断：Windows 使用 `py -3 scripts/dev.py doctor`，Linux 使用 `python3 scripts/dev.py doctor`。保留第一条失败信息；后续错误通常只是它的连锁结果。
 
-## 快速诊断表
+## 快速索引
 
-| 现象 | 常见原因 | 处理 |
+| 错误或现象 | 常见原因 | 恢复动作 |
 | --- | --- | --- |
-| 打开 `127.0.0.1:18080` 显示 `404` / `Not Found` | 后端没有定义根页面 | 这是正常结果；界面访问 `18180`，API 文档访问 `18080/docs` |
-| `No module named harness` | 当前 Python 不是项目 `.venv`，或项目尚未安装 | 使用 `.venv` 内的解释器重新安装并启动 |
-| 前端显示“服务不可达”或请求 500 | Vite 无法连接后端 | 保持终端一运行，先检查 `18080/readyz` |
-| 终端二出现 `ECONNREFUSED 127.0.0.1:18080` | 后端未启动、已退出或端口不同 | 启动后端，或正确设置 `HARNESS_BACKEND_URL` |
-| `# 不是内部或外部命令` | 把 Bash/PowerShell 注释粘贴到了 CMD | 只复制代码块中的可执行命令，并使用对应终端语法 |
-| PowerShell 拒绝运行 `Activate.ps1` | 本机脚本执行策略限制 | 不必改策略；直接运行 `.\.venv\Scripts\python.exe ...` |
-| `address already in use` / 端口被占用 | 已有进程监听 18080 或 18180 | 找到已知进程并正常停止，或调整端口 |
-| `writer lease` 冲突 | 两个后端共用同一 `control_root` | 只保留一个后端，或为不同实例配置独立数据目录 |
+| `Required command ... was not found` | Git、Python、Node 或 npm 未进入 PATH | 安装 [QUICKSTART](../QUICKSTART.md) 中的最低版本并重新打开终端 |
+| `Image Agent lock ...` / `submodule ...` | submodule 未初始化、gitlink 或内容摘要漂移 | 运行 `scripts/dev.py setup`；有本地修改时先人工核对，不要覆盖 |
+| `Harness Python environment is missing or stale` | `.venv` 缺失或锁摘要变化 | 运行 `scripts/dev.py setup`；必要时使用 `setup --force` |
+| `Frontend node_modules is missing or stale` | `package-lock.json` 与安装摘要不一致 | 运行 `scripts/dev.py setup`，让启动器执行锁定 `npm ci` |
+| `No module named harness` | 使用了错误解释器或未完成 setup | 使用仓库 `.venv` 解释器，见下节 |
+| `address already in use` | 18080、18180 或 Image Agent 端口被占用 | 确认已知进程后正常停止，或给启动器传新端口 |
+| 前端“服务不可达” / `ECONNREFUSED` | 后端未 ready 或代理端口错误 | 依次检查 `/healthz`、`/readyz` 和 Vite 代理目标 |
+| 后端根地址返回 404 | `/` 没有页面路由 | 正常；打开 18180 Web 或 18080 `/docs` |
+| `writer lease` | 两个 Harness 共用 `control_root` | 只保留一个进程，或使用互不重叠的数据根目录 |
+| `MASTER_UNAVAILABLE` | 未配置真实 Master Gateway | 设置并重启，或使用明确的受信 API 流程 |
+| `MANAGED_BY_HARNESS` | 直接向受管 Image Agent 创建工程 | 回到 Master/计划页创建并确认 TaskCard |
+| `REVISION_CONFLICT` | 页面或调用方持有旧 revision | 重新读取、重新审阅、使用新幂等键提交 |
+| `ASSET_CORRUPTED` | MIME、大小、SHA 或文件身份变化 | 停止发布，检查磁盘和来源，恢复可信备份或重新生成候选 |
 
-## Python 环境错误
+## Python 与依赖
 
 Windows：
 
 ```bat
-.\.venv\Scripts\python.exe -c "import sys; print(sys.executable)"
-.\.venv\Scripts\python.exe -c "import harness; print(harness.__file__)"
+.\.venv\Scripts\python.exe -c "import sys, harness; print(sys.executable); print(harness.__file__)"
 ```
 
 Linux：
 
 ```bash
-.venv/bin/python -c "import sys; print(sys.executable)"
-.venv/bin/python -c "import harness; print(harness.__file__)"
+.venv/bin/python -c "import sys, harness; print(sys.executable); print(harness.__file__)"
 ```
 
-若第二条命令失败，用同一个解释器修复当前 `.venv`：
+第一行必须指向当前仓库 `.venv`，第二行指向当前仓库 `backend/harness`。不要根据提示符是否出现 `(.venv)` 猜测解释器。`ensurepip` 或 pip 不可用时，安装操作系统的 Python venv/pip 组件后重新运行 setup；不要改用全局 site-packages 绕过锁定依赖。
 
-Windows：
+## submodule 与 release lock
 
-```bat
-.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m pip install --no-deps -e .
-```
-
-Linux：
+查看状态：
 
 ```bash
-.venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
-.venv/bin/python -m pip install --no-deps -e .
+git submodule status agents/image_agent_mvp
+python scripts/verify_image_agent_lock.py
 ```
 
-不要根据提示符中是否有 `(.venv)` 猜测环境；以 `sys.executable` 的实际输出为准。
+前缀 `-` 表示未初始化，前缀 `+` 表示 checkout 与主仓 gitlink 不同。普通缺失由 `scripts/dev.py setup` 修复；若目录存在本地提交或修改，先按 [Image Agent 集成](image-agent-integration.md)核对双仓历史。不要执行会丢弃未知修改的强制清理，也不要手工编辑 lock 摘要。
 
-## 前端已打开但数据加载失败
-
-按顺序访问：
-
-1. <http://127.0.0.1:18080/healthz>
-2. <http://127.0.0.1:18080/readyz>
-3. <http://127.0.0.1:18180/>
-
-前两项失败说明问题在后端，而不是前端。检查终端一是否仍在运行、是否有启动异常，以及实际监听端口是否为 `18080`。前两项成功但第三项失败时，检查终端二的 Vite 日志和 `18180` 端口。
-
-如果自定义了 `HARNESS_PORT`，前端不会自动发现新端口。必须在启动前端的同一个终端中把 `HARNESS_BACKEND_URL` 设置为新的完整后端地址，详见[安装与启动指南](getting-started.md#5-启动前端终端二)。
-
-## 端口冲突
+## 端口、健康与前端代理
 
 Windows：
 
@@ -76,15 +62,37 @@ Linux：
 ss -ltnp | grep -E ':18080|:18180'
 ```
 
-确认 PID 属于已知的 Harness 或 Vite 进程后，回到对应终端按 `Ctrl+C` 正常停止。不要仅凭端口号强制终止未知进程。
+确认 PID 属于已知 Harness/Vite 后，在原终端按 `Ctrl+C` 正常停止。不要仅凭端口号强制终止未知进程。
 
-## 健康检查与就绪检查的区别
+诊断顺序：
 
-- `healthz` 返回成功：后端进程存活。
-- `readyz` 返回成功且状态为 `ready`：契约已加载，并且当前进程持有唯一写者租约。
+1. <http://127.0.0.1:18080/healthz>
+2. <http://127.0.0.1:18080/readyz>
+3. <http://127.0.0.1:18180/>
 
-自动化、前端和业务调用应以 `readyz` 为准。`healthz` 成功但 `readyz` 失败时，优先检查配置路径、契约目录、状态目录权限和 writer lease。
+health 成功但 ready 失败时，检查配置路径、契约目录、状态目录权限、Image lock 和 writer lease。前两项成功而页面失败时，再检查 Vite 日志与 `HARNESS_BACKEND_URL`。
 
-## 仍无法解决
+## Master、TaskCard 与受管实例
 
-提交问题时请提供：操作系统与终端类型、Python/Node 版本、执行的原始命令、两个终端从启动开始的完整错误片段，以及 `healthz`/`readyz` 结果。提交前删除 API Key、Authorization、Cookie、完整 Provider URL、用户素材和本机敏感路径。
+- Master run 长时间 `SUBMITTING`：检查 Gateway 可达性和 `message_id` 幂等实现；不要创建第二个永久线程。
+- 计划确认冲突：重新读取最新 proposal、task 和所有 card revisions；旧提案已 `SUPERSEDED` 时不可启动。
+- Image Agent 页面没有新建表单：这是受管模式的正确行为。任务必须从主系统创建。
+- UI link 被拒绝或 frame blocked：检查实例是否为当前 WorkItem、Agent 是否 ready，以及返回头 `X-Frame-Options`/CSP；不要把任意 URL 直接塞给 iframe。
+
+## 交付候选与恢复
+
+- 候选显示 `CORRUPTED`：预览或发布前复验失败。保留候选和审计记录，修复来源后生成新候选，不覆盖旧文件。
+- 只有图片或只有 Markdown 可见：这不应发生。立即停止写入，保留 `application-intents` 和恢复 warning，使用相同代码/lock 重启恢复；仍不一致则恢复完整备份。
+- 重复点击确认：幂等请求应返回同一 batch。若客户端使用了相同幂等键但不同决议，会返回冲突，应重新读取审批状态。
+- 已退回候选仍存在：这是预期审计语义；退回不删除候选或私有文件。
+
+## `/settings` 与 Ark
+
+- 预检 `BLOCKED`：按每项 recovery 文本补齐启用凭据、六状态路由和能力映射；真实 Image 实例运行前另行关闭离线模式。
+- 保存后看不到明文 Key：这是正确的脱敏行为；只显示 Key ID、尾号和 Base URL 主机提示。
+- 修改凭据被拒绝：递增 revision；已存在的 `(pair_id, revision)` 不可改变内容。
+- 付费 smoke 失败：系统不会自动重试。检查 Ark endpoint、配额和网络，保存新修订、重新预检，再由人工重新确认一次费用。
+
+## 提交诊断材料
+
+提供操作系统/终端、Python/Node 版本、失败的原始命令、doctor 第一条错误、health/ready 结果、相关稳定错误码和最小日志片段。提交前删除 API Key、Authorization、Cookie、完整 Provider URL、用户素材、临时图片 URL和本机敏感路径。

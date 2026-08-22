@@ -1,75 +1,83 @@
-# Image Agent 集成与迁移护栏
+# Image Agent 集成
 
-Image Agent 的正式源码位置为 `agents/image_agent_mvp`，运行版本唯一由
-`agents/image-agent.lock.json` 决定。锁文件固定仓库、提交、包版本、契约版本、源码
-摘要、依赖锁摘要和隔离依赖内容摘要；Adapter、CI 与本地校验不得再各自维护版本常量。
+Image Agent 的源码与 Harness 位于同一工作树，但运行边界保持独立。正式路径是 `agents/image_agent_mvp` Git submodule，版本事实源是 `agents/image-agent.lock.json`；本地启动、CI 和 Adapter 都读取同一 lock，不允许追踪浮动分支或各自维护 revision 常量。
 
-P0 基线记录位于 `config/baselines/p0-integration.json`。它同时固定 Harness 与 Image
-Agent 的已验收提交、Git tree、源码摘要、依赖摘要和发布门证据。升级 Image Agent 时，
-必须先在独立仓库形成可追溯提交并通过发布门，再同步源码指针和 lock；禁止使用浮动分支。
+## 内嵌与进程边界
 
-## 路径迁移
+`scripts/dev.py setup` 完成以下工作：
 
-`image_agent_path_mode` 提供一个发布周期的迁移与回滚护栏：
+1. 初始化固定 submodule 并核对 `.gitmodules`、gitlink 与 lock revision。
+2. 校验 Image Agent 源码摘要、依赖清单摘要和隔离依赖内容摘要。
+3. 为 Harness 创建 `.venv`，为 Image Agent 准备独立依赖目录。
+4. 按 `frontend/package-lock.json` 准备前端依赖。
 
-- `prefer_embedded`：默认值；优先使用内嵌源码，内嵌尚未就绪时允许已有部署继续运行。
-- `embedded_only`：切换完成后的收口模式；只接受内嵌源码。
-- `external_only`：仅用于单发布周期内的紧急回滚，不是新部署方式。
+实例启动时，Harness 从锁定源码生成只读运行时副本，再以独立解释器、端口、工作目录和凭据环境启动子进程。Harness 不 import Image Agent 内部 Python 包；所有调用通过 loopback HTTP Adapter，所有文件通过任务受控目录和摘要验证传递。一个 Agent 的依赖冲突或崩溃不会污染控制面进程。
 
-无论选择哪种模式，revision、包版本和内容摘要都必须与 lock 一致；路径回滚不能绕过
-版本与内容校验。当前仓库已把锁定提交作为 submodule 固定在内嵌目录，
-`prefer_embedded` 会直接选择该目录；启动时不会追踪或拉取 Image Agent 的浮动分支。
+## 受管模式
 
-## 本地初始化与启动
+TaskCard 由 Master 生成并在主系统审阅。Image Agent 受管页面不显示“新建工程”或 TaskCard 组装表单，而是直接打开当前项目状态；对普通创建端点的请求返回 `MANAGED_BY_HARNESS`。
 
-克隆主仓库后无需手工摆放相邻源码或激活虚拟环境。启动器会初始化固定 submodule、校验
-Git 指针与源码/依赖摘要、创建 Harness Python 环境、安装 Image Agent 隔离依赖，并按
-`package-lock.json` 准备前端。锁摘要未变化时会安全跳过重复安装；前端 lock 变化或依赖
-不完整时会在启动 Vite 前自动执行 `npm ci`。
+受管创建只接受 Harness Adapter 发起的请求：
 
-Windows：
+- 来源必须是 loopback；
+- 请求必须携带当前运行时生成的单实例控制密钥；
+- 控制密钥只存在于受限运行时文件和请求头，不进入浏览器、TaskCard、日志或交付物；
+- 项目 ID、实例 ID 和 TaskCard revision 必须与主系统确认事实一致。
 
-```powershell
-py -3 scripts/dev.py
-```
+React 的 WorkItem 页面只请求 `GET /api/v1/instances/{instance_id}/ui-link`。服务端验证任务归属、当前实例、端口 allowlist、HTML 响应和 frame 策略；不合法 URL 返回稳定错误，不生成空白或任意 iframe。
 
-Linux：
+## 分支级双资产交付
+
+每个冻结分支生成稳定 `bundle_id`，并形成私有 `DeliveryBundleCandidate`：最终图片、`design-note.md`、branch、checkpoint、TaskCard revision 以及两份文件的 MIME、大小和 SHA-256。不同分支不会互相覆盖；同一分支内容变化会形成新候选。
+
+Harness 收集候选时再次打开并复验两份文件。候选只出现在任务交付页，不进入 `resources/shared`。人工可：
+
+- “确认图片与说明并入库”：以同一 `publication_batch_id` 发布图片、Markdown 和 BundleManifest；
+- “退回修改”：保留候选、文件与决议，不公开资产；
+- 对已发布请求做幂等重放：返回原批次，不复制资产。
+
+发布采用 intent、暂存、全部验证和原子 commit。即使进程在 BundleManifest 准备后崩溃，恢复前也不会出现半公开资产；恢复完成后图片、Markdown 和清单一次性可见。
+
+## 路径与数据迁移
+
+Image Agent 路径模式：
+
+| 模式 | 语义 |
+| --- | --- |
+| `prefer_embedded` | 默认优先内嵌路径；仅在一个迁移发布周期内兼容已存在的外部部署 |
+| `embedded_only` | 只接受内嵌路径；本地启动器和 CI 使用此模式 |
+| `external_only` | 仅供迁移期紧急回滚，不是新部署方式 |
+
+任何模式都必须通过相同 release lock、revision 和内容摘要校验，路径回滚不能绕过供应链身份。
+
+交付数据写入模式：
+
+| 模式 | Legacy 写入 | Bundle 写入 | 使用时机 |
+| --- | --- | --- | --- |
+| `legacy_only` | 是 | 否 | 当前默认与切换前回滚点 |
+| `dual_write` | 是 | 是 | 对账期 |
+| `bundle_only` | 否 | 是 | 双平台真实验收后的目标 |
+
+切换开关只改变新写入目标，不删除既有候选、AssetManifest 或 BundleManifest。降级版本不能识别的新事件时，应恢复升级前一致备份，而不是在原状态目录直接回滚代码。
+
+## 升级 Image Agent
+
+1. 在 Image Agent 仓库形成独立、可追溯提交并完成其全量测试。
+2. 比较“旧锁定提交 → 目标上游提交 → 当前内嵌提交”，明确选择性同步；禁止自动跟随默认分支。
+3. 更新主仓 submodule 指针以及 lock 中的 revision、包/契约版本、源码和依赖摘要。
+4. 执行 `python scripts/verify_image_agent_lock.py`、Image Agent 全量测试、`make check` 和适用的真实进程 E2E。
+5. 在同一变更说明中记录 Image Agent 提交与主仓提交，确保回滚点成对。
+
+版本或内容不一致必须失败关闭。若升级失败，回到上一组已验收的 submodule 指针与 lock，并恢复对应状态备份；不得复制文件覆盖 submodule 或手工改摘要“放行”。
+
+## 集成验证
 
 ```bash
-python3 scripts/dev.py
-```
-
-需要分步排查时使用：
-
-```bash
-python3 scripts/dev.py setup
-python3 scripts/dev.py doctor
-python3 scripts/dev.py start
-```
-
-`start` 同时管理后端和前端，等待 `/healthz`、`/readyz` 与 Web 首页通过后才报告就绪；
-任一子进程提前退出或收到 Ctrl+C 时，另一进程会同步关闭。CI 使用
-`python scripts/dev.py start --check` 验证同一生产启动路径。
-
-## DeliveryBundle 数据迁移
-
-`delivery_bundle_migration_mode` 明确定义后续双资产交付切换目标：
-
-- `legacy_only`：P0 默认值，只写现有交付数据。
-- `dual_write`：迁移期同时写现有交付与 DeliveryBundle 数据，用于对账。
-- `bundle_only`：对账完成后的目标模式，只写 Bundle 数据。
-
-P0 只冻结契约和开关语义，不声称已经实现 P3 的双资产发布。契约源文件为
-`delivery-bundle-candidate.schema.json` 与 `bundle-manifest.schema.json`；任一状态、摘要、
-分支来源或人工决策字段不符合契约时必须失败关闭。
-
-## 校验
-
-完整基线、submodule 指针、源码与依赖清单校验：
-
-```bash
+python scripts/dev.py doctor
 python scripts/verify_image_agent_lock.py
+make g2-e2e
+make g3-e2e
+make check
 ```
 
-`make check` 已包含完整校验；Linux 与 Windows CI 还会执行启动器 setup、doctor 和双服务
-健康检查。若只运行 `git clone` 而没有递归拉取 submodule，先执行 `scripts/dev.py setup`。
+G2 验证受管创建和真实进程边界；G3 验证分支候选、人工门禁与双资产发布。外部 Provider 测试需要单独授权，步骤见[配置指南](configuration.md)。
