@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/task-navigation-metadata.schema.json",
+  "title": "TaskNavigationMetadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "pinned_at",
+    "archived_at",
+    "display_order",
+    "revision",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "pinned_at": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "common.schema.json#/$defs/timestamp"}
+      ]
+    },
+    "archived_at": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "common.schema.json#/$defs/timestamp"}
+      ]
+    },
+    "display_order": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {"archived_at": {"type": "null"}}
+    },
+    {
+      "properties": {
+        "archived_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+        "pinned_at": {"type": "null"}
+      }
+    }
+  ]
+}

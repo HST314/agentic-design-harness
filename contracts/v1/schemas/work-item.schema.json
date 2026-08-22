@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/work-item.schema.json",
+  "title": "WorkItem",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "work_item_id",
+    "task_id",
+    "stage_id",
+    "title",
+    "agent_type",
+    "required",
+    "depends_on",
+    "current_instance_id",
+    "instance_ids",
+    "task_card_ids"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "work_item_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "stage_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "title": {
+      "$ref": "common.schema.json#/$defs/credentialSafeText",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "agent_type": {
+      "$ref": "common.schema.json#/$defs/agentType"
+    },
+    "required": {
+      "type": "boolean"
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/identifier"
+      },
+      "uniqueItems": true
+    },
+    "current_instance_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "common.schema.json#/$defs/identifier"}
+      ]
+    },
+    "instance_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/identifier"
+      },
+      "uniqueItems": true
+    },
+    "task_card_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/identifier"
+      },
+      "uniqueItems": true
+    }
+  }
+}

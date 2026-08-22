@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/plan-proposal.schema.json",
+  "title": "PlanProposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "proposal_id",
+    "task_id",
+    "revision",
+    "status",
+    "stages",
+    "work_items",
+    "execution_cards",
+    "created_at",
+    "updated_at",
+    "confirmed_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "proposal_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PENDING_CONFIRMATION",
+        "CONFIRMED",
+        "SUPERSEDED",
+        "REJECTED"
+      ]
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/proposalStage"
+      }
+    },
+    "work_items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "work-item.schema.json"
+      }
+    },
+    "execution_cards": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "task-card-v1.1.schema.json"
+      }
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "confirmed_at": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "common.schema.json#/$defs/timestamp"}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "CONFIRMED"}}
+      },
+      "then": {
+        "properties": {
+          "confirmed_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+        }
+      },
+      "else": {
+        "properties": {"confirmed_at": {"type": "null"}}
+      }
+    }
+  ],
+  "$defs": {
+    "proposalStage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_id",
+        "type",
+        "position",
+        "depends_on",
+        "required"
+      ],
+      "properties": {
+        "stage_id": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "type": {
+          "$ref": "common.schema.json#/$defs/agentType"
+        },
+        "position": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/identifier"
+          },
+          "uniqueItems": true
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
