@@ -186,8 +186,6 @@ class MasterThreadService:
         expected_card_revisions: dict[str, int],
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
-        if envelope.actor_type != "human":
-            raise HarnessError("VALIDATION_ERROR", "Only a human may confirm a plan here.")
         return self._confirm(
             task_id,
             proposal_revision,
@@ -376,6 +374,14 @@ class MasterThreadService:
             )
             return self._session(task_id)
 
+    @staticmethod
+    def _require_human_confirmation(actor_type: object) -> None:
+        if actor_type != "human":
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only a human may confirm and start a Master plan.",
+            )
+
     def _confirm(
         self,
         task_id: str,
@@ -385,6 +391,7 @@ class MasterThreadService:
         expected_card_revisions: dict[str, int],
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
+        self._require_human_confirmation(envelope.actor_type)
         intent_path = self._confirm_intent_path(task_id, proposal_revision)
         with self.commands.task_guard(task_id):
             if intent_path.exists():
@@ -456,6 +463,10 @@ class MasterThreadService:
 
     def _resume_confirm(self, intent_path: Path) -> dict[str, Any]:
         intent = read_json(intent_path)
+        actor = intent.get("actor")
+        self._require_human_confirmation(
+            actor.get("actor_type") if isinstance(actor, dict) else None
+        )
         task_id = intent["task_id"]
         proposal = self.store.plan_proposal.get(task_id, intent["proposal_id"])
         if proposal is None:
@@ -747,35 +758,6 @@ class MasterThreadService:
             "publish_master_plan",
         )
         self._apply_generated_title(task_id, observation.task_title, proposal["proposal_id"])
-        task = self._task(task_id)
-        if task["start_policy"] == "auto":
-            try:
-                self._confirm(
-                    task_id,
-                    proposal["revision"],
-                    task_expected_revision=self.store.task.revision(task_id, task_id),
-                    expected_card_revisions={
-                        card["card_id"]: card["revision"]
-                        for card in proposal["execution_cards"]
-                    },
-                    envelope=CommandEnvelope(
-                        idempotency_key=self._identifier(
-                            "auto_confirm", task_id, proposal["proposal_id"]
-                        ),
-                        actor_type="master",
-                        actor_id="master_gateway",
-                        expected_revision=proposal["revision"],
-                    ),
-                )
-            except HarnessError as exc:
-                current = self.store.master_thread.get(task_id, task_id) or thread
-                return self._record_gateway_error(
-                    task_id,
-                    current,
-                    current["active_run"],
-                    exc.code,
-                    exc.message,
-                )
         return self.store.master_thread.get(task_id, task_id) or thread
 
     def _append_gateway_message(
