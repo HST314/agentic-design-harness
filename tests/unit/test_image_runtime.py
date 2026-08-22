@@ -19,6 +19,25 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ImageRuntimeBuilderTests(unittest.TestCase):
+    def test_tree_digest_normalizes_text_eol_but_preserves_binary_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            linux = root / "linux"
+            windows = root / "windows"
+            linux.mkdir()
+            windows.mkdir()
+            (linux / "module.py").write_bytes(b"VALUE = 1\n")
+            (windows / "module.py").write_bytes(b"VALUE = 1\r\n")
+
+            self.assertEqual(content_tree_sha256(linux), content_tree_sha256(windows))
+            self.assertNotEqual(
+                dependency_tree_sha256(linux), dependency_tree_sha256(windows)
+            )
+
+            (linux / "payload.bin").write_bytes(b"\0data\n")
+            (windows / "payload.bin").write_bytes(b"\0data\r\n")
+            self.assertNotEqual(content_tree_sha256(linux), content_tree_sha256(windows))
+
     def test_artifact_is_idempotent_read_only_and_uses_the_install_pin(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -60,6 +60,19 @@ def _fail(message: str) -> NoReturn:
     raise LauncherError(message)
 
 
+def _console_safe(value: str, *, encoding: str | None = None) -> str:
+    """Make child output printable even on a legacy Windows console encoding."""
+
+    selected_encoding = encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        value.encode(selected_encoding)
+    except UnicodeEncodeError:
+        return value.encode(selected_encoding, errors="backslashreplace").decode(
+            selected_encoding
+        )
+    return value
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -834,7 +847,7 @@ class ChildGroup:
         if process.stdout is None:
             return
         for line in process.stdout:
-            print(f"[{name}] {line.rstrip()}", flush=True)
+            print(_console_safe(f"[{name}] {line.rstrip()}"), flush=True)
 
     def _raise_if_exited(self) -> None:
         for specification, process in self.processes:
