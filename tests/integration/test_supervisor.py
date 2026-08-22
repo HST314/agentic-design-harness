@@ -531,24 +531,43 @@ class ProcessSupervisorTests(unittest.TestCase):
             with patch.object(
                 process_runtime, "_artifact_manifest", side_effect=manifest_then_swap
             ):
-                restarted = self.supervisor.restart_instance(
-                    "t_process",
-                    "i_image_1",
-                    self.spec,
-                    launch_id="launch_root_swap",
-                    attempt_id="attempt_root_swap",
-                )
-            self.assertTrue(swapped)
-            self.assertNotEqual(restarted["pid"], launch["pid"])
-            self.assertEqual(
-                self._identity(restarted["port"])["instance_id"], "i_image_1"
-            )
+                if os.name == "nt":
+                    with self.assertRaises(HarnessError) as blocked:
+                        self.supervisor.restart_instance(
+                            "t_process",
+                            "i_image_1",
+                            self.spec,
+                            launch_id="launch_root_swap",
+                            attempt_id="attempt_root_swap",
+                        )
+                    self.assertEqual(blocked.exception.code, "PROCESS_START_FAILED")
+                    self.assertFalse(swapped)
+                    self.assertEqual(
+                        self._identity(launch["port"])["instance_id"], "i_image_1"
+                    )
+                else:
+                    restarted = self.supervisor.restart_instance(
+                        "t_process",
+                        "i_image_1",
+                        self.spec,
+                        launch_id="launch_root_swap",
+                        attempt_id="attempt_root_swap",
+                    )
+                    self.assertTrue(swapped)
+                    self.assertNotEqual(restarted["pid"], launch["pid"])
+                    self.assertEqual(
+                        self._identity(restarted["port"])["instance_id"],
+                        "i_image_1",
+                    )
             self.supervisor.cancel_instance("t_process", "i_image_1")
         finally:
             make_artifact_writable(self.artifact_root)
             if original_root.exists():
                 shutil.rmtree(self.artifact_root)
                 original_root.rename(self.artifact_root)
+            if replacement_root.exists():
+                make_artifact_writable(replacement_root)
+                shutil.rmtree(replacement_root)
 
     def test_manual_start_confirmation_cannot_be_bypassed(self) -> None:
         created = create_task(self.commands, "t_manual_process", "manual")
