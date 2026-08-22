@@ -23,6 +23,17 @@ class WindowsRuntimeTests(unittest.TestCase):
             descriptor = open_regular_readonly(executable, trusted_root=root)
             os.close(descriptor)
 
+    def test_nested_private_asset_and_handle_share_one_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nested = root / "instances" / "image" / "outputs"
+            nested.mkdir(parents=True)
+            asset = nested / "preview.png"
+            asset.write_bytes(b"private-image")
+
+            descriptor = open_regular_readonly(asset, trusted_root=root)
+            os.close(descriptor)
+
     def test_native_runtime_preflight_and_process_identity(self) -> None:
         validate_runtime_platform()
         self.assertIsNotNone(process_start_identity(os.getpid()))

@@ -36,16 +36,27 @@ def open_regular_readonly(path: Path, *, trusted_root: Path | None = None) -> in
     before = candidate.lstat()
     if is_link_or_reparse(candidate, before) or not stat.S_ISREG(before.st_mode):
         raise OSError("path is not a regular no-link file")
-    descriptor = os.open(
-        candidate,
+    open_flags = (
         os.O_RDONLY
         | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0),
+        | getattr(os, "O_CLOEXEC", 0)
     )
+    descriptor = os.open(candidate, open_flags)
     try:
         after = os.fstat(descriptor)
-        if not stat.S_ISREG(after.st_mode) or _identity(before) != _identity(after):
+        if not stat.S_ISREG(after.st_mode):
+            raise OSError("file changed while it was opened")
+        if os.name == "nt":
+            comparison = os.open(candidate, open_flags)
+            try:
+                if not os.path.sameopenfile(descriptor, comparison):
+                    raise OSError("file changed while it was opened")
+            finally:
+                os.close(comparison)
+            if is_link_or_reparse(candidate):
+                raise OSError("path became a link or reparse point")
+        elif _identity(before) != _identity(after):
             raise OSError("file changed while it was opened")
         resolved_root = root.resolve(strict=True)
         resolved_candidate = candidate.resolve(strict=True)
