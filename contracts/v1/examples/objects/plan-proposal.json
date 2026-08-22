@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "proposal_id": "proposal_launch_01",
+  "task_id": "task_launch_campaign",
+  "revision": 1,
+  "status": "PENDING_CONFIRMATION",
+  "stages": [
+    {
+      "stage_id": "stage_image",
+      "type": "image",
+      "position": 1,
+      "depends_on": [],
+      "required": true
+    }
+  ],
+  "work_items": [
+    {
+      "schema_version": "1.0",
+      "work_item_id": "work_kv_direction_a",
+      "task_id": "task_launch_campaign",
+      "stage_id": "stage_image",
+      "title": "KV 方向 A",
+      "agent_type": "image",
+      "required": true,
+      "depends_on": [],
+      "current_instance_id": "instance_kv_a_01",
+      "instance_ids": ["instance_kv_a_01"],
+      "task_card_ids": ["card_kv_a_01"]
+    }
+  ],
+  "execution_cards": [
+    {
+      "schema_version": "1.1",
+      "card_id": "card_kv_a_01",
+      "revision": 1,
+      "task_id": "task_launch_campaign",
+      "stage_id": "stage_image",
+      "instance_id": "instance_kv_a_01",
+      "agent_type": "image",
+      "objective": "生成秋季发布会主视觉方向 A。",
+      "instructions": ["保留品牌标识安全区。"],
+      "input_assets": [
+        {
+          "asset_id": "asset_brand_guide",
+          "manifest_relpath": "resources/manifests/asset_brand_guide.json"
+        }
+      ],
+      "expected_deliveries": [
+        {
+          "kind": "image",
+          "role": "key_visual",
+          "required": true,
+          "accepted_mime_types": ["image/png"]
+        }
+      ],
+      "parameters": {
+        "aspect_ratio": "16:9",
+        "variants": 3,
+        "usage_context": "发布会主屏"
+      },
+      "created_at": "2026-08-22T09:03:00Z"
+    }
+  ],
+  "created_at": "2026-08-22T09:03:00Z",
+  "updated_at": "2026-08-22T09:03:00Z",
+  "confirmed_at": null
+}

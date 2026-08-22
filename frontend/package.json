@@ -11,9 +11,17 @@
     "preview:local": "vite preview --host 127.0.0.1 --port 18180",
     "test:e2e": "playwright test"
   },
+  "dependencies": {
+    "@tanstack/react-query": "5.101.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router-dom": "7.18.2"
+  },
   "devDependencies": {
     "@playwright/test": "1.62.1",
     "@types/node": "22.10.2",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
     "typescript": "5.7.2",
     "vite": "6.4.3"
   }

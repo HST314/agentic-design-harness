@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "work_item_id": "work_kv_direction_a",
+  "task_id": "task_launch_campaign",
+  "stage_id": "stage_image",
+  "title": "KV 方向 A",
+  "agent_type": "image",
+  "required": true,
+  "depends_on": [],
+  "current_instance_id": "instance_kv_a_01",
+  "instance_ids": ["instance_kv_a_01"],
+  "task_card_ids": ["card_kv_a_01"]
+}

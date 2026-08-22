@@ -1,4 +1,3 @@
-import "./styles.css";
 import {
   ApiClient,
   type AgentInstance,
@@ -55,13 +54,7 @@ import {
   wireNavigation,
 } from "./ui";
 
-function requireAppRoot(): HTMLDivElement {
-  const element = document.querySelector<HTMLDivElement>("#app");
-  if (!element) throw new Error("Application root is missing.");
-  return element;
-}
-
-const root = requireAppRoot();
+let root: HTMLDivElement;
 const api = new ApiClient();
 let renderVersion = 0;
 let pollTimer: number | undefined;
@@ -836,9 +829,19 @@ async function submitJsonForm(
 }
 
 
-configureUi(root, api, render);
-window.addEventListener("popstate", () => {
+export function mountLegacyApp(element: HTMLDivElement): () => void {
+  root = element;
+  configureUi(root, api, render);
+  const handlePopState = (): void => {
+    render();
+    root.querySelector<HTMLElement>("#main-content")?.focus();
+  };
+  window.addEventListener("popstate", handlePopState);
   render();
-  root.querySelector<HTMLElement>("#main-content")?.focus();
-});
-render();
+  return () => {
+    window.clearTimeout(pollTimer);
+    pollTimer = undefined;
+    window.removeEventListener("popstate", handlePopState);
+    element.replaceChildren();
+  };
+}

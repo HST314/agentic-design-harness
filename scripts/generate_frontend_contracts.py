@@ -17,6 +17,14 @@ TARGET = ROOT / "frontend" / "src" / "api" / "generated-contracts.ts"
 ROOT_TYPES = (
     ("main-task.schema.json", "ContractMainTask"),
     ("stage.schema.json", "ContractStage"),
+    ("work-item.schema.json", "ContractWorkItem"),
+    ("task-intake.schema.json", "ContractTaskIntake"),
+    ("master-message.schema.json", "ContractMasterMessage"),
+    ("plan-proposal.schema.json", "ContractPlanProposal"),
+    (
+        "task-navigation-metadata.schema.json",
+        "ContractTaskNavigationMetadata",
+    ),
     ("agent-instance.schema.json", "ContractAgentInstance"),
     ("approval-request.schema.json", "ContractApprovalRequest"),
     ("delivery.schema.json", "ContractDelivery"),

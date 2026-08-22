@@ -1,0 +1,46 @@
+type IconName =
+  | "board"
+  | "chevron-left"
+  | "close"
+  | "history"
+  | "inbox"
+  | "menu"
+  | "message"
+  | "panel-right"
+  | "plan"
+  | "plus"
+  | "search"
+  | "settings"
+  | "status";
+
+const iconPaths: Record<IconName, React.JSX.Element> = {
+  board: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16" /></>,
+  "chevron-left": <path d="m15 18-6-6 6-6" />,
+  close: <path d="M18 6 6 18M6 6l12 12" />,
+  history: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5M12 7v5l3 2" /></>,
+  inbox: <path d="M4 4h16l2 11h-6l-2 3h-4l-2-3H2L4 4Z" />,
+  menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  message: <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z" />,
+  "panel-right": <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></>,
+  plan: <><path d="M9 6h11M9 12h11M9 18h11" /><circle cx="4" cy="6" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="4" cy="18" r="1" /></>,
+  plus: <path d="M12 5v14M5 12h14" />,
+  search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
+  settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.95 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.58 15 1.7 1.7 0 0 0 3 14v-4a1.7 1.7 0 0 0 1.6-1.05 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.58 1.7 1.7 0 0 0 10 3h4a1.7 1.7 0 0 0 1.03 1.6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 21 10v4a1.7 1.7 0 0 0-1.6 1Z" /></>,
+  status: <><circle cx="12" cy="12" r="9" /><path d="M12 8v4l3 2" /></>,
+};
+
+export function Icon({ name }: { name: IconName }): React.JSX.Element {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {iconPaths[name]}
+    </svg>
+  );
+}

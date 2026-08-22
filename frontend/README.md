@@ -1,6 +1,12 @@
 # Web 控制台
 
-这是 TypeScript/Vite 控制面界面，提供任务导航、FIFO 审批收件箱、审批路由、受控资源、Token/费用/重试预算和脱敏配置管理。专业 Agent 工作台仍通过 Adapter 提供的深链打开。
+这是 React/TypeScript/Vite 控制面界面。F0 使用 React Router 与 TanStack Query 建立工作台应用壳，新工作台路由和既有控制台采用路由级渐进迁移：
+
+- `/` 与 `/tasks/new` 进入工作台新任务壳；
+- `/tasks/:taskId/master|board|plan` 使用统一主任务历史、上下文栏和按需抽屉；
+- 既有 `/tasks`、任务详情、实例、收件箱与设置路由继续承载已验收功能。
+
+专业 Agent 工作台仍只接受 Adapter 提供的受控入口，不在前端接收任意用户 URL。
 
 首次启动请先阅读[安装与启动指南](../docs/getting-started.md)。前端依赖 `18080` 上的后端 API；仅启动 Vite 会导致界面请求失败。
 

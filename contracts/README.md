@@ -4,6 +4,11 @@
 
 - `main-task.schema.json`
 - `stage.schema.json`
+- `work-item.schema.json`（重试与替换 Agent 时保持稳定的逻辑工作项）
+- `task-intake.schema.json`（可恢复的首次创建与上传会话）
+- `master-message.schema.json`（永久 Master 线程的追加式消息）
+- `plan-proposal.schema.json`（确认前的阶段、工作项与执行卡建议）
+- `task-navigation-metadata.schema.json`（置顶、归档与展示顺序）
 - `agent-instance.schema.json`
 - `task-card.schema.json`
 - `delivery.schema.json`
@@ -19,6 +24,8 @@
 ## 关键不变量
 
 - 所有对象属于同一个 `task_id`；
+- WorkItem 的当前实例必须存在于实例历史中，PlanProposal 的 Stage、WorkItem、TaskCard 引用必须闭合且无循环依赖；
+- TaskIntake 只有在上传会话锁定后才能进入 `SUBMITTED`，归档任务不能同时保持置顶；
 - 阶段 `position` 唯一且连续，依赖只能指向更早阶段；
 - 实例、任务卡必须引用同一计划中的阶段；
 - Image-only 只有 Image 阶段；PPT-only 只有 PPT 阶段；Image → PPT 的 PPT 明确依赖 Image；
