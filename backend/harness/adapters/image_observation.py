@@ -23,7 +23,6 @@ from .image_workflow import (
     normalized_capabilities as normalize_workflow_capabilities,
 )
 
-SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION = "1.8.2"
 SUPPORTED_IMAGE_API_MAJOR = "1"
 _JOB_ID = re.compile(r"^job_[A-Za-z0-9]+$")
 _JOB_STATES = frozenset(
@@ -246,7 +245,7 @@ class ImageObservationMixin:
         return {
             "api_version": api_version,
             "source_revision": self.revision,
-            "package_version": SUPPORTED_IMAGE_AGENT_PACKAGE_VERSION,
+            "package_version": self.package_version,
         }
 
     def _request(

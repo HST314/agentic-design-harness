@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/bundle-manifest.schema.json",
+  "title": "BundleManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "bundle_id",
+    "task_id",
+    "work_item_id",
+    "instance_id",
+    "task_card_revision",
+    "branch_id",
+    "checkpoint_id",
+    "publication_batch_id",
+    "image_asset",
+    "design_note_asset",
+    "actor",
+    "created_at",
+    "published_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "bundle_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "work_item_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "instance_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "task_card_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "branch_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "checkpoint_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "publication_batch_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "image_asset": {
+      "$ref": "common.schema.json#/$defs/assetReference"
+    },
+    "design_note_asset": {
+      "$ref": "common.schema.json#/$defs/assetReference"
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": {
+          "$ref": "common.schema.json#/$defs/actorType"
+        },
+        "id": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        }
+      }
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "published_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}

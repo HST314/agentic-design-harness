@@ -30,6 +30,8 @@ ROOT_TYPES = (
     ("agent-instance.schema.json", "ContractAgentInstance"),
     ("approval-request.schema.json", "ContractApprovalRequest"),
     ("delivery.schema.json", "ContractDelivery"),
+    ("delivery-bundle-candidate.schema.json", "ContractDeliveryBundleCandidate"),
+    ("bundle-manifest.schema.json", "ContractBundleManifest"),
     ("asset-manifest.schema.json", "ContractAssetManifest"),
     ("inbox-item.schema.json", "ContractInboxItem"),
     ("token-usage-event-v1.1.schema.json", "ContractTokenUsageEvent"),
