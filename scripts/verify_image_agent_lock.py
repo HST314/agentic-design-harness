@@ -49,12 +49,21 @@ def load_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def portable_file_bytes(path: Path) -> bytes:
+    """Return bytes with only Git's cross-platform text EOL transform normalized."""
+
+    content = path.read_bytes()
+    if b"\0" in content:
+        return content
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content
+    return content.replace(b"\r\n", b"\n")
+
+
 def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return hashlib.sha256(portable_file_bytes(path)).hexdigest()
 
 
 def canonical_digest(value: Any) -> str:
@@ -140,11 +149,12 @@ def content_tree_sha256(root: Path) -> str:
             item_stat = entry.stat(follow_symlinks=False)
             if not stat.S_ISREG(item_stat.st_mode):
                 raise ValueError(f"content tree contains an unsafe entry: {relative}")
+            content = portable_file_bytes(Path(entry.path))
             manifest.append(
                 {
                     "path": relative.as_posix(),
-                    "size_bytes": item_stat.st_size,
-                    "sha256": sha256_file(Path(entry.path)),
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
                 }
             )
 
@@ -220,12 +230,13 @@ def dependency_lock_set_sha256(
         identities.append(identity)
         base = ROOT if scope == "harness" else image_agent_root
         path = base / relative
-        actual = sha256_file(path)
+        content = portable_file_bytes(path)
+        actual = hashlib.sha256(content).hexdigest()
         if actual != item["sha256"]:
             raise ValueError(f"dependency lock digest mismatch: {scope}:{relative}")
         digest.update(f"{scope}:{relative}".encode())
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(content)
         digest.update(b"\0")
     if identities != sorted(identities) or len(identities) != len(set(identities)):
         raise ValueError("dependency lock files are not unique and canonical")
