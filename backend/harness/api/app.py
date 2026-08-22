@@ -27,6 +27,8 @@ from ..services.approvals import ApprovalInboxService
 from ..services.assets import AssetService
 from ..services.configuration import ConfigurationService
 from ..services.credentials import CredentialPoolService
+from ..services.master_gateway import HttpMasterGateway, UnavailableMasterGateway
+from ..services.master_threads import MasterThreadService
 from ..services.retry_budget import RetryBudgetService
 from ..services.supervisor import ProcessSupervisor
 from ..services.task_intakes import TaskIntakeService
@@ -53,6 +55,7 @@ class Container:
     adapters: AdapterRegistry
     application: HarnessApplicationService
     task_intakes: TaskIntakeService
+    master_threads: MasterThreadService
 
 
 class ContractValidationRequest(BaseModel):
@@ -126,6 +129,24 @@ def build_container(settings: HarnessSettings) -> Container:
         configuration,
     )
     task_intakes = TaskIntakeService(store, commands, assets)
+    master_gateway = (
+        HttpMasterGateway(
+            settings.master_gateway_url,
+            timeout_seconds=settings.master_gateway_timeout_seconds,
+        )
+        if settings.master_gateway_url
+        else UnavailableMasterGateway()
+    )
+    master_threads = MasterThreadService(
+        store,
+        contracts,
+        commands,
+        application,
+        assets,
+        credentials,
+        adapters,
+        master_gateway,
+    )
     return Container(
         settings=settings,
         contracts=contracts,
@@ -142,6 +163,7 @@ def build_container(settings: HarnessSettings) -> Container:
         adapters=adapters,
         application=application,
         task_intakes=task_intakes,
+        master_threads=master_threads,
     )
 
 
@@ -191,6 +213,7 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
         asset_recoveries = container.assets.recover()
         process_recoveries = container.supervisor.reconcile()
         application_recoveries = container.application.recover()
+        master_recoveries = container.master_threads.recover()
         adapter_recoveries = recover_adapters(container)
         global_config = container.configuration.get_global()
         if global_config is None:
@@ -211,6 +234,7 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
                     "retry_budget_recovery_count": len(retry_budget_recoveries),
                     "asset_recovery_count": len(asset_recoveries),
                     "application_recovery_count": len(application_recoveries),
+                    "master_recovery_count": len(master_recoveries),
                     "process_recovery_count": len(process_recoveries),
                     "adapter_recovery_count": len(adapter_recoveries),
                 }
@@ -232,6 +256,7 @@ def create_app(settings: HarnessSettings | None = None) -> FastAPI:
         version=__version__,
         openapi_tags=[
             {"name": "tasks", "description": "Main-task planning and lifecycle."},
+            {"name": "master", "description": "Persistent Master threads and plan proposals."},
             {"name": "instances", "description": "Isolated Agent process lifecycle."},
             {"name": "assets", "description": "Controlled import, preview and delivery."},
             {"name": "approvals", "description": "Frozen-owner workflow decisions."},

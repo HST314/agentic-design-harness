@@ -19,6 +19,9 @@ from .repository import (
     ApprovalRepository,
     InboxRepository,
     InstanceRepository,
+    MasterMessageRepository,
+    MasterThreadRepository,
+    PlanProposalRepository,
     PlanRepository,
     RetryBudgetRepository,
     StageRepository,
@@ -113,6 +116,27 @@ class FileStateStore:
             lambda value: contracts.validate("task-navigation-metadata", value),
             lock_timeout_seconds,
         )
+        self.master_thread = MasterThreadRepository(
+            self.layout,
+            "master_thread",
+            lambda _: Path("master") / "thread.json",
+            lambda value: contracts.validate("master-thread", value),
+            lock_timeout_seconds,
+        )
+        self.master_message = MasterMessageRepository(
+            self.layout,
+            "master_message",
+            lambda object_id: Path("master") / "messages" / f"{object_id}.json",
+            lambda value: contracts.validate("master-message", value),
+            lock_timeout_seconds,
+        )
+        self.plan_proposal = PlanProposalRepository(
+            self.layout,
+            "plan_proposal",
+            lambda object_id: Path("master") / "plan-proposals" / f"{object_id}.json",
+            lambda value: contracts.validate("plan-proposal", value),
+            lock_timeout_seconds,
+        )
         self.usage = UsageRepository(
             self.layout,
             lambda value: contracts.validate("token-usage-event", value),
@@ -131,6 +155,9 @@ class FileStateStore:
                 self.retry_budget,
                 self.task_intake,
                 self.task_navigation,
+                self.master_thread,
+                self.master_message,
+                self.plan_proposal,
             )
         }
 
@@ -220,6 +247,9 @@ class FileStateStore:
                 task_directory / "retry-budget.json",
                 task_directory / "task-intake.json",
                 task_directory / "task-navigation.json",
+                task_directory / "master" / "thread.json",
+                *sorted((task_directory / "master" / "messages").glob("*.json")),
+                *sorted((task_directory / "master" / "plan-proposals").glob("*.json")),
                 *sorted((task_directory / "stages").glob("*.json")),
                 *sorted((task_directory / "instances").glob("*.json")),
                 *sorted((task_directory / "approvals").glob("*.json")),

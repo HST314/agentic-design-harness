@@ -20,6 +20,7 @@ ROOT_TYPES = (
     ("work-item.schema.json", "ContractWorkItem"),
     ("task-intake.schema.json", "ContractTaskIntake"),
     ("master-message.schema.json", "ContractMasterMessage"),
+    ("master-thread.schema.json", "ContractMasterThread"),
     ("plan-proposal.schema.json", "ContractPlanProposal"),
     (
         "task-navigation-metadata.schema.json",

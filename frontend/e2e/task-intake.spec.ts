@@ -70,6 +70,43 @@ test.beforeEach(async ({ page }) => {
     presentation_revision: 1,
     assets: uploaded ? [asset] : [],
   });
+  const masterResponse = () => ({
+    schema_version: "1.0",
+    thread: {
+      schema_version: "1.0",
+      task_id: "task_e2e_intake",
+      latest_sequence: 1,
+      latest_proposal_revision: 0,
+      active_run: {
+        run_id: "run_e2e_intake",
+        message_id: "message_e2e_intake",
+        status: "RUNNING",
+        started_at: "2026-08-22T10:02:00Z",
+        updated_at: "2026-08-22T10:02:00Z",
+      },
+      last_error: null,
+      revision: 3,
+      created_at: "2026-08-22T10:00:00Z",
+      updated_at: "2026-08-22T10:02:00Z",
+    },
+    thread_revision: 3,
+    messages: [{
+      schema_version: "1.0",
+      message_id: "message_e2e_intake",
+      task_id: "task_e2e_intake",
+      sequence: 1,
+      role: "user",
+      kind: "text",
+      content: "秋季发布会三套主视觉方向",
+      asset_refs: uploaded ? [{ asset_id: asset.asset_id, manifest_relpath: `inputs/manifests/${asset.asset_id}.json` }] : [],
+      created_at: "2026-08-22T10:02:00Z",
+    }],
+    latest_proposal: null,
+    task: task(),
+    task_revision: taskRevision,
+    gateway_available: true,
+    assets: uploaded ? [{ asset_id: asset.asset_id, filename: asset.filename, description: asset.description, manifest_relpath: `inputs/manifests/${asset.asset_id}.json` }] : [],
+  });
 
   await page.route("**/readyz", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ready" }) });
@@ -125,6 +162,9 @@ test.beforeEach(async ({ page }) => {
   });
   await page.route("**/api/v1/task-intakes/task_e2e_intake", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response()) });
+  });
+  await page.route("**/api/v1/tasks/task_e2e_intake/master/messages", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(masterResponse()) });
   });
   await page.route("**/api/v1/task-intakes/task_history", async (route) => {
     await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { message: "No intake" } }) });
@@ -182,12 +222,11 @@ test("creates, uploads, refreshes and locks a task intake entirely through the w
   await expect(page.getByText("服务端草稿已恢复")).toBeVisible();
   await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "提交任务材料" }).click();
-  await expect(page.getByText("首次材料已锁定")).toBeVisible();
   await expect(page.getByText("已进入 Master 分析阶段")).toBeVisible();
   await expect(page.getByText("添加图片 / PDF / TXT / MD")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.getByText("首次材料已锁定")).toBeVisible();
+  await expect(page.getByText("引用已有资源（创建提交后不可追加上传）")).toBeVisible();
   await expect(page.getByRole("button", { name: "提交任务材料" })).toHaveCount(0);
 });
 

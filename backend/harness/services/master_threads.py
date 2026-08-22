@@ -1,0 +1,923 @@
+"""Persistent Master conversation, planning and recoverable confirmation workflows."""
+
+from __future__ import annotations
+
+import hashlib
+from copy import deepcopy
+from pathlib import Path
+from typing import Any, cast
+
+from ..adapters import AdapterRegistry
+from ..adapters.types import AgentInstanceSnapshot, StageSnapshot, TaskCard
+from ..contracts import ContractRegistry
+from ..core.errors import HarnessError
+from ..domain.commands import CommandEnvelope
+from ..domain.master import materialize_plan_proposal, validate_plan_proposal
+from ..domain.service import TaskCommandService
+from ..storage.atomic import atomic_write_json, read_json
+from ..storage.repository import Actor, utc_now
+from ..storage.store import FileStateStore
+from .application import HarnessApplicationService
+from .assets import AssetService
+from .credentials import CredentialPoolService
+from .master_gateway import MasterGateway, MasterGatewayFailure, MasterRunObservation
+
+
+class MasterThreadService:
+    """Keep one durable Master thread per task and never treat gateway state as truth."""
+
+    def __init__(
+        self,
+        store: FileStateStore,
+        contracts: ContractRegistry,
+        commands: TaskCommandService,
+        application: HarnessApplicationService,
+        assets: AssetService,
+        credentials: CredentialPoolService,
+        adapters: AdapterRegistry,
+        gateway: MasterGateway,
+    ) -> None:
+        self.store = store
+        self.contracts = contracts
+        self.commands = commands
+        self.application = application
+        self.assets = assets
+        self.credentials = credentials
+        self.adapters = adapters
+        self.gateway = gateway
+        self.intent_root = store.layout.control_root / "master-intents"
+        self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def get_session(self, task_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+        with self.commands.task_guard(task_id):
+            task = self._task(task_id)
+            thread = self._ensure_thread(task_id, task)
+            thread = self._ensure_intake_message(task_id, task, thread)
+            active_run = thread["active_run"]
+            if reconcile and active_run is not None and active_run["status"] in {
+                "SUBMITTING",
+                "RUNNING",
+            }:
+                thread = self._advance_active_run(task_id, thread)
+            return self._session(task_id)
+
+    def ensure_intake_started(self, task_id: str) -> dict[str, Any]:
+        """Bridge an already committed F1 intake to Master without weakening submit."""
+
+        return self.get_session(task_id, reconcile=True)
+
+    def recover(self) -> list[dict[str, Any]]:
+        """Resume confirmation intents and one polling step for active durable runs."""
+
+        recovered: list[dict[str, Any]] = []
+        for path in sorted(self.intent_root.glob("*.json")):
+            intent = read_json(path)
+            task_id = intent.get("task_id")
+            if intent.get("kind") != "CONFIRM_MASTER_PLAN" or not isinstance(task_id, str):
+                raise HarnessError("VALIDATION_ERROR", "A Master confirmation intent is invalid.")
+            if intent.get("state") == "COMPLETED":
+                continue
+            with self.commands.task_guard(task_id):
+                result = self._resume_confirm(path)
+            recovered.append({
+                "kind": "confirmation",
+                "task_id": task_id,
+                "proposal_revision": intent["proposal_revision"],
+                "status": result["proposal"]["status"],
+            })
+
+        tasks_root = self.store.layout.control_root / "tasks"
+        for thread_path in sorted(tasks_root.glob("*/master/thread.json")):
+            task_id = thread_path.parents[1].name
+            with self.commands.task_guard(task_id):
+                thread = self.store.master_thread.get(task_id, task_id)
+                if thread is None:
+                    continue
+                active = thread["active_run"]
+                if active is None or active["status"] not in {"SUBMITTING", "RUNNING"}:
+                    continue
+                advanced = self._advance_active_run(task_id, thread)
+                recovered.append({
+                    "kind": "run",
+                    "task_id": task_id,
+                    "run_id": advanced["active_run"]["run_id"],
+                    "status": advanced["active_run"]["status"],
+                })
+        return recovered
+
+    def append_message(
+        self,
+        task_id: str,
+        *,
+        content: str,
+        asset_refs: list[dict[str, str]],
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        if envelope.actor_type != "human":
+            raise HarnessError("VALIDATION_ERROR", "Only a human may add a Master message.")
+        normalized = content.strip()
+        if not normalized or len(normalized) > 20_000:
+            raise HarnessError("VALIDATION_ERROR", "The Master message is invalid.")
+        refs = self._validate_asset_refs(task_id, asset_refs)
+        message_id = self._identifier("message", task_id, envelope.idempotency_key)
+        with self.commands.task_guard(task_id):
+            task = self._task(task_id)
+            thread = self._ensure_thread(task_id, task)
+            existing = self.store.master_message.get(task_id, message_id)
+            if existing is not None:
+                if existing["content"] != normalized or existing["asset_refs"] != refs:
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The message idempotency key was reused with different content.",
+                    )
+                return self.get_session(task_id, reconcile=True)
+            actual = self.store.master_thread.revision(task_id, task_id)
+            if envelope.expected_revision != actual:
+                self._revision_conflict(
+                    "master_thread", task_id, envelope.expected_revision, actual
+                )
+            active = thread["active_run"]
+            if active is not None and active["status"] in {"SUBMITTING", "RUNNING"}:
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "Wait for the active Master run before sending another message.",
+                )
+            message = self._message(
+                task_id,
+                message_id,
+                thread["latest_sequence"] + 1,
+                role="user",
+                kind="text",
+                content=normalized,
+                asset_refs=refs,
+            )
+            self._put_message(
+                message,
+                Actor(envelope.actor_type, envelope.actor_id),
+                "append_master_message",
+            )
+            now = utc_now()
+            thread = self._put_thread(
+                task_id,
+                {
+                    **thread,
+                    "latest_sequence": message["sequence"],
+                    "active_run": {
+                        "run_id": None,
+                        "message_id": message_id,
+                        "status": "SUBMITTING",
+                        "started_at": now,
+                        "updated_at": now,
+                    },
+                    "last_error": None,
+                },
+                Actor(envelope.actor_type, envelope.actor_id),
+                "queue_master_run",
+            )
+            self._advance_active_run(task_id, thread)
+            return self._session(task_id)
+
+    def confirm_plan(
+        self,
+        task_id: str,
+        proposal_revision: int,
+        *,
+        task_expected_revision: int,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        if envelope.actor_type != "human":
+            raise HarnessError("VALIDATION_ERROR", "Only a human may confirm a plan here.")
+        return self._confirm(
+            task_id,
+            proposal_revision,
+            task_expected_revision=task_expected_revision,
+            envelope=envelope,
+        )
+
+    def _confirm(
+        self,
+        task_id: str,
+        proposal_revision: int,
+        *,
+        task_expected_revision: int,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        intent_path = self._confirm_intent_path(task_id, proposal_revision)
+        with self.commands.task_guard(task_id):
+            if intent_path.exists():
+                intent = read_json(intent_path)
+                if intent["state"] == "COMPLETED":
+                    return deepcopy(intent["result"])
+            else:
+                task = self._task(task_id)
+                thread = self._ensure_thread(task_id, task)
+                proposal = self._proposal_by_revision(task_id, proposal_revision)
+                if envelope.expected_revision != proposal_revision:
+                    self._revision_conflict(
+                        "plan_proposal",
+                        proposal["proposal_id"],
+                        envelope.expected_revision,
+                        proposal_revision,
+                    )
+                if thread["latest_proposal_revision"] != proposal_revision:
+                    self._revision_conflict(
+                        "plan_proposal",
+                        proposal["proposal_id"],
+                        proposal_revision,
+                        thread["latest_proposal_revision"],
+                    )
+                if proposal["status"] != "PENDING_CONFIRMATION":
+                    raise HarnessError(
+                        "INVALID_STATE_TRANSITION", "Only the latest pending plan may run."
+                    )
+                actual_task_revision = self.store.task.revision(task_id, task_id)
+                if task_expected_revision != actual_task_revision:
+                    self._revision_conflict(
+                        "task", task_id, task_expected_revision, actual_task_revision
+                    )
+                intent = {
+                    "schema_version": "1.0",
+                    "kind": "CONFIRM_MASTER_PLAN",
+                    "task_id": task_id,
+                    "proposal_id": proposal["proposal_id"],
+                    "proposal_revision": proposal_revision,
+                    "task_expected_revision": task_expected_revision,
+                    "actor": {
+                        "actor_type": envelope.actor_type,
+                        "actor_id": envelope.actor_id,
+                    },
+                    "state": "PREPARED",
+                    "prepared_at": utc_now(),
+                    "plan_result": None,
+                    "start_result": None,
+                    "result": None,
+                }
+                atomic_write_json(intent_path, intent)
+            return self._resume_confirm(intent_path)
+
+    def _resume_confirm(self, intent_path: Path) -> dict[str, Any]:
+        intent = read_json(intent_path)
+        task_id = intent["task_id"]
+        proposal = self.store.plan_proposal.get(task_id, intent["proposal_id"])
+        if proposal is None:
+            raise HarnessError("TASK_NOT_FOUND", "The selected PlanProposal does not exist.")
+        stages, instances, cards = materialize_plan_proposal(proposal)
+        providers = self._provider_mapping(instances)
+        if intent["state"] == "PREPARED":
+            actor = intent["actor"]
+            plan_result = self.application.save_plan_and_create_instances(
+                task_id,
+                stages=cast(list[StageSnapshot], stages),
+                instances=cast(list[AgentInstanceSnapshot], instances),
+                task_cards=cast(list[TaskCard], cards),
+                providers=providers,
+                operation_id=self._identifier("master_plan", task_id, proposal["proposal_id"]),
+                envelope=CommandEnvelope(
+                    idempotency_key=self._identifier(
+                        "save_master_plan", task_id, proposal["proposal_id"]
+                    ),
+                    actor_type=actor["actor_type"],
+                    actor_id=actor["actor_id"],
+                    expected_revision=int(intent["task_expected_revision"]),
+                ),
+            )
+            intent.update({"state": "PLAN_SAVED", "plan_result": plan_result})
+            atomic_write_json(intent_path, intent)
+        if intent["state"] == "PLAN_SAVED":
+            actor = intent["actor"]
+            task_revision = int(intent["plan_result"]["task_revision"])
+            start_result = self.application.confirm_and_start_ready_instances(
+                task_id,
+                operation_id=self._identifier("master_start", task_id, proposal["proposal_id"]),
+                envelope=CommandEnvelope(
+                    idempotency_key=self._identifier(
+                        "start_master_plan", task_id, proposal["proposal_id"]
+                    ),
+                    actor_type=actor["actor_type"],
+                    actor_id=actor["actor_id"],
+                    expected_revision=task_revision,
+                ),
+            )
+            intent.update({"state": "STARTED", "start_result": start_result})
+            atomic_write_json(intent_path, intent)
+        if intent["state"] == "STARTED":
+            current = self.store.plan_proposal.get(task_id, proposal["proposal_id"])
+            if current is None:
+                raise HarnessError("TASK_NOT_FOUND", "The selected PlanProposal does not exist.")
+            if current["status"] != "CONFIRMED":
+                now = utc_now()
+                confirmed = {
+                    **current,
+                    "status": "CONFIRMED",
+                    "updated_at": now,
+                    "confirmed_at": now,
+                }
+                self.store.plan_proposal.put(
+                    task_id,
+                    proposal["proposal_id"],
+                    confirmed,
+                    expected_revision=self.store.plan_proposal.revision(
+                        task_id, proposal["proposal_id"]
+                    ),
+                    actor=Actor(intent["actor"]["actor_type"], intent["actor"]["actor_id"]),
+                    command="confirm_plan_proposal",
+                    idempotency_key=self._identifier(
+                        "confirm_proposal", task_id, proposal["proposal_id"]
+                    ),
+                )
+            self._append_confirmation_message(task_id, proposal)
+            result = {
+                "schema_version": "1.0",
+                "proposal": deepcopy(
+                    self.store.plan_proposal.get(task_id, proposal["proposal_id"])
+                ),
+                "plan_result": deepcopy(intent["plan_result"]),
+                "start_result": deepcopy(intent["start_result"]),
+                "session": self._session(task_id),
+            }
+            intent.update({
+                "state": "COMPLETED",
+                "completed_at": utc_now(),
+                "result": result,
+            })
+            atomic_write_json(intent_path, intent)
+        return deepcopy(intent["result"])
+
+    def _ensure_intake_message(
+        self, task_id: str, task: dict[str, Any], thread: dict[str, Any]
+    ) -> dict[str, Any]:
+        if thread["latest_sequence"] > 0:
+            return thread
+        intake = self.store.task_intake.get(task_id, task_id)
+        if intake is None or intake["status"] != "SUBMITTED":
+            return thread
+        message_id = self._identifier("message_intake", task_id)
+        refs = []
+        for asset_id in intake["asset_ids"]:
+            manifest = self.assets.verify_asset(task_id, asset_id)
+            refs.append(
+                {
+                    "asset_id": asset_id,
+                    "manifest_relpath": (
+                        f"inputs/manifests/{asset_id}.json"
+                        if manifest["producer_instance_id"] is None
+                        else f"resources/manifests/{asset_id}.json"
+                    ),
+                }
+            )
+        message = self._message(
+            task_id,
+            message_id,
+            1,
+            role="user",
+            kind="text",
+            content=intake["prompt"],
+            asset_refs=refs,
+            created_at=intake["submitted_at"],
+        )
+        actor = Actor("system", "intake_bridge")
+        if self.store.master_message.get(task_id, message_id) is None:
+            self._put_message(message, actor, "seed_master_thread_from_intake")
+        now = utc_now()
+        thread = self._put_thread(
+            task_id,
+            {
+                **thread,
+                "latest_sequence": 1,
+                "active_run": {
+                    "run_id": None,
+                    "message_id": message_id,
+                    "status": "SUBMITTING",
+                    "started_at": now,
+                    "updated_at": now,
+                },
+            },
+            actor,
+            "queue_intake_master_run",
+        )
+        return thread
+
+    def _advance_active_run(self, task_id: str, thread: dict[str, Any]) -> dict[str, Any]:
+        active = thread["active_run"]
+        if active is None:
+            return thread
+        try:
+            if active["status"] == "SUBMITTING":
+                if not self.gateway.available:
+                    raise MasterGatewayFailure(
+                        "MASTER_UNAVAILABLE",
+                        "未配置真实 MasterGateway, 无法分析消息或生成计划。",
+                    )
+                message = self.store.master_message.get(task_id, active["message_id"])
+                if message is None:
+                    raise HarnessError("TASK_NOT_FOUND", "The queued Master message is missing.")
+                run_id = self.gateway.submit_message(task_id, message)
+                now = utc_now()
+                thread = self._put_thread(
+                    task_id,
+                    {
+                        **thread,
+                        "active_run": {
+                            **active,
+                            "run_id": run_id,
+                            "status": "RUNNING",
+                            "updated_at": now,
+                        },
+                        "last_error": None,
+                    },
+                    Actor("master", "master_gateway"),
+                    "submit_master_run",
+                )
+                active = thread["active_run"]
+            if active["status"] != "RUNNING" or active["run_id"] is None:
+                return thread
+            observation = self.gateway.observe_run(active["run_id"])
+            if observation.status == "RUNNING":
+                return thread
+            if observation.status == "NEEDS_INPUT":
+                content = (observation.message or "Master 需要补充信息后才能继续。").strip()
+                return self._append_gateway_message(
+                    task_id,
+                    thread,
+                    active,
+                    role="master",
+                    kind="clarification",
+                    content=content,
+                    target_status="NEEDS_INPUT",
+                    command="record_master_clarification",
+                )
+            if observation.status == "FAILED":
+                raise MasterGatewayFailure(
+                    "MASTER_RUN_FAILED",
+                    (observation.message or "Master 计划运行失败, 请补充要求后重试。").strip(),
+                )
+            return self._store_gateway_plan(task_id, thread, active, observation)
+        except MasterGatewayFailure as exc:
+            return self._record_gateway_error(task_id, thread, active, exc.code, exc.message)
+
+    def _store_gateway_plan(
+        self,
+        task_id: str,
+        thread: dict[str, Any],
+        active: dict[str, Any],
+        observation: MasterRunObservation,
+    ) -> dict[str, Any]:
+        proposal = self.gateway.load_plan(active["run_id"])
+        expected_revision = thread["latest_proposal_revision"] + 1
+        validate_plan_proposal(
+            self.contracts,
+            proposal,
+            task_id=task_id,
+            expected_revision=expected_revision,
+        )
+        actor = Actor("master", "master_gateway")
+        existing = self.store.plan_proposal.get(task_id, proposal["proposal_id"])
+        if existing is None:
+            self.store.plan_proposal.put(
+                task_id,
+                proposal["proposal_id"],
+                deepcopy(proposal),
+                expected_revision=0,
+                actor=actor,
+                command="save_plan_proposal",
+                idempotency_key=self._identifier("save_proposal", task_id, proposal["proposal_id"]),
+            )
+        elif existing != proposal:
+            raise HarnessError(
+                "IDEMPOTENCY_CONFLICT", "Master reused a proposal id with different content."
+            )
+        for previous in self.store.plan_proposal.list(task_id):
+            if (
+                previous["proposal_id"] != proposal["proposal_id"]
+                and previous["status"] == "PENDING_CONFIRMATION"
+            ):
+                updated = {
+                    **previous,
+                    "status": "SUPERSEDED",
+                    "updated_at": utc_now(),
+                    "confirmed_at": None,
+                }
+                self.store.plan_proposal.put(
+                    task_id,
+                    previous["proposal_id"],
+                    updated,
+                    expected_revision=self.store.plan_proposal.revision(
+                        task_id, previous["proposal_id"]
+                    ),
+                    actor=actor,
+                    command="supersede_plan_proposal",
+                    idempotency_key=self._identifier(
+                        "supersede_proposal",
+                        task_id,
+                        previous["proposal_id"],
+                        proposal["proposal_id"],
+                    ),
+                )
+        default_content = f"已生成计划方案 r{proposal['revision']}, 请审阅。"
+        content = (observation.message or default_content).strip()
+        message_id = self._identifier("message_plan", task_id, proposal["proposal_id"])
+        existing_message = self.store.master_message.get(task_id, message_id)
+        if existing_message is None:
+            message = self._message(
+                task_id,
+                message_id,
+                thread["latest_sequence"] + 1,
+                role="master",
+                kind="plan_proposal",
+                content=content,
+                asset_refs=[],
+            )
+            self._put_message(message, actor, "append_master_plan_message")
+            latest_sequence = message["sequence"]
+        else:
+            latest_sequence = max(
+                thread["latest_sequence"],
+                existing_message["sequence"],
+            )
+        now = utc_now()
+        thread = self._put_thread(
+            task_id,
+            {
+                **thread,
+                "latest_sequence": latest_sequence,
+                "latest_proposal_revision": proposal["revision"],
+                "active_run": {**active, "status": "PLAN_READY", "updated_at": now},
+                "last_error": None,
+            },
+            actor,
+            "publish_master_plan",
+        )
+        self._apply_generated_title(task_id, observation.task_title, proposal["proposal_id"])
+        task = self._task(task_id)
+        if task["start_policy"] == "auto":
+            try:
+                self._confirm(
+                    task_id,
+                    proposal["revision"],
+                    task_expected_revision=self.store.task.revision(task_id, task_id),
+                    envelope=CommandEnvelope(
+                        idempotency_key=self._identifier(
+                            "auto_confirm", task_id, proposal["proposal_id"]
+                        ),
+                        actor_type="master",
+                        actor_id="master_gateway",
+                        expected_revision=proposal["revision"],
+                    ),
+                )
+            except HarnessError as exc:
+                current = self.store.master_thread.get(task_id, task_id) or thread
+                return self._record_gateway_error(
+                    task_id,
+                    current,
+                    current["active_run"],
+                    exc.code,
+                    exc.message,
+                )
+        return self.store.master_thread.get(task_id, task_id) or thread
+
+    def _append_gateway_message(
+        self,
+        task_id: str,
+        thread: dict[str, Any],
+        active: dict[str, Any],
+        *,
+        role: str,
+        kind: str,
+        content: str,
+        target_status: str,
+        command: str,
+    ) -> dict[str, Any]:
+        message_id = self._identifier("message_run", task_id, active["run_id"], target_status)
+        existing = self.store.master_message.get(task_id, message_id)
+        if existing is None:
+            message = self._message(
+                task_id,
+                message_id,
+                thread["latest_sequence"] + 1,
+                role=role,
+                kind=kind,
+                content=content,
+                asset_refs=[],
+            )
+            self._put_message(message, Actor("master", "master_gateway"), command)
+            latest_sequence = message["sequence"]
+        else:
+            latest_sequence = max(thread["latest_sequence"], existing["sequence"])
+        return self._put_thread(
+            task_id,
+            {
+                **thread,
+                "latest_sequence": latest_sequence,
+                "active_run": {
+                    **active,
+                    "status": target_status,
+                    "updated_at": utc_now(),
+                },
+                "last_error": None,
+            },
+            Actor("master", "master_gateway"),
+            command,
+        )
+
+    def _record_gateway_error(
+        self,
+        task_id: str,
+        thread: dict[str, Any],
+        active: dict[str, Any] | None,
+        code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        safe_message = message.strip()[:2000] or "Master 服务暂时不可用。"
+        now = utc_now()
+        error_id = self._identifier(
+            "message_error", task_id, None if active is None else active["message_id"], code
+        )
+        existing = self.store.master_message.get(task_id, error_id)
+        latest_sequence = thread["latest_sequence"]
+        if existing is None:
+            error_message = self._message(
+                task_id,
+                error_id,
+                latest_sequence + 1,
+                role="system",
+                kind="error",
+                content=safe_message,
+                asset_refs=[],
+            )
+            self._put_message(
+                error_message, Actor("system", "master_gateway_boundary"), "record_master_error"
+            )
+            latest_sequence = error_message["sequence"]
+        else:
+            latest_sequence = max(latest_sequence, existing["sequence"])
+        return self._put_thread(
+            task_id,
+            {
+                **thread,
+                "latest_sequence": latest_sequence,
+                "active_run": (
+                    None
+                    if active is None
+                    else {**active, "status": "FAILED", "updated_at": now}
+                ),
+                "last_error": {"code": code, "message": safe_message, "occurred_at": now},
+            },
+            Actor("system", "master_gateway_boundary"),
+            "record_master_error",
+        )
+
+    def _append_confirmation_message(
+        self, task_id: str, proposal: dict[str, Any]
+    ) -> None:
+        message_id = self._identifier("message_confirm", task_id, proposal["proposal_id"])
+        if self.store.master_message.get(task_id, message_id) is not None:
+            return
+        thread = self.store.master_thread.get(task_id, task_id)
+        if thread is None:
+            raise HarnessError("TASK_NOT_FOUND", "The Master thread does not exist.")
+        message = self._message(
+            task_id,
+            message_id,
+            thread["latest_sequence"] + 1,
+            role="system",
+            kind="plan_confirmation",
+            content=f"计划 r{proposal['revision']} 已确认, 符合门禁的实例已进入启动流程。",
+            asset_refs=[],
+        )
+        actor = Actor("system", "master_plan_confirmation")
+        self._put_message(message, actor, "append_plan_confirmation_message")
+        self._put_thread(
+            task_id,
+            {**thread, "latest_sequence": message["sequence"], "last_error": None},
+            actor,
+            "complete_plan_confirmation",
+        )
+
+    def _apply_generated_title(
+        self, task_id: str, raw_title: str | None, proposal_id: str
+    ) -> None:
+        if raw_title is None:
+            return
+        title = " ".join(raw_title.split())
+        if not title or len(title) > 256:
+            raise HarnessError("VALIDATION_ERROR", "Master generated an invalid task title.")
+        task = self._task(task_id)
+        if task["title"] == title:
+            return
+        self.commands.rename_task(
+            task_id,
+            title,
+            CommandEnvelope(
+                idempotency_key=self._identifier("master_title", task_id, proposal_id),
+                actor_type="master",
+                actor_id="master_gateway",
+                expected_revision=self.store.task.revision(task_id, task_id),
+            ),
+        )
+
+    def _provider_mapping(self, instances: list[dict[str, Any]]) -> dict[str, str]:
+        providers = sorted(
+            {
+                item["provider"]
+                for item in self.credentials.list_redacted()
+                if item.get("enabled", True)
+            }
+        )
+        mapping: dict[str, str] = {}
+        for instance in instances:
+            adapter = self.adapters.get_optional(instance["agent_type"])
+            if adapter is None or adapter.available:
+                if not providers:
+                    raise HarnessError(
+                        "CREDENTIAL_PAIR_UNAVAILABLE",
+                        "The plan requires a runnable Agent but no enabled credential pair exists.",
+                        {"instance_id": instance["instance_id"]},
+                    )
+                mapping[instance["instance_id"]] = providers[0]
+        return mapping
+
+    def _validate_asset_refs(
+        self, task_id: str, raw_refs: list[dict[str, str]]
+    ) -> list[dict[str, str]]:
+        if len(raw_refs) > 20:
+            raise HarnessError("VALIDATION_ERROR", "Too many asset references.")
+        refs: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw in raw_refs:
+            asset_id = raw.get("asset_id", "")
+            if asset_id in seen:
+                raise HarnessError("VALIDATION_ERROR", "Asset references must be unique.")
+            manifest = self.assets.verify_asset(task_id, asset_id)
+            expected = (
+                f"inputs/manifests/{asset_id}.json"
+                if manifest["producer_instance_id"] is None
+                else f"resources/manifests/{asset_id}.json"
+            )
+            if raw.get("manifest_relpath") != expected:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "An asset reference does not use its authoritative manifest.",
+                )
+            seen.add(asset_id)
+            refs.append({"asset_id": asset_id, "manifest_relpath": expected})
+        return refs
+
+    def _session(self, task_id: str) -> dict[str, Any]:
+        task = self._task(task_id)
+        thread = self.store.master_thread.get(task_id, task_id)
+        if thread is None:
+            thread = self._ensure_thread(task_id, task)
+        messages = self.store.master_message.list(task_id)
+        messages.sort(key=lambda item: (item["sequence"], item["created_at"], item["message_id"]))
+        proposals = self.store.plan_proposal.list(task_id)
+        latest = max(proposals, key=lambda item: item["revision"], default=None)
+        intake = self.store.task_intake.get(task_id, task_id)
+        assets = []
+        if intake is not None:
+            for asset_id in intake["asset_ids"]:
+                manifest = self.assets.verify_asset(task_id, asset_id)
+                assets.append(
+                    {
+                        "asset_id": asset_id,
+                        "filename": Path(manifest["relative_path"]).name,
+                        "description": manifest["description"],
+                        "manifest_relpath": f"inputs/manifests/{asset_id}.json",
+                    }
+                )
+        return {
+            "schema_version": "1.0",
+            "thread": deepcopy(thread),
+            "thread_revision": self.store.master_thread.revision(task_id, task_id),
+            "messages": deepcopy(messages),
+            "latest_proposal": deepcopy(latest),
+            "task": deepcopy(task),
+            "task_revision": self.store.task.revision(task_id, task_id),
+            "gateway_available": self.gateway.available,
+            "assets": assets,
+        }
+
+    def _ensure_thread(
+        self, task_id: str, task: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        current = self.store.master_thread.get(task_id, task_id)
+        if current is not None:
+            return current
+        task = task or self._task(task_id)
+        now = utc_now()
+        thread = {
+            "schema_version": "1.0",
+            "task_id": task_id,
+            "latest_sequence": 0,
+            "latest_proposal_revision": 0,
+            "active_run": None,
+            "last_error": None,
+            "revision": 1,
+            "created_at": task["created_at"],
+            "updated_at": now,
+        }
+        self.store.master_thread.put(
+            task_id,
+            task_id,
+            thread,
+            expected_revision=0,
+            actor=Actor("system", "master_thread_initializer"),
+            command="create_master_thread",
+            idempotency_key=self._identifier("create_master_thread", task_id),
+        )
+        return thread
+
+    def _put_thread(
+        self,
+        task_id: str,
+        thread: dict[str, Any],
+        actor: Actor,
+        command: str,
+    ) -> dict[str, Any]:
+        actual = self.store.master_thread.revision(task_id, task_id)
+        updated = {
+            **deepcopy(thread),
+            "revision": actual + 1,
+            "updated_at": utc_now(),
+        }
+        self.store.master_thread.put(
+            task_id,
+            task_id,
+            updated,
+            expected_revision=actual,
+            actor=actor,
+            command=command,
+            idempotency_key=self._identifier(command, task_id, str(actual + 1)),
+        )
+        return updated
+
+    def _put_message(self, message: dict[str, Any], actor: Actor, command: str) -> None:
+        self.store.master_message.put(
+            message["task_id"],
+            message["message_id"],
+            deepcopy(message),
+            expected_revision=0,
+            actor=actor,
+            command=command,
+            idempotency_key=self._identifier(command, message["task_id"], message["message_id"]),
+        )
+
+    def _proposal_by_revision(self, task_id: str, revision: int) -> dict[str, Any]:
+        matches = [
+            item for item in self.store.plan_proposal.list(task_id) if item["revision"] == revision
+        ]
+        if len(matches) != 1:
+            raise HarnessError("TASK_NOT_FOUND", "The requested PlanProposal does not exist.")
+        return matches[0]
+
+    def _task(self, task_id: str) -> dict[str, Any]:
+        task = self.store.task.get(task_id, task_id)
+        if task is None:
+            raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
+        return deepcopy(task)
+
+    def _confirm_intent_path(self, task_id: str, revision: int) -> Path:
+        return self.intent_root / f"{self._identifier('confirm', task_id, str(revision))}.json"
+
+    @staticmethod
+    def _message(
+        task_id: str,
+        message_id: str,
+        sequence: int,
+        *,
+        role: str,
+        kind: str,
+        content: str,
+        asset_refs: list[dict[str, str]],
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "message_id": message_id,
+            "task_id": task_id,
+            "sequence": sequence,
+            "role": role,
+            "kind": kind,
+            "content": content,
+            "asset_refs": deepcopy(asset_refs),
+            "created_at": created_at or utc_now(),
+        }
+
+    @staticmethod
+    def _identifier(prefix: str, *parts: object) -> str:
+        digest = hashlib.sha256("\0".join(str(part) for part in parts).encode()).hexdigest()
+        return f"{prefix}_{digest[:32]}"
+
+    @staticmethod
+    def _revision_conflict(
+        object_type: str, object_id: str, expected: int, actual: int
+    ) -> None:
+        raise HarnessError(
+            "REVISION_CONFLICT",
+            "The object revision changed before this command committed.",
+            {
+                "object_type": object_type,
+                "object_id": object_id,
+                "expected_revision": expected,
+                "actual_revision": actual,
+            },
+        )

@@ -51,6 +51,9 @@ class StateLayout:
             control_task / "instances",
             control_task / "approvals",
             control_task / "inbox",
+            control_task / "master",
+            control_task / "master" / "messages",
+            control_task / "master" / "plan-proposals",
         )
         workspace_children = (
             workspace_task,

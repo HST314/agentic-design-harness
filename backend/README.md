@@ -1,6 +1,6 @@
 # 后端边界
 
-`harness` 是单机、单写者控制进程的 Python 包。首次启动请从仓库根目录按[安装与启动指南](../docs/getting-started.md)操作；API 使用方式见 [Master API 调用指南](../docs/master-api-guide.md)。
+`harness` 是单机、单写者控制进程的 Python 包。首次启动请从仓库根目录按[安装与启动指南](../docs/getting-started.md)操作；API 使用方式见 [Master API 调用指南](../docs/master-api-guide.md)，编排服务接入见 [Master Gateway 接入契约](../docs/master-gateway.md)。
 
 依赖方向固定为：
 
