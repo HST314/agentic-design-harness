@@ -203,9 +203,10 @@ Windows PowerShell 使用 `Copy-Item config/harness.example.yaml config/harness.
 | `HARNESS_PORT` | `18080` | 后端监听端口 |
 | `HARNESS_CONTROL_ROOT` | `control-data` | 控制状态、事件和密钥目录 |
 | `HARNESS_WORKSPACE_ROOT` | `workspace` | 任务输入与交付目录 |
-| `HARNESS_IMAGE_AGENT_ROOT` | `../image_agent_mvp` | Image Agent 源码目录 |
+| `HARNESS_IMAGE_AGENT_ROOT` | `agents/image_agent_mvp` | Image Agent 内嵌源码目录 |
 | `HARNESS_IMAGE_AGENT_PYTHON` | 当前 Python 解释器 | Image Agent 解释器；Windows 可设为 `.venv\Scripts\python.exe` |
-| `HARNESS_IMAGE_AGENT_REVISION` | 固定提交 | 允许启动的 Image Agent 版本 |
+| `HARNESS_IMAGE_AGENT_PATH_MODE` | `prefer_embedded` | 内嵌路径优先；单发布周期兼容旧部署 |
+| `HARNESS_DELIVERY_BUNDLE_MIGRATION_MODE` | `legacy_only` | 双资产交付迁移阶段开关 |
 
 凭据不能写入 YAML 或 `.env` 后提交到 Git。请通过受控的 `/api/v1/key-pool` 接口写入，公开响应只会返回 Key ID、尾号和 Base URL 提示。
 
@@ -236,23 +237,23 @@ curl --request POST http://127.0.0.1:18080/api/v1/tasks \
 
 ## 接入 Image Agent
 
-真实 Image 工作流要求 Image Agent 源码位于配置指定目录，且 Git revision 与 `image_agent_revision` 完全一致。准备其隔离依赖：
+真实 Image 工作流要求 Image Agent 源码位于 `agents/image_agent_mvp`，且内容与 `agents/image-agent.lock.json` 完全一致。准备其隔离依赖：
 
 ```bash
-make image-agent-env IMAGE_AGENT_ROOT=../image_agent_mvp
+make image-agent-env
 ```
 
 先运行不调用外部模型的真实进程门禁：
 
 ```bash
-make g2-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
-make g3-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+make g2-e2e
+make g3-e2e
 ```
 
 G3 覆盖“人工确认 → 真实 Adapter/进程 → 受控发布 → 主任务完成”。多实例、凭据轮转、配置覆盖、用量和取消链路使用：
 
 ```bash
-make g4-e2e IMAGE_AGENT_ROOT=../image_agent_mvp
+make g4-e2e
 ```
 
 需要访问真实模型 Provider 时，请使用专用测试凭据文件，并先执行预检：
@@ -262,7 +263,6 @@ make real-provider-preflight \
   REAL_PROVIDER_ENV_FILE=/secure/provider.env
 
 make real-provider-smoke \
-  IMAGE_AGENT_ROOT=../image_agent_mvp \
   REAL_PROVIDER_ENV_FILE=/secure/provider.env
 ```
 
@@ -279,7 +279,7 @@ make real-provider-smoke \
 | `make verify` | `check` + Pyright + Python/npm 漏洞审计 + SBOM + 容量基准 |
 | `make frontend-unit` | React 组件、前端 API、命令信封与轮询恢复单测 |
 | `npm --prefix frontend run test:e2e` | Playwright 浏览器测试 |
-| `make g5-e2e IMAGE_AGENT_ROOT=../image_agent_mvp` | Phase 1 + RFC v0.3 工作台完整离线发布门禁与证据索引 |
+| `make g5-e2e` | Phase 1 + RFC v0.3 工作台完整离线发布门禁与证据索引 |
 
 `make test` 在未提供合格 Image Agent 环境时会按设计跳过真实 Agent 用例；这不等同于真实链路已通过。发布前应根据目标范围执行对应的 G2–G5 门禁。
 
