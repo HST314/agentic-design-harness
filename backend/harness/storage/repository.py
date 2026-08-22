@@ -209,6 +209,18 @@ class TaskNavigationRepository(SnapshotRepository[dict[str, Any]]):
     pass
 
 
+class MasterThreadRepository(SnapshotRepository[dict[str, Any]]):
+    pass
+
+
+class MasterMessageRepository(SnapshotRepository[dict[str, Any]]):
+    pass
+
+
+class PlanProposalRepository(SnapshotRepository[dict[str, Any]]):
+    pass
+
+
 class UsageRepository:
     def __init__(
         self,

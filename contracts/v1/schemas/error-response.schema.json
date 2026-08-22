@@ -32,6 +32,8 @@
             "ASSET_VALIDATION_FAILED",
             "ASSET_CORRUPTED",
             "PROCESS_START_FAILED",
+            "MASTER_UNAVAILABLE",
+            "MASTER_RUN_FAILED",
             "INTERNAL_ERROR"
           ]
         },

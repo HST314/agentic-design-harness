@@ -118,8 +118,8 @@ class TaskCommandService:
         normalized = title.strip()
         if not normalized or len(normalized) > 256:
             raise HarnessError("VALIDATION_ERROR", "The task title is invalid.")
-        if envelope.actor_type != "human":
-            raise HarnessError("VALIDATION_ERROR", "Only a human may rename a task.")
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError("VALIDATION_ERROR", "Only a human or Master may rename a task.")
         request = {"task_id": task_id, "title": normalized}
         return self._idempotent(
             task_id,

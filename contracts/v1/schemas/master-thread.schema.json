@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/master-thread.schema.json",
+  "title": "MasterThread",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "latest_sequence",
+    "latest_proposal_revision",
+    "active_run",
+    "last_error",
+    "revision",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {"$ref": "common.schema.json#/$defs/schemaVersion"},
+    "task_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "latest_sequence": {"type": "integer", "minimum": 0},
+    "latest_proposal_revision": {"type": "integer", "minimum": 0},
+    "active_run": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run_id", "message_id", "status", "started_at", "updated_at"],
+          "properties": {
+            "run_id": {
+              "oneOf": [
+                {"type": "null"},
+                {"$ref": "common.schema.json#/$defs/identifier"}
+              ]
+            },
+            "message_id": {"$ref": "common.schema.json#/$defs/identifier"},
+            "status": {
+              "type": "string",
+              "enum": ["SUBMITTING", "RUNNING", "NEEDS_INPUT", "PLAN_READY", "FAILED"]
+            },
+            "started_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+            "updated_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+          }
+        }
+      ]
+    },
+    "last_error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "occurred_at"],
+          "properties": {
+            "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$"},
+            "message": {
+              "$ref": "common.schema.json#/$defs/credentialSafeText",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "occurred_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+          }
+        }
+      ]
+    },
+    "revision": {"type": "integer", "minimum": 1},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "updated_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+  }
+}

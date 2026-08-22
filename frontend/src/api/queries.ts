@@ -22,3 +22,14 @@ export const taskIntakeQuery = (taskId: string) => queryOptions({
   queryFn: ({ signal }: { signal: AbortSignal }) => api.taskIntake(taskId, signal),
   retry: false,
 });
+
+export const masterSessionQuery = (taskId: string) => queryOptions({
+  queryKey: ["master-session", taskId],
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.masterSession(taskId, signal),
+  refetchInterval: (query) => {
+    const active = query.state.data?.thread.active_run;
+    return active?.status === "SUBMITTING" || active?.status === "RUNNING" ? 3_000 : 5_000;
+  },
+  refetchIntervalInBackground: false,
+  retry: false,
+});

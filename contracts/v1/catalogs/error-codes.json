@@ -92,6 +92,18 @@
       "meaning": "The instance process could not be started or did not become healthy."
     },
     {
+      "code": "MASTER_UNAVAILABLE",
+      "http_status": 503,
+      "retryable": true,
+      "meaning": "No real Master Gateway is configured or the configured gateway is unreachable."
+    },
+    {
+      "code": "MASTER_RUN_FAILED",
+      "http_status": 502,
+      "retryable": true,
+      "meaning": "The configured Master Gateway rejected or failed a planning run."
+    },
+    {
       "code": "INTERNAL_ERROR",
       "http_status": 500,
       "retryable": false,

@@ -46,6 +46,45 @@ test.beforeEach(async ({ page }) => {
       body: JSON.stringify({ error: { message: "The requested task intake does not exist." } }),
     });
   });
+  await page.route("**/api/v1/tasks/task_launch_campaign/master/messages", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
+        thread: {
+          schema_version: "1.0",
+          task_id: "task_launch_campaign",
+          latest_sequence: 0,
+          latest_proposal_revision: 0,
+          active_run: null,
+          last_error: null,
+          revision: 1,
+          created_at: "2026-08-22T09:00:00Z",
+          updated_at: "2026-08-22T09:00:00Z",
+        },
+        thread_revision: 1,
+        messages: [],
+        latest_proposal: null,
+        task: {
+          schema_version: "1.0",
+          task_id: "task_launch_campaign",
+          title: "秋季发布会主视觉",
+          goal: "完成主视觉",
+          master_owner: "master_default",
+          start_policy: "manual",
+          status: "RUNNING",
+          created_at: "2026-08-22T09:00:00Z",
+          updated_at: "2026-08-22T09:00:00Z",
+          input_manifest: "inputs/manifests/input.json",
+          plan_revision: 1,
+        },
+        task_revision: 3,
+        gateway_available: true,
+        assets: [],
+      }),
+    });
+  });
 });
 
 test("root enters the accessible task-intake application shell", async ({ page }) => {
@@ -84,7 +123,7 @@ test("master, board and plan deep links share one stable shell", async ({ page }
     await page.goto(`/tasks/task_launch_campaign/${route}`);
     await expect(page.getByRole("complementary", { name: "主任务历史" })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
-    await expect(page.getByText("任务 task_launch_campaign", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("heading", { name: route === "master" ? "秋季发布会主视觉" : route === "board" ? "当前任务看板" : "任务计划" })).toBeVisible();
   }
 });
 

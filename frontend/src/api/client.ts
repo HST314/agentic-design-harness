@@ -4,6 +4,9 @@ import type {
   ContractAssetManifest,
   ContractInboxItem,
   ContractMainTask,
+  ContractMasterMessage,
+  ContractMasterThread,
+  ContractPlanProposal,
   ContractStage,
   ContractTaskIntake,
   ContractTaskNavigationMetadata,
@@ -78,6 +81,36 @@ export interface TaskIntakeMutationResponse {
   task?: ContractMainTask;
   task_revision?: number;
   assets?: TaskIntakeAsset[];
+}
+
+export interface MasterAssetReference {
+  asset_id: string;
+  manifest_relpath: string;
+}
+
+export interface MasterSessionAsset extends MasterAssetReference {
+  filename: string;
+  description: string;
+}
+
+export interface MasterSessionResponse {
+  schema_version: string;
+  thread: ContractMasterThread;
+  thread_revision: number;
+  messages: ContractMasterMessage[];
+  latest_proposal: ContractPlanProposal | null;
+  task: ContractMainTask;
+  task_revision: number;
+  gateway_available: boolean;
+  assets: MasterSessionAsset[];
+}
+
+export interface ConfirmPlanResponse {
+  schema_version: string;
+  proposal: ContractPlanProposal;
+  plan_result: Record<string, unknown>;
+  start_result: Record<string, unknown>;
+  session: MasterSessionResponse;
 }
 
 export interface PageInfo {
@@ -271,6 +304,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly code?: string,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -341,6 +376,37 @@ export class ApiClient {
     presentation_revision: number;
   }> {
     return this.send("PATCH", `/api/v1/tasks/${encodeURIComponent(taskId)}/presentation`, patch);
+  }
+
+  masterSession(taskId: string, signal?: AbortSignal): Promise<MasterSessionResponse> {
+    return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/master/messages`, signal);
+  }
+
+  appendMasterMessage(
+    taskId: string,
+    body: {
+      content: string;
+      asset_refs: MasterAssetReference[];
+      envelope: CommandEnvelope;
+    },
+  ): Promise<MasterSessionResponse> {
+    return this.send(
+      "POST",
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/master/messages`,
+      body,
+    );
+  }
+
+  confirmPlanProposal(
+    taskId: string,
+    proposalRevision: number,
+    body: { task_expected_revision: number; envelope: CommandEnvelope },
+  ): Promise<ConfirmPlanResponse> {
+    return this.send(
+      "POST",
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/plan-proposals/${proposalRevision}/confirm`,
+      body,
+    );
   }
 
   uploadTaskIntakeAsset(
@@ -576,9 +642,11 @@ export class ApiClient {
 
   private async error(response: Response): Promise<ApiError> {
     let message = `请求失败（${response.status}）。`;
+    let code: string | undefined;
+    let details: Record<string, unknown> | undefined;
     try {
       const payload = (await response.json()) as {
-        error?: { message?: string };
+        error?: { message?: string; code?: string; details?: Record<string, unknown> };
         detail?: string | Array<{ msg?: string }>;
       };
       if (payload.error?.message) message = payload.error.message;
@@ -586,9 +654,11 @@ export class ApiClient {
       else if (Array.isArray(payload.detail)) {
         message = payload.detail.map((item) => item.msg).filter(Boolean).join("；") || message;
       }
+      code = payload.error?.code;
+      details = payload.error?.details;
     } catch {
       // The status fallback remains useful when an intermediary returns a non-JSON body.
     }
-    return new ApiError(message, response.status);
+    return new ApiError(message, response.status, code, details);
   }
 }
