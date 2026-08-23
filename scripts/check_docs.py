@@ -15,6 +15,7 @@ DOC_ROOT = ROOT / "docs"
 REQUIRED_ROOT_DOCS = {"README.md", "QUICKSTART.md", "CONTRIBUTING.md"}
 REQUIRED_DOCS = {
     "README.md",
+    "configuration-architecture-refactor-v1.md",
     "configuration.md",
     "contracts.md",
     "image-agent-integration.md",

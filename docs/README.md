@@ -5,6 +5,7 @@
 | 读者 | 先读 | 用途 |
 | --- | --- | --- |
 | 首次使用者 | [QUICKSTART](../QUICKSTART.md) | 干净环境一键安装、启动和空控制面自检 |
+| 架构评审者 | [配置与 Master 资料理解架构重构方案](configuration-architecture-refactor-v1.md) | 三份 YAML、内置 Master、资料解析与用户/管理员边界的目标设计 |
 | 系统管理员 | [配置指南](configuration.md) | Ark 凭据、模型路由、运行策略与诊断 |
 | Image Agent 维护者 | [Image Agent 集成](image-agent-integration.md) | 受管模式、进程边界、版本锁、双资产与回滚 |
 | Master / API 集成者 | [Master API](master-api.md) | 任务、消息、TaskCard 修订、确认启动与错误处理 |
