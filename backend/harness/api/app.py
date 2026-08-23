@@ -30,13 +30,10 @@ from ..services.approvals import ApprovalInboxService
 from ..services.asset_tools import AssetToolRegistry
 from ..services.asset_understanding import AssetUnderstandingService
 from ..services.assets import AssetService
-from ..services.configuration import ConfigurationService
-from ..services.credentials import CredentialPoolService
 from ..services.master_orchestrator import MasterOrchestrator
 from ..services.master_threads import MasterThreadService
 from ..services.model_clients import ModelClientFactory, OpenAICompatibleProviderAdapter
 from ..services.retry_budget import RetryBudgetService
-from ..services.settings_diagnostics import SettingsDiagnosticsService
 from ..services.supervisor import ProcessSupervisor
 from ..services.task_config import TaskConfigService
 from ..services.task_intakes import TaskIntakeService
@@ -58,8 +55,6 @@ class Container:
     task_config: TaskConfigService
     image_agent_config: ImageAgentConfigMaterializer
     approvals: ApprovalInboxService
-    credentials: CredentialPoolService
-    configuration: ConfigurationService
     usage: UsageService
     retry_budgets: RetryBudgetService
     supervisor: ProcessSupervisor
@@ -69,7 +64,6 @@ class Container:
     master_threads: MasterThreadService
     work_items: WorkItemProjectionService
     agent_workbench: AgentWorkbenchService
-    settings_diagnostics: SettingsDiagnosticsService
 
 
 class ContractValidationRequest(BaseModel):
@@ -83,14 +77,6 @@ def build_container(
     model_clients: ModelClientFactory | None = None,
 ) -> Container:
     image_release_lock = load_image_agent_lock(settings.image_agent_lock_path)
-    if (
-        settings.image_agent_revision is not None
-        and settings.image_agent_revision != image_release_lock.revision
-    ):
-        raise HarnessError(
-            "SCHEMA_VERSION_UNSUPPORTED",
-            "The legacy Image Agent revision override differs from the release lock.",
-        )
     contracts = ContractRegistry(settings.contracts_root)
     errors = ErrorCatalog(settings.contracts_root / "catalogs" / "error-codes.json")
     store = FileStateStore(
@@ -102,8 +88,6 @@ def build_container(
     commands = TaskCommandService(store, contracts)
     assets = AssetService(store)
     approvals = ApprovalInboxService(store)
-    credentials = CredentialPoolService(store)
-    configuration = ConfigurationService(store)
     usage = UsageService(store)
     task_config = TaskConfigService(store, settings.config_snapshot)
     image_agent_config = ImageAgentConfigMaterializer(store, task_config)
@@ -133,7 +117,7 @@ def build_container(
                 interpreter=settings.image_agent_python,
                 dependency_root=settings.image_agent_dependency_root,
                 release_lock=image_release_lock,
-                revision=settings.image_agent_revision,
+                revision=image_release_lock.revision,
                 host=settings.host,
             ),
             PptAgentContractAdapter(),
@@ -145,11 +129,8 @@ def build_container(
         commands,
         assets,
         approvals,
-        credentials,
         supervisor,
         adapters,
-        configuration,
-        settings.delivery_bundle_write_targets,
     )
     task_intakes = TaskIntakeService(store, commands, assets)
     master_orchestrator = MasterOrchestrator(
@@ -166,7 +147,6 @@ def build_container(
         commands,
         application,
         assets,
-        credentials,
         adapters,
         master_orchestrator,
     )
@@ -178,10 +158,6 @@ def build_container(
         adapters,
     )
     agent_workbench = AgentWorkbenchService(store, adapters, work_items)
-    settings_diagnostics = SettingsDiagnosticsService(
-        configuration,
-        credentials,
-    )
     return Container(
         settings=settings,
         contracts=contracts,
@@ -193,8 +169,6 @@ def build_container(
         task_config=task_config,
         image_agent_config=image_agent_config,
         approvals=approvals,
-        credentials=credentials,
-        configuration=configuration,
         usage=usage,
         retry_budgets=retry_budgets,
         supervisor=supervisor,
@@ -204,7 +178,6 @@ def build_container(
         master_threads=master_threads,
         work_items=work_items,
         agent_workbench=agent_workbench,
-        settings_diagnostics=settings_diagnostics,
     )
 
 
@@ -250,9 +223,6 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         warnings = container.store.start()
-        container.configuration.initialize()
-        credential_recoveries = container.credentials.recover()
-        config_recoveries = container.configuration.recover()
         usage_recoveries = container.usage.recover()
         retry_budget_recoveries = container.retry_budgets.recover()
         asset_recoveries = container.assets.recover()
@@ -266,8 +236,6 @@ def create_app(
             extra={
                 "fields": {
                     "recovery_warning_count": len(warnings),
-                    "credential_recovery_count": len(credential_recoveries),
-                    "config_recovery_count": len(config_recoveries),
                     "usage_recovery_count": len(usage_recoveries),
                     "retry_budget_recovery_count": len(retry_budget_recoveries),
                     "asset_recovery_count": len(asset_recoveries),
@@ -300,7 +268,6 @@ def create_app(
             {"name": "approvals", "description": "Frozen-owner workflow decisions."},
             {"name": "inbox", "description": "FIFO notifications and handling state."},
             {"name": "usage", "description": "Token, cost and retry-budget accounting."},
-            {"name": "configuration", "description": "Redacted configuration boundaries."},
             {"name": "audit", "description": "Read-only public audit projection."},
         ],
         servers=[{"url": "http://127.0.0.1:18080", "description": "Local control plane"}],

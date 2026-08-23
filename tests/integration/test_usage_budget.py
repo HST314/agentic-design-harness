@@ -58,7 +58,6 @@ class UsageAndBudgetTests(unittest.TestCase):
             "agent_type": "image",
             "request_id": f"request_{event_id}",
             "model": "image-model",
-            "credential_pair_ref": "cred_test_01",
             "input_tokens": 10,
             "output_tokens": 5,
             "cached_input_tokens": 2,
@@ -104,7 +103,7 @@ class UsageAndBudgetTests(unittest.TestCase):
         self.assertEqual(conflict.exception.code, "IDEMPOTENCY_CONFLICT")
 
         wrong_owner = self.usage_event("usage_wrong_owner")
-        wrong_owner["credential_pair_ref"] = "cred_other"
+        wrong_owner["task_id"] = "t_other"
         with self.assertRaises(HarnessError) as invalid:
             self.usage.ingest("t_g4", "i_image_1", [wrong_owner], source="internal")
         self.assertEqual(invalid.exception.code, "VALIDATION_ERROR")
@@ -151,7 +150,6 @@ class UsageAndBudgetTests(unittest.TestCase):
             "model": "seedream",
             "call_type": "text_to_image_model",
             "usage_basis": "image_units",
-            "credential_pair_ref": "cred_test_01",
             "input_tokens": 0,
             "output_tokens": 0,
             "cached_input_tokens": 0,

@@ -6,7 +6,6 @@ import tempfile
 import time
 import unittest
 from contextlib import suppress
-from copy import deepcopy
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -14,6 +13,7 @@ from harness.api.app import create_app
 from harness.core.config import HarnessSettings
 from harness.services.process_control import force_kill_process_tree, process_start_identity
 from harness.storage.repository import utc_now
+from runtime_helpers import build_config_snapshot
 
 from tests.e2e import test_g3_real_image_agent as g3_fixtures
 
@@ -37,16 +37,10 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
             tempfile.TemporaryDirectory() as temporary,
         ):
             runtime = Path(temporary)
-            app = create_app(self._settings(runtime))
-            app.state.container.configuration.initialize(
-                g3_fixtures.RealImageAdapterG3Tests._online_config()
-            )
+            app = create_app(self._settings(runtime, provider_url))
             try:
                 with TestClient(app) as client:
                     container = app.state.container
-                    container.credentials.configure_pool(
-                        self._credential_pairs(provider_url=provider_url)
-                    )
                     self._create_task(client, self.task_id, "create-g4-complete")
                     inputs = self._import_brief(container, self.task_id)
                     saved = client.put(
@@ -55,7 +49,6 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                             self.task_id,
                             self.instance_ids,
                             inputs,
-                            provider="ark",
                         ),
                     )
                     self.assertEqual(saved.status_code, 200, saved.text)
@@ -117,16 +110,18 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                 self._make_tree_removable(runtime)
 
     def test_process_loss_cancel_peer_and_control_plane_recovery(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
+        with (
+            g3_fixtures.deterministic_provider() as (provider_url, _provider),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
             runtime = Path(temporary)
-            settings = self._settings(runtime)
+            settings = self._settings(runtime, provider_url)
             first_app = create_app(settings)
             recovered_job_ids: dict[str, str] = {}
             victim_process: dict[str, object] | None = None
             try:
                 with TestClient(first_app) as client:
                     container = first_app.state.container
-                    container.credentials.configure_pool(self._credential_pairs())
                     self._create_task(client, self.task_id, "create-g4-multi")
                     inputs = self._import_brief(container, self.task_id)
                     saved = client.put(
@@ -134,28 +129,6 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                         json=self._plan_request(self.task_id, self.instance_ids, inputs),
                     )
                     self.assertEqual(saved.status_code, 200, saved.text)
-                    assignments = [
-                        container.store.instance.get(self.task_id, instance_id)[
-                            "credential_pair_ref"
-                        ]
-                        for instance_id in self.instance_ids
-                    ]
-                    self.assertEqual(assignments, ["cred_g4_1", "cred_g4_2", "cred_g4_3"])
-
-                    self._create_task(client, "t_g4_cycle", "create-g4-cycle")
-                    cycle_inputs = self._import_brief(container, "t_g4_cycle")
-                    cycled = client.put(
-                        "/api/v1/tasks/t_g4_cycle/plan",
-                        json=self._plan_request(
-                            "t_g4_cycle", ("i_g4_cycle_1",), cycle_inputs
-                        ),
-                    )
-                    self.assertEqual(cycled.status_code, 200, cycled.text)
-                    cycle_instance = container.store.instance.get(
-                        "t_g4_cycle", "i_g4_cycle_1"
-                    )
-                    self.assertEqual(cycle_instance["credential_pair_ref"], "cred_g4_1")
-
                     started = client.post(
                         f"/api/v1/tasks/{self.task_id}/confirm-start",
                         json={
@@ -190,49 +163,12 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                             "job_id"
                         ]
 
-                    local = client.get(
-                        f"/api/v1/instances/{self.instance_ids[0]}/config"
-                    ).json()["config"]
-                    local_update = client.put(
-                        f"/api/v1/instances/{self.instance_ids[0]}/config",
-                        json={
-                            "patch": {
-                                "image_runtime_policy": {"max_auto_questions": 3}
-                            },
-                            "operation_id": "local-g4-config",
-                            "envelope": self._envelope(
-                                "local-g4-config-envelope", local["config_revision"]
-                            ),
-                        },
+                    task_config = container.task_config.get_public(self.task_id)
+                    self.assertEqual(
+                        task_config["source_config_revision"],
+                        settings.config_snapshot.revision,
                     )
-                    self.assertEqual(local_update.status_code, 200, local_update.text)
-                    global_config = client.get("/api/v1/config/global").json()["config"]
-                    global_revision = global_config.pop("revision")
-                    updated_global = deepcopy(global_config)
-                    updated_global["image_runtime_policy"]["max_auto_questions"] = 5
-                    overwritten = client.put(
-                        "/api/v1/config/global",
-                        json={
-                            "config": updated_global,
-                            "operation_id": "global-g4-config",
-                            "envelope": self._envelope(
-                                "global-g4-config-envelope", global_revision
-                            ),
-                        },
-                    )
-                    self.assertEqual(overwritten.status_code, 200, overwritten.text)
-                    for instance_id in self.instance_ids:
-                        snapshot = client.get(
-                            f"/api/v1/instances/{instance_id}/config"
-                        ).json()["config"]
-                        self.assertEqual(snapshot["source_global_revision"], global_revision + 1)
-                        self.assertEqual(
-                            snapshot["config"]["image_runtime_policy"][
-                                "max_auto_questions"
-                            ],
-                            5,
-                        )
-                        self.assertFalse(snapshot["restart_required"])
+                    self.assertNotIn("api_key", str(task_config))
                     usage = client.get(
                         f"/api/v1/tasks/{self.task_id}/usage"
                     ).json()
@@ -295,26 +231,6 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                 self._make_tree_removable(runtime)
 
     @staticmethod
-    def _credential_pairs(
-        *, provider_url: str | None = None
-    ) -> list[dict[str, object]]:
-        provider = "ark" if provider_url is not None else "fake"
-        return [
-            {
-                "credential_pair_id": f"cred_g4_{index}",
-                "provider": provider,
-                "key_id": f"key_g4_{index}",
-                "base_url": provider_url or f"https://offline-{index}.invalid/v1",
-                "api_key": f"synthetic-offline-g4-{index}",
-                "api_key_env": "ARK_API_KEY" if provider_url else "FAKE_API_KEY",
-                "base_url_env": "ARK_BASE_URL" if provider_url else "FAKE_BASE_URL",
-                "revision": 1,
-                "enabled": True,
-            }
-            for index in range(1, 4)
-        ]
-
-    @staticmethod
     def _create_task(client: TestClient, task_id: str, key: str) -> None:
         response = client.post(
             "/api/v1/tasks",
@@ -350,8 +266,6 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
         task_id: str,
         instance_ids: tuple[str, ...],
         inputs: list[dict[str, str]],
-        *,
-        provider: str = "fake",
     ) -> dict[str, object]:
         return {
             "stages": [
@@ -374,8 +288,6 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                     "required": True,
                     "approval_mode": "human",
                     "config_revision": 1,
-                    "credential_pair_ref": "pending_assignment",
-                    "credential_pair_revision": 1,
                     "workspace_relpath": f"instances/{instance_id}",
                     "task_card_relpath": f"instances/{instance_id}/task-card.json",
                 }
@@ -409,7 +321,6 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
                 }
                 for instance_id in instance_ids
             ],
-            "providers": {instance_id: provider for instance_id in instance_ids},
             "operation_id": f"save_{task_id}_plan",
             "envelope": RealMultiImageAgentG4Tests._envelope(
                 f"save-{task_id}-plan", 1
@@ -497,7 +408,7 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
         self.assertEqual(pending, set(), f"instances did not complete: {sorted(pending)}")
 
     @staticmethod
-    def _settings(runtime: Path) -> HarnessSettings:
+    def _settings(runtime: Path, provider_url: str) -> HarnessSettings:
         return HarnessSettings(
             control_root=runtime / "control-data",
             workspace_root=runtime / "workspace",
@@ -505,6 +416,10 @@ class RealMultiImageAgentG4Tests(unittest.TestCase):
             image_agent_root=Path(str(IMAGE_AGENT_ROOT)),
             image_agent_python=Path(str(IMAGE_AGENT_PYTHON)),
             image_agent_dependency_root=Path(str(IMAGE_AGENT_DEPENDENCY_ROOT)),
+            config_snapshot=build_config_snapshot(
+                base_url=provider_url,
+                api_key="synthetic-g4-provider-key",
+            ),
         )
 
     @staticmethod

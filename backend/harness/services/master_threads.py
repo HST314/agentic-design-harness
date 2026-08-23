@@ -19,7 +19,6 @@ from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 from .application import HarnessApplicationService
 from .assets import AssetService
-from .credentials import CredentialPoolService
 from .master_orchestrator import (
     MasterOrchestratorFailure,
     MasterPlanner,
@@ -37,7 +36,6 @@ class MasterThreadService:
         commands: TaskCommandService,
         application: HarnessApplicationService,
         assets: AssetService,
-        credentials: CredentialPoolService,
         adapters: AdapterRegistry,
         orchestrator: MasterPlanner,
     ) -> None:
@@ -46,7 +44,6 @@ class MasterThreadService:
         self.commands = commands
         self.application = application
         self.assets = assets
-        self.credentials = credentials
         self.adapters = adapters
         self.orchestrator = orchestrator
         self.intent_root = store.layout.control_root / "master-intents"
@@ -459,14 +456,12 @@ class MasterThreadService:
                 task_expected_revision=intent.get("task_expected_revision"),
             )
             stages, instances, cards = materialize_plan_proposal(proposal)
-            providers = self._provider_mapping(instances)
             actor = intent["actor"]
             plan_result = self.application.save_plan_and_create_instances(
                 task_id,
                 stages=cast(list[StageSnapshot], stages),
                 instances=cast(list[AgentInstanceSnapshot], instances),
                 task_cards=cast(list[TaskCard], cards),
-                providers=providers,
                 operation_id=self._identifier("master_plan", task_id, proposal["proposal_id"]),
                 envelope=CommandEnvelope(
                     idempotency_key=self._identifier(
@@ -1012,27 +1007,6 @@ class MasterThreadService:
                 expected_revision=self.store.task.revision(task_id, task_id),
             ),
         )
-
-    def _provider_mapping(self, instances: list[dict[str, Any]]) -> dict[str, str]:
-        providers = sorted(
-            {
-                item["provider"]
-                for item in self.credentials.list_redacted()
-                if item.get("enabled", True)
-            }
-        )
-        mapping: dict[str, str] = {}
-        for instance in instances:
-            adapter = self.adapters.get_optional(instance["agent_type"])
-            if adapter is None or adapter.available:
-                if not providers:
-                    raise HarnessError(
-                        "CREDENTIAL_PAIR_UNAVAILABLE",
-                        "The plan requires a runnable Agent but no enabled credential pair exists.",
-                        {"instance_id": instance["instance_id"]},
-                    )
-                mapping[instance["instance_id"]] = providers[0]
-        return mapping
 
     def _validate_asset_refs(
         self, task_id: str, raw_refs: list[dict[str, str]]

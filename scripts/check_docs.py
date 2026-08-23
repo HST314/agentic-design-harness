@@ -22,6 +22,7 @@ REQUIRED_DOCS = {
     "master-api.md",
     "operations.md",
     "troubleshooting.md",
+    "user-guide.md",
 }
 FORBIDDEN_PATHS = {
     "backend/README.md",
@@ -45,14 +46,6 @@ REQUIRED_QUICKSTART_COMMANDS = (
     "python3 scripts/dev.py doctor",
     "python3 scripts/dev.py start",
 )
-ROLE_BY_STATE = {
-    "intake_clarify": "reasoning_llm",
-    "confirmation_build": "reasoning_llm",
-    "initial_candidate_generation": "text_to_image_model",
-    "self_check_inspection": "vision_language_model",
-    "self_check_rework": "text_to_image_model",
-    "human_prompt_rework": "text_to_image_model",
-}
 LINK_PATTERN = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 JSON_FENCE_PATTERN = re.compile(r"^```json[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 HEADING_PATTERN = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
@@ -166,55 +159,6 @@ def load_object(relative: str) -> dict[str, object]:
     return value
 
 
-def validate_configuration_examples() -> int:
-    credential = load_object("config/examples/ark-credential-pair.json")
-    required_credential = {
-        "credential_pair_id",
-        "provider",
-        "key_id",
-        "base_url",
-        "api_key",
-        "api_key_env",
-        "base_url_env",
-        "revision",
-        "enabled",
-    }
-    if set(credential) != required_credential or credential.get("provider") != "ark":
-        raise DocumentationError("Ark credential example does not match the controlled Key Pair")
-    if (
-        credential.get("api_key_env") != "ARK_API_KEY"
-        or credential.get("base_url_env") != "ARK_BASE_URL"
-    ):
-        raise DocumentationError("Ark credential example has incorrect environment mapping")
-    base_url = str(credential.get("base_url", ""))
-    parsed = urlsplit(base_url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.query or parsed.fragment:
-        raise DocumentationError(
-            "Ark credential example must use a credential-free HTTPS service root"
-        )
-
-    routing = load_object("config/examples/ark-image-model-routing.json")
-    bindings = routing.get("state_bindings")
-    if not isinstance(bindings, list) or len(bindings) != len(ROLE_BY_STATE):
-        raise DocumentationError("Ark model routing example must contain exactly six bindings")
-    actual: dict[str, str] = {}
-    for item in bindings:
-        if not isinstance(item, dict) or item.get("provider") != "ark":
-            raise DocumentationError("every Ark model binding must be an object with provider=ark")
-        state = item.get("state")
-        role = item.get("model_role")
-        if not isinstance(state, str) or not isinstance(role, str) or not item.get("model"):
-            raise DocumentationError("Ark model routing contains an incomplete binding")
-        if state in actual:
-            raise DocumentationError(f"Ark model routing repeats state {state}")
-        actual[state] = role
-    if actual != ROLE_BY_STATE:
-        raise DocumentationError(
-            "Ark model routing states or roles differ from the runtime contract"
-        )
-    return 2
-
-
 def validate_commands_and_references(paths: list[Path]) -> int:
     quickstart = (ROOT / "QUICKSTART.md").read_text(encoding="utf-8")
     missing = [command for command in REQUIRED_QUICKSTART_COMMANDS if command not in quickstart]
@@ -283,7 +227,6 @@ def main() -> int:
                 "markdown_files": len(paths),
                 "local_links": validate_links(paths),
                 "json_blocks": validate_json_blocks(paths),
-                "configuration_examples": validate_configuration_examples(),
                 "documented_commands": validate_commands_and_references(paths),
                 "version_bindings": validate_versions(),
             },

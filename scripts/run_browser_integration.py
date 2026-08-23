@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import urlsplit
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -42,6 +44,28 @@ REAL_PROVIDER_INPUT_NAMES = frozenset(
     for canonical, aliases in REAL_PROVIDER_ENVIRONMENT.items()
     for name in (canonical, *aliases)
 )
+
+_BROWSER_BACKEND_SOURCE = """
+import os
+from pathlib import Path
+
+import uvicorn
+
+from harness.api.app import create_app
+from harness.core.config import settings_from_snapshot
+from harness.core.config_kernel import load_config_snapshot
+
+source_root = Path(os.environ["HARNESS_BROWSER_SOURCE_ROOT"])
+snapshot = load_config_snapshot(Path(os.environ["HARNESS_BROWSER_CONFIG_ROOT"]), os.environ)
+settings = settings_from_snapshot(source_root, snapshot).model_copy(update={
+    "control_root": Path(os.environ["HARNESS_BROWSER_CONTROL_ROOT"]),
+    "workspace_root": Path(os.environ["HARNESS_BROWSER_WORKSPACE_ROOT"]),
+    "image_agent_root": Path(os.environ["HARNESS_BROWSER_IMAGE_AGENT_ROOT"]),
+    "image_agent_python": Path(os.environ["HARNESS_BROWSER_IMAGE_AGENT_PYTHON"]),
+    "image_agent_dependency_root": Path(os.environ["HARNESS_BROWSER_IMAGE_AGENT_DEPS"]),
+})
+uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level="warning")
+"""
 
 
 @dataclass(frozen=True)
@@ -357,6 +381,78 @@ def validate_real_provider_environment(
         if len(model) > 200 or re.search(r"\s", model):
             raise RuntimeError(f"{name} must be a non-whitespace model identifier")
     return RealProviderConfiguration(base_url, api_key, text_model, image_model, vlm_model)
+
+
+def write_browser_configuration(
+    root: Path,
+    *,
+    backend_port: int,
+    text_model: str,
+    image_model: str,
+    vlm_model: str,
+) -> None:
+    """Create one explicit root configuration for the isolated browser gate."""
+
+    root.mkdir(mode=0o700)
+    environment_file = root / ".env"
+    environment_file.write_text("", encoding="utf-8")
+    environment_file.chmod(0o600)
+    provider = {
+        "schema_version": "1.0",
+        "providers": {
+            "ark": {"base_url": "${ARK_BASE_URL}", "api_key": "${ARK_API_KEY}"}
+        },
+    }
+    models = {
+        "schema_version": "1.0",
+        "text_models": [
+            {
+                "id": "browser-text-primary",
+                "label": "Browser text model",
+                "provider": "ark",
+                "model": text_model,
+                "capabilities": ["structured_output", "tool_calling"],
+                "parameters": {},
+            }
+        ],
+        "vlm_models": [
+            {
+                "id": "browser-vlm-primary",
+                "label": "Browser vision model",
+                "provider": "ark",
+                "model": vlm_model,
+                "capabilities": ["image_input", "structured_output"],
+                "parameters": {},
+            }
+        ],
+        "image_models": [
+            {
+                "id": "browser-image-primary",
+                "label": "Browser image model",
+                "provider": "ark",
+                "model": image_model,
+                "capabilities": ["text_to_image", "image_to_image"],
+                "parameters": {},
+            }
+        ],
+    }
+    runtime = yaml.safe_load((ROOT / "runtime.yaml").read_text(encoding="utf-8"))
+    runtime["server"].update({"host": "127.0.0.1", "port": backend_port})
+    runtime["models"] = {
+        "master": "browser-text-primary",
+        "text_reasoning": "browser-text-primary",
+        "vision_understanding": "browser-vlm-primary",
+        "image_generation": "browser-image-primary",
+    }
+    for name, payload in (
+        ("provider.yaml", provider),
+        ("model_list.yaml", models),
+        ("runtime.yaml", runtime),
+    ):
+        (root / name).write_text(
+            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
 
 
 def browser_executable_candidates(browser_root: Path, revision: str) -> list[Path]:
@@ -875,30 +971,42 @@ def main() -> int:
             log_context as persistent_log,
         ):
             runtime = Path(temporary)
+            config_root = runtime / "configuration"
+            write_browser_configuration(
+                config_root,
+                backend_port=backend_port,
+                text_model=text_model,
+                image_model=image_model,
+                vlm_model=vlm_model,
+            )
             child_environment = child_process_environment(environment)
             common_env = {
                 **child_environment,
                 "PYTHONPATH": os.pathsep.join(
                     (str(ROOT / "backend"), str(ROOT / ".test-deps"))
                 ),
-                "HARNESS_CONTROL_ROOT": str(runtime / "control-data"),
-                "HARNESS_WORKSPACE_ROOT": str(runtime / "workspace"),
-                "HARNESS_HOST": "127.0.0.1",
-                "HARNESS_PORT": str(backend_port),
-                "HARNESS_LOG_LEVEL": "WARNING",
-                "HARNESS_IMAGE_AGENT_ROOT": str(image_root.resolve()),
-                "HARNESS_IMAGE_AGENT_PYTHON": image_python,
-                "HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT": str(image_deps.resolve()),
                 "HARNESS_BACKEND_URL": backend_url,
+            }
+            backend_env = {
+                **common_env,
+                "ARK_BASE_URL": provider_url,
+                "ARK_API_KEY": provider_key or "local-browser-provider-key",
+                "HARNESS_BROWSER_SOURCE_ROOT": str(ROOT),
+                "HARNESS_BROWSER_CONFIG_ROOT": str(config_root),
+                "HARNESS_BROWSER_CONTROL_ROOT": str(runtime / "control-data"),
+                "HARNESS_BROWSER_WORKSPACE_ROOT": str(runtime / "workspace"),
+                "HARNESS_BROWSER_IMAGE_AGENT_ROOT": str(image_root.resolve()),
+                "HARNESS_BROWSER_IMAGE_AGENT_PYTHON": image_python,
+                "HARNESS_BROWSER_IMAGE_AGENT_DEPS": str(image_deps.resolve()),
             }
             with (
                 tempfile.TemporaryFile() as backend_log,
                 tempfile.TemporaryFile() as frontend_log,
             ):
                 backend = subprocess.Popen(
-                    [sys.executable, "-m", "harness"],
+                    [sys.executable, "-c", _BROWSER_BACKEND_SOURCE],
                     cwd=ROOT,
-                    env=common_env,
+                    env=backend_env,
                     stdout=backend_log,
                     stderr=subprocess.STDOUT,
                 )
@@ -962,7 +1070,6 @@ def main() -> int:
                         browser_env["HARNESS_BROWSER_EVIDENCE_PATH"] = str(evidence_staging)
                     if options.real_provider:
                         browser_env["HARNESS_BROWSER_REAL_PROVIDER"] = "1"
-                        browser_env["HARNESS_BROWSER_PROVIDER_API_KEY"] = provider_key
                     run_logged(
                         [
                             "npm",

@@ -160,21 +160,6 @@ class AgentWorkbenchApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(created.status_code, 200, created.text)
-        app.state.container.credentials.configure_pool(
-            [
-                {
-                    "credential_pair_id": f"cred_{task_id}",
-                    "provider": "fake",
-                    "key_id": f"key_{task_id}",
-                    "base_url": "https://provider.invalid/v1",
-                    "api_key": "not-a-secret-agent-workbench-test",
-                    "api_key_env": "FAKE_API_KEY",
-                    "base_url_env": "FAKE_BASE_URL",
-                    "revision": 1,
-                    "enabled": True,
-                }
-            ]
-        )
         imported = app.state.container.assets.import_bytes(
             task_id,
             filename="brief.md",
@@ -210,8 +195,6 @@ class AgentWorkbenchApiTests(unittest.TestCase):
                         "required": True,
                         "approval_mode": "human",
                         "config_revision": 1,
-                        "credential_pair_ref": "pending_assignment",
-                        "credential_pair_revision": 1,
                         "workspace_relpath": f"instances/{instance_id}",
                         "task_card_relpath": f"instances/{instance_id}/task-card.json",
                     }
@@ -240,7 +223,6 @@ class AgentWorkbenchApiTests(unittest.TestCase):
                         "created_at": created_at,
                     }
                 ],
-                "providers": {instance_id: "fake"},
                 "operation_id": f"save_{task_id}",
                 "envelope": self._envelope(f"save-{task_id}", 1),
             },

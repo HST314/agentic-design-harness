@@ -61,7 +61,6 @@ class RuntimeContractTests(unittest.TestCase):
             "model": "seedream",
             "call_type": "text_to_image_model",
             "usage_basis": "image_units",
-            "credential_pair_ref": "cred_contract",
             "input_tokens": 0,
             "output_tokens": 0,
             "cached_input_tokens": 0,

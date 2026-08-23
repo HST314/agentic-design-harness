@@ -11,7 +11,7 @@ from ..adapters import PrepareRequest
 from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
 from ..storage.atomic import atomic_write_json, read_json
-from ..storage.repository import Actor, utc_now
+from ..storage.repository import utc_now
 
 if TYPE_CHECKING:
     from ..adapters import AgentAdapter, TaskCard
@@ -28,55 +28,18 @@ class ApplicationPlanningMixin:
     def _resume_save_plan(self, intent_path: Path, crash_hook: CrashHook | None) -> dict[str, Any]:
         intent = read_json(intent_path)
         request = intent["request"]
-        actor = Actor(request["envelope"]["actor_type"], request["envelope"]["actor_id"])
-        assigned_instances: list[dict[str, Any]] = []
-        for raw in request["instances"]:
-            instance = deepcopy(raw)
-            provider = request["providers"].get(raw["instance_id"])
-            if provider is not None:
-                try:
-                    self.commands.validate_task_revision(
-                        request["task_id"], request["envelope"]["expected_revision"]
-                    )
-                except HarnessError as exc:
-                    if exc.code == "REVISION_CONFLICT":
-                        self._abort_stale_save_plan(intent_path, intent, actor, exc)
-                    raise
-                created = self.credentials.create_instance(
-                    request["task_id"],
-                    intent["creation_instances"][raw["instance_id"]],
-                    provider=provider,
-                    creation_id=self._derived_id(
-                        "creation", intent["operation_id"], raw["instance_id"]
-                    ),
-                    actor=actor,
-                )
-                credential = created["credential"]
-                instance.update(
-                    {
-                        "credential_pair_ref": credential["credential_pair_id"],
-                        "credential_pair_revision": credential["credential_pair_revision"],
-                    }
-                )
-                if crash_hook:
-                    crash_hook(f"after_instance_created:{raw['instance_id']}")
-            else:
-                adapter = self.adapters.get_optional(raw["agent_type"])
-                if adapter is not None and not adapter.available:
-                    instance.update(
-                        {
-                            "credential_pair_ref": f"{raw['agent_type']}_adapter_unavailable",
-                            "credential_pair_revision": 1,
-                        }
-                    )
-            assigned_instances.append(instance)
-        result = self.commands.save_plan(
-            request["task_id"],
-            stages=request["stages"],
-            instances=assigned_instances,
-            task_cards=request["task_cards"],
-            envelope=CommandEnvelope.model_validate(request["envelope"]),
-        )
+        try:
+            result = self.commands.save_plan(
+                request["task_id"],
+                stages=request["stages"],
+                instances=request["instances"],
+                task_cards=request["task_cards"],
+                envelope=CommandEnvelope.model_validate(request["envelope"]),
+            )
+        except HarnessError as exc:
+            if exc.code == "REVISION_CONFLICT":
+                self._abort_stale_save_plan(intent_path, intent, exc)
+            raise
         if crash_hook:
             crash_hook("after_plan_commit")
         intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
@@ -87,23 +50,8 @@ class ApplicationPlanningMixin:
         self,
         intent_path: Path,
         intent: dict[str, Any],
-        actor: Actor,
         error: HarnessError,
     ) -> None:
-        intent.update({"state": "COMPENSATING", "compensation_started_at": utc_now()})
-        atomic_write_json(intent_path, intent)
-        compensation = []
-        request = intent["request"]
-        for instance_id in sorted(request["providers"]):
-            creation_id = self._derived_id("creation", intent["operation_id"], instance_id)
-            compensation.append(
-                self.credentials.revoke_instance_creation(
-                    request["task_id"],
-                    creation_id,
-                    revocation_id=self._derived_id("revoke", intent["operation_id"], instance_id),
-                    actor=actor,
-                )
-            )
         intent.update(
             {
                 "state": "ABORTED",
@@ -113,7 +61,6 @@ class ApplicationPlanningMixin:
                     "message": error.message,
                     "details": deepcopy(error.details),
                 },
-                "compensation": compensation,
             }
         )
         atomic_write_json(intent_path, intent)
@@ -168,10 +115,6 @@ class ApplicationPlanningMixin:
                     task_card=deepcopy(cards[instance_id]),
                     task_root=task_root,
                     config_ref=task_root / "instances" / instance_id / "runtime" / "runtime.yaml",
-                    credential_ref=(
-                        instance["credential_pair_ref"],
-                        instance["credential_pair_revision"],
-                    ),
                 )
             )
             launch_id = self._derived_id("launch", intent["operation_id"], instance_id)
@@ -219,40 +162,10 @@ class ApplicationPlanningMixin:
         return deepcopy(result)
 
     def _prevalidate_plan(self, request: dict[str, Any]) -> None:
-        instance_ids = {item["instance_id"] for item in request["instances"]}
-        unknown_providers = set(request["providers"]) - instance_ids
-        if unknown_providers:
-            raise HarnessError(
-                "VALIDATION_ERROR",
-                "A Provider mapping references an unknown instance.",
-                {"instance_ids": sorted(unknown_providers)},
-            )
-        for instance in request["instances"]:
-            adapter = self.adapters.get_optional(instance["agent_type"])
-            has_provider = instance["instance_id"] in request["providers"]
-            if (adapter is None or adapter.available) and not has_provider:
-                raise HarnessError(
-                    "VALIDATION_ERROR",
-                    "A runnable Agent instance requires an explicit Provider mapping.",
-                    {"instance_id": instance["instance_id"]},
-                )
-            if adapter is not None and not adapter.available and has_provider:
-                raise HarnessError(
-                    "VALIDATION_ERROR",
-                    "An unavailable Agent placeholder cannot consume a credential pair.",
-                    {"instance_id": instance["instance_id"]},
-                )
-        provisional = []
-        for raw in request["instances"]:
-            instance = deepcopy(raw)
-            if raw["instance_id"] in request["providers"]:
-                instance.setdefault("credential_pair_ref", "pending_assignment")
-                instance.setdefault("credential_pair_revision", 1)
-            provisional.append(instance)
         self.commands.validate_plan_request(
             request["task_id"],
             stages=request["stages"],
-            instances=provisional,
+            instances=request["instances"],
             task_cards=request["task_cards"],
             expected_revision=request["envelope"]["expected_revision"],
         )
@@ -270,21 +183,3 @@ class ApplicationPlanningMixin:
                 "The Agent adapter rejected its task card.",
                 {"errors": list(validation.errors)},
             )
-
-    @staticmethod
-    def _creation_summary(task_id: str, raw: dict[str, Any], created_at: str) -> dict[str, Any]:
-        required = bool(raw["required"])
-        return {
-            **deepcopy(raw),
-            "schema_version": "1.0",
-            "task_id": task_id,
-            "requirement_lifecycle": {
-                "original_required": required,
-                "first_activated_at": None,
-                "authorized_downgrade": None,
-            },
-            "status": "CREATED",
-            "process": None,
-            "ui_url": None,
-            "created_at": created_at,
-        }

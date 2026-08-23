@@ -64,21 +64,6 @@ class ApplicationTests(unittest.TestCase):
                 self.assertEqual(created.status_code, 200, created.text)
                 self.assertEqual(created.json()["revision"], 1)
                 container = app.state.container
-                container.credentials.configure_pool(
-                    [
-                        {
-                            "credential_pair_id": "cred_api_g2",
-                            "provider": "fake",
-                            "key_id": "key_api_g2",
-                            "base_url": "https://provider.invalid/v1",
-                            "api_key": "not-a-secret-api-g2",
-                            "api_key_env": "FAKE_API_KEY",
-                            "base_url_env": "FAKE_BASE_URL",
-                            "revision": 1,
-                            "enabled": True,
-                        }
-                    ]
-                )
                 imported = container.assets.import_bytes(
                     "t_api_g2",
                     filename="brief.md",
@@ -113,8 +98,6 @@ class ApplicationTests(unittest.TestCase):
                                 "required": True,
                                 "approval_mode": "human",
                                 "config_revision": 1,
-                                "credential_pair_ref": "pending_assignment",
-                                "credential_pair_revision": 1,
                                 "workspace_relpath": "instances/i_api_g2",
                                 "task_card_relpath": "instances/i_api_g2/task-card.json",
                             }
@@ -146,7 +129,6 @@ class ApplicationTests(unittest.TestCase):
                                 "created_at": utc_now(),
                             }
                         ],
-                        "providers": {"i_api_g2": "fake"},
                         "operation_id": "save_api_g2_plan",
                         "envelope": self._envelope("save-api-g2-plan", 1),
                     },

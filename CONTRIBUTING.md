@@ -61,7 +61,7 @@ make verify
 | React 浏览器交互 | `npm --prefix frontend run test:e2e` |
 | 受管 Image 真实进程 | `make g2-e2e` |
 | 分支双资产交付 | `make g3-e2e` |
-| 多实例、配置、凭据、预算 | `make g4-e2e` |
+| 多实例、配置快照与预算 | `make g4-e2e` |
 | 完整离线发布门禁 | `make g5-e2e` |
 | 真实 Provider | 先预检，再按[配置指南](docs/configuration.md)显式授权费用 |
 
@@ -71,7 +71,7 @@ Windows 不要求 GNU Make；CI 会在 Windows/Linux 执行后端、前端和启
 
 - README 只保留定位、能力、架构、成熟度和入口；安装放在 `QUICKSTART.md`，配置放在 `docs/configuration.md`。
 - 新文档必须进入 `docs/README.md` 的受众导航，使用相对链接并从仓库根目录给出命令。
-- JSON 不在文档和代码各维护一份；可执行示例放入 `config/examples` 或 `contracts/v1/examples` 并由测试读取。
+- JSON 不在文档和代码各维护一份；业务契约示例放入 `contracts/v1/examples` 并由测试读取，根配置直接使用生产模型检查。
 - 不提交 API Key、Cookie、Authorization、完整敏感 URL、用户素材、本机状态、测试报告或人工生成的发布证据。
 - `python scripts/check_docs.py` 校验文档集合、本地链接、JSON、命令入口与版本；CI 证据由 workflow 生成并上传 artifact。
 

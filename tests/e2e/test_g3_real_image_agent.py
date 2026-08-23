@@ -19,12 +19,8 @@ from fastapi.testclient import TestClient
 from harness.adapters.image import ImageAgentAdapter
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
-from harness.services.configuration import (
-    GlobalConfigBody,
-    ImageModelConfig,
-    ModelBinding,
-)
 from harness.storage.repository import utc_now
+from runtime_helpers import build_config_snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_AGENT_ROOT = os.getenv("HARNESS_IMAGE_AGENT_ROOT")
@@ -165,30 +161,18 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                     image_agent_dependency_root=Path(
                         str(IMAGE_AGENT_DEPENDENCY_ROOT)
                     ),
+                    config_snapshot=build_config_snapshot(
+                        base_url=provider_url,
+                        api_key="synthetic-g3-provider-key",
+                    ),
                 )
             )
-            app.state.container.configuration.initialize(self._online_config())
             instance_id = "i_g3_real_image"
             try:
                 with TestClient(app) as client:
                     container = app.state.container
                     self.assertIsInstance(
                         container.adapters.get("image"), ImageAgentAdapter
-                    )
-                    container.credentials.configure_pool(
-                        [
-                            {
-                                "credential_pair_id": "cred_g3_real",
-                                "provider": "ark",
-                                "key_id": "key_g3_real",
-                                "base_url": provider_url,
-                                "api_key": "not-a-secret-g3-real",
-                                "api_key_env": "ARK_API_KEY",
-                                "base_url_env": "ARK_BASE_URL",
-                                "revision": 1,
-                                "enabled": True,
-                            }
-                        ]
                     )
                     self._create_task(client)
                     selected = self._import_brief(container)
@@ -215,8 +199,13 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                             f"{json.dumps(process_logs, ensure_ascii=False)}"
                         )
 
-                    taskbook = self._wait_for_boundary(client, instance_id)
-                    self._resolve(client, taskbook, "approve_taskbook", {}, 1)
+                    taskbook, operation_index = self._reach_taskbook_boundary(
+                        client, instance_id
+                    )
+                    self._resolve(
+                        client, taskbook, "approve_taskbook", {}, operation_index
+                    )
+                    operation_index += 1
 
                     selection = self._wait_for_boundary(client, instance_id)
                     selection_details = client.get(
@@ -231,8 +220,9 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                         selection,
                         "select_master",
                         {"selected_id": candidates[0]["id"]},
-                        2,
+                        operation_index,
                     )
+                    operation_index += 1
 
                     calibration = self._wait_for_boundary(client, instance_id)
                     self._resolve(
@@ -240,8 +230,9 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                         calibration,
                         "review_calibration",
                         {"manual_action": "accept_current"},
-                        3,
+                        operation_index,
                     )
+                    operation_index += 1
 
                     delivery_review = self._wait_for_boundary(client, instance_id)
                     self.assertEqual(
@@ -270,7 +261,11 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                         [],
                     )
                     published_bundle = self._resolve(
-                        client, delivery_review, "publish_bundle", {}, 4
+                        client,
+                        delivery_review,
+                        "publish_bundle",
+                        {},
+                        operation_index,
                     )
                     self.assertEqual(
                         published_bundle["candidate"]["status"], "PUBLISHED"
@@ -315,23 +310,25 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                     approvals = client.get(
                         f"/api/v1/instances/{instance_id}/approvals"
                     ).json()["items"]
-                    self.assertEqual([item["status"] for item in approvals], [
-                        "APPROVED", "APPROVED", "APPROVED", "APPROVED"
-                    ])
+                    self.assertGreaterEqual(len(approvals), 4)
+                    self.assertTrue(
+                        all(item["status"] == "APPROVED" for item in approvals)
+                    )
                     inbox = client.get("/api/v1/inbox?owner=human").json()["items"]
                     self.assertEqual(
                         [item["kind"] for item in inbox],
-                        [
-                            "APPROVAL_REQUIRED",
-                            "APPROVAL_REQUIRED",
-                            "APPROVAL_REQUIRED",
+                        ["APPROVAL_REQUIRED"] * (len(approvals) - 1)
+                        + [
                             "DELIVERY_REVIEW_REQUIRED",
                             "INSTANCE_SUCCEEDED",
                             "TASK_SUCCEEDED",
                         ],
                     )
                     self.assertTrue(
-                        all(item["status"] == "HANDLED" for item in inbox[:4])
+                        all(
+                            item["status"] == "HANDLED"
+                            for item in inbox[: len(approvals)]
+                        )
                     )
                     candidate_marker = (
                         runtime
@@ -392,73 +389,6 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                 self._make_tree_removable(runtime)
 
     @staticmethod
-    def _online_config() -> GlobalConfigBody:
-        base = GlobalConfigBody()
-        policy = type(base.image_runtime_policy).model_validate(
-            {
-                **base.image_runtime_policy.model_dump(mode="json"),
-                "offline_mode": False,
-                "category_constraint": {"release": "off"},
-                "style_direction": {"release": "off"},
-                "skill_invocation": {"release": "off"},
-                "self_check": {
-                    "termination": "solo",
-                    "fixed_rounds": 1,
-                    "max_rounds": 1,
-                    "stop_early_on_pass": True,
-                    "release": "manual",
-                },
-            }
-        )
-        bindings = [
-            ModelBinding(
-                state="intake_clarify",
-                model_role="reasoning_llm",
-                provider="ark",
-                model="g3-text",
-            ),
-            ModelBinding(
-                state="confirmation_build",
-                model_role="reasoning_llm",
-                provider="ark",
-                model="g3-text",
-            ),
-            ModelBinding(
-                state="initial_candidate_generation",
-                model_role="text_to_image_model",
-                provider="ark",
-                model="doubao-seedream-g3-test",
-            ),
-            ModelBinding(
-                state="self_check_inspection",
-                model_role="vision_language_model",
-                provider="ark",
-                model="g3-vlm",
-            ),
-            ModelBinding(
-                state="self_check_rework",
-                model_role="text_to_image_model",
-                provider="ark",
-                model="doubao-seedream-g3-test",
-            ),
-            ModelBinding(
-                state="human_prompt_rework",
-                model_role="text_to_image_model",
-                provider="ark",
-                model="doubao-seedream-g3-test",
-            ),
-        ]
-        return GlobalConfigBody(
-            image_provider="ark",
-            image_runtime_policy=policy,
-            image_model_config=ImageModelConfig(
-                model_config_id="g3_deterministic_provider",
-                state_bindings=bindings,
-            ),
-            supervisor=base.supervisor,
-        )
-
-    @staticmethod
     def _create_task(client: TestClient) -> None:
         response = client.post(
             "/api/v1/tasks",
@@ -517,8 +447,6 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                     "required": True,
                     "approval_mode": "human",
                     "config_revision": 1,
-                    "credential_pair_ref": "pending_assignment",
-                    "credential_pair_revision": 1,
                     "workspace_relpath": "instances/i_g3_real_image",
                     "task_card_relpath": "instances/i_g3_real_image/task-card.json",
                 }
@@ -550,7 +478,6 @@ class RealImageAdapterG3Tests(unittest.TestCase):
                     "created_at": utc_now(),
                 }
             ],
-            "providers": {"i_g3_real_image": "ark"},
             "operation_id": "save_g3_real_image_plan",
             "envelope": cls._envelope("save-g3-real-image-plan", 1),
         }
@@ -575,6 +502,48 @@ class RealImageAdapterG3Tests(unittest.TestCase):
             detail["instance"]["status"], {"WAITING_APPROVAL", "SUCCEEDED"}, detail
         )
         return detail
+
+    def _reach_taskbook_boundary(
+        self, client: TestClient, instance_id: str
+    ) -> tuple[dict[str, Any], int]:
+        """Answer bounded root-policy clarification before taskbook approval."""
+
+        operation_index = 1
+        for _ in range(8):
+            detail = self._wait_for_boundary(client, instance_id)
+            approval = detail["pending_approval"]
+            self.assertIsNotNone(approval)
+            approval_details = client.get(
+                f"/api/v1/approvals/{approval['approval_id']}"
+            ).json()
+            actions = approval_details["payload"]["available_actions"]
+            if "approve_taskbook" in actions:
+                return detail, operation_index
+            if "approve_category_constraint" in actions:
+                action = "approve_category_constraint"
+                payload: dict[str, Any] = {}
+            elif "answer_clarification" in actions:
+                action = "answer_clarification"
+                card = approval_details["payload"]["context"]["question_card"]
+                payload = {
+                    "clarification_answers": {
+                        "question_card_id": card["question_card_id"],
+                        "answers": [
+                            {
+                                "question_id": question["question_id"],
+                                "selected_option_id": None,
+                                "free_text": "按受控简报与内部审核用途执行",
+                                "skipped": False,
+                            }
+                            for question in card["questions"]
+                        ],
+                    }
+                }
+            else:
+                self.fail(f"unexpected pre-taskbook actions: {actions}")
+            self._resolve(client, detail, action, payload, operation_index)
+            operation_index += 1
+        self.fail("Image instance did not reach taskbook approval within bounded steps.")
 
     def _resolve(
         self,

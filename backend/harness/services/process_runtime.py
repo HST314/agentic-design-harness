@@ -609,8 +609,8 @@ def reject_credential_arguments(
 ) -> None:
     if any(api_key in item or base_url in item for item in command):
         raise HarnessError(
-            "CREDENTIAL_PAIR_INVALID",
-            "Credentials must be injected through the controlled environment pair.",
+            "VALIDATION_ERROR",
+            "Provider secrets must be injected through the controlled process environment.",
         )
 
 

@@ -56,6 +56,7 @@ class ImageAgentConfigMaterializerTests(unittest.TestCase):
         self.assertEqual(runtime["question_preference"], "blocking_only")
         self.assertEqual(runtime["candidate_concurrency"], 4)
         self.assertFalse(runtime["offline_mode"])
+        self.assertEqual(runtime["self_check"], {"release": "manual"})
         self.assertEqual(bindings["intake_clarify"]["model"], "text-model")
         self.assertEqual(bindings["confirmation_build"]["model"], "text-model-alt")
         self.assertEqual(bindings["initial_candidate_generation"]["model"], "image-model")

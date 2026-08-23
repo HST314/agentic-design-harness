@@ -70,8 +70,6 @@ def test_environment() -> dict[str, str]:
     environment.update(
         {
             "HARNESS_IMAGE_AGENT_ROOT": str(ROOT / "agents" / "image_agent_mvp"),
-            "HARNESS_IMAGE_AGENT_PATH_MODE": "embedded_only",
-            "HARNESS_DELIVERY_BUNDLE_MIGRATION_MODE": "bundle_only",
             "HARNESS_IMAGE_AGENT_PYTHON": str(venv_python),
             "HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT": str(
                 ROOT / ".runtime" / "image-agent-deps"
@@ -173,18 +171,18 @@ def main() -> None:
             ],
         ),
         (
-            "embedded_and_bundle_default_switch",
+            "root_configuration_and_fixed_image_path",
             [
                 sys.executable,
                 "-m",
                 "unittest",
                 (
                     "tests.unit.test_foundation.FoundationTests."
-                    "test_image_agent_path_defaults_to_embedded_without_legacy_fallback"
+                    "test_image_agent_path_resolves_from_the_repository_root"
                 ),
                 (
-                    "tests.unit.test_foundation.FoundationTests."
-                    "test_delivery_bundle_migration_modes_expose_explicit_write_targets"
+                    "tests.unit.test_config_kernel.ConfigKernelTests."
+                    "test_config_check_command_is_local_and_zero_cost"
                 ),
                 "-v",
             ],
@@ -209,22 +207,18 @@ def main() -> None:
             ],
         ),
         (
-            "key_and_diagnostic_redaction",
+            "retired_configuration_routes_and_launch_redaction",
             [
                 sys.executable,
                 "-m",
                 "unittest",
                 (
                     "tests.integration.test_g4_api.G4ApiTests."
-                    "test_usage_budget_config_and_key_pool_are_exposed_without_secret_echo"
-                ),
-                (
-                    "tests.unit.test_settings_diagnostics.SettingsDiagnosticsTests."
-                    "test_preflight_is_zero_cost_and_paid_smoke_is_redacted_and_idempotent"
+                    "test_usage_and_budget_remain_available_while_legacy_config_routes_are_gone"
                 ),
                 (
                     "tests.integration.test_supervisor.ProcessSupervisorTests."
-                    "test_logs_are_redacted_and_launch_secret_file_is_removed"
+                    "test_logs_are_redacted_and_launch_spec_file_is_removed"
                 ),
                 "-v",
             ],
@@ -288,18 +282,12 @@ def main() -> None:
             ),
             "worktree_clean": not bool(git_output("status", "--porcelain")),
         },
-        "switch": {
-            "image_agent_path_default": "embedded_only",
-            "automatic_external_directory_fallback": False,
-            "delivery_write_default": "bundle_only",
-            "rollback": {
-                "image_path": (
-                    "Set external_only together with an explicit, release-lock-compatible "
-                    "image_agent_root."
-                ),
-                "delivery_write": "Set legacy_only only for a controlled rollback window.",
-                "new_bundle_data": "Preserve as read-only; never delete during rollback.",
-            },
+        "configuration_architecture": {
+            "sources": [".env", "provider.yaml", "model_list.yaml", "runtime.yaml"],
+            "image_agent_path": "agents/image_agent_mvp",
+            "delivery_format": "bundle_only",
+            "legacy_configuration_read": False,
+            "runtime_configuration_ui": False,
         },
         "checks": results,
         "ark": ark,

@@ -140,12 +140,6 @@ class InterruptedBeforePlanSaveApplication(RecordingApplication):
         raise RuntimeError("simulated crash after the confirmation-intent checkpoint")
 
 
-class EnabledCredentials:
-    @staticmethod
-    def list_redacted() -> list[dict[str, Any]]:
-        return [{"provider": "openai", "enabled": True}]
-
-
 class MasterThreadApiTests(unittest.TestCase):
     def test_revisioned_thread_adjustment_and_manual_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -154,7 +148,6 @@ class MasterThreadApiTests(unittest.TestCase):
             application = RecordingApplication()
             app.state.container.master_threads.orchestrator = orchestrator
             app.state.container.master_threads.application = application
-            app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "manual")
                 first = client.get(f"/api/v1/tasks/{task_id}/master/messages")
@@ -222,7 +215,6 @@ class MasterThreadApiTests(unittest.TestCase):
             application = RecordingApplication()
             app.state.container.master_threads.orchestrator = RecordingOrchestrator()
             app.state.container.master_threads.application = application
-            app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "manual")
                 first = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
@@ -359,7 +351,6 @@ class MasterThreadApiTests(unittest.TestCase):
             application = RecordingApplication()
             app.state.container.master_threads.orchestrator = RecordingOrchestrator()
             app.state.container.master_threads.application = application
-            app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "auto")
                 session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
@@ -421,7 +412,7 @@ class MasterThreadApiTests(unittest.TestCase):
                 self.assertEqual(confirmed.json()["proposal"]["status"], "CONFIRMED")
                 self.assertEqual(len(application.saved), 1)
                 self.assertEqual(len(application.started), 1)
-                self.assertEqual(application.saved[0]["providers"], {"instance_master_1": "openai"})
+                self.assertNotIn("providers", application.saved[0])
 
     def test_recovery_rejects_a_non_human_confirmation_intent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -429,7 +420,6 @@ class MasterThreadApiTests(unittest.TestCase):
             application = RecordingApplication()
             app.state.container.master_threads.orchestrator = RecordingOrchestrator()
             app.state.container.master_threads.application = application
-            app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "auto")
                 service = app.state.container.master_threads
@@ -468,7 +458,6 @@ class MasterThreadApiTests(unittest.TestCase):
             app.state.container.master_threads.application = (
                 InterruptedBeforePlanSaveApplication()
             )
-            app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "auto")
                 session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
@@ -539,7 +528,6 @@ class MasterThreadApiTests(unittest.TestCase):
             orchestrator = RecordingOrchestrator()
             app.state.container.master_threads.orchestrator = orchestrator
             app.state.container.master_threads.application = InterruptedApplication()
-            app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "manual")
                 session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()

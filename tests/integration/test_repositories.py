@@ -92,7 +92,6 @@ class RepositoryTests(unittest.TestCase):
             "agent_type": "image",
             "request_id": "request_one",
             "model": "fake-image-model",
-            "credential_pair_ref": "cred_test_01",
             "input_tokens": 10,
             "output_tokens": 5,
             "cached_input_tokens": 0,

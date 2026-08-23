@@ -41,10 +41,8 @@ _REQUIRED_ROUTES = frozenset(
         "/api/projects/{project_id}/delivery/candidates/finalize",
         "/api/projects/{project_id}/delivery/finalize",
         "/api/projects/{project_id}/jobs",
-        "/api/projects/{project_id}/policy",
         "/api/projects/{project_id}/timeline",
         "/api/projects/{project_id}/usage",
-        "/api/settings/models",
     }
 )
 _REQUIRED_ROUTE_METHODS = (
@@ -57,11 +55,8 @@ _REQUIRED_ROUTE_METHODS = (
     ("/api/projects/{project_id}/delivery/candidates/finalize", "post"),
     ("/api/projects/{project_id}/delivery/finalize", "post"),
     ("/api/projects/{project_id}/jobs", "post"),
-    ("/api/projects/{project_id}/policy", "post"),
     ("/api/projects/{project_id}/timeline", "get"),
     ("/api/projects/{project_id}/usage", "get"),
-    ("/api/settings/models", "get"),
-    ("/api/settings/models", "post"),
 )
 
 

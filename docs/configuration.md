@@ -1,88 +1,58 @@
 # 配置指南
 
-正式运行时唯一推荐配置入口是 Web `/settings`。普通 YAML 只控制本机目录、端口和集成路径；真实 Provider 凭据不得写入 YAML、TaskCard、文档、日志或 Git。
+部署配置只来自仓库根目录的 `.env`、`provider.yaml`、`model_list.yaml` 和 `runtime.yaml`。没有 Web 配置入口、配置 API、动态凭据池、运行中双写或兼容读取；文件变化必须经过重新检查并重启进程才生效。
 
-## 启动配置与优先级
+## 四个事实源
 
-默认配置可直接启动离线控制面。需要调整非敏感启动项时，复制 `config/harness.example.yaml` 到不提交的本机文件，并让 `HARNESS_CONFIG` 指向它。环境变量会覆盖 YAML 中的同名字段。
-
-| 环境变量 | 默认值 | 说明 |
+| 文件 | 唯一职责 | 是否可含秘密 |
 | --- | --- | --- |
-| `HARNESS_HOST` | `127.0.0.1` | 后端监听地址 |
-| `HARNESS_PORT` | `18080` | 后端监听端口 |
-| `HARNESS_CONTROL_ROOT` | `control-data` | 事件、配置投影和受限凭据 |
-| `HARNESS_WORKSPACE_ROOT` | `workspace` | 任务输入、私有输出与共享资产 |
-| `HARNESS_IMAGE_AGENT_PATH_MODE` | `embedded_only` | Image Agent 路径模式；P6 后默认只接受内嵌源码 |
-| `HARNESS_DELIVERY_BUNDLE_MIGRATION_MODE` | `bundle_only` | 交付数据写入模式；P6 后默认只写 Bundle |
+| `.env` | API Key 等秘密变量，以及被 YAML 引用的部署值 | 是；不得提交 |
+| `provider.yaml` | Provider 名称、Base URL 和 API Key 环境引用 | 否 |
+| `model_list.yaml` | 文本、视觉理解、图像生成模型及能力 | 否 |
+| `runtime.yaml` | 服务监听、Master、文档处理、模型选择、Image Agent 与 supervisor 策略 | 否 |
 
-配置文件与相对目录都从仓库根目录解析。日常开发优先使用 `scripts/dev.py`，它会显式选择内嵌 Image Agent 和项目虚拟环境。
+YAML 中 `${NAME}` 必须由 `.env` 或启动进程环境提供。秘密不能写入 YAML、TaskCard、日志、事件或交付说明。
 
-Master 不依赖外部 Gateway。进程启动时从仓库根目录的 `provider.yaml`、`model_list.yaml`、`runtime.yaml` 与 `.env` 加载 Provider、模型和运行策略；任务首次执行时固定无密钥快照，后续模型调用只在内存中解析对应 API Key。
+## Provider 与模型
 
-P6 已移除“内嵌目录缺失时自动查找相邻旧仓库”的隐式回退。紧急路径回滚必须同时显式设置 `HARNESS_IMAGE_AGENT_PATH_MODE=external_only` 和一个通过 release lock 校验的 `HARNESS_IMAGE_AGENT_ROOT`；只设置模式会失败关闭。交付写入可在受控回滚窗口显式设为 `legacy_only`，但既有 Bundle 候选、AssetManifest 与 BundleManifest 必须保持只读可见。
+`provider.yaml` 的 Provider ID 必须与 `model_list.yaml` 每个模型的 `provider` 一致。模型按能力分组：
 
-## Ark Key Pair
+- `text_models`：结构化推理与工具调用；
+- `vlm_models`：图像输入与结构化输出；
+- `image_models`：文生图和图生图。
 
-1. 打开 <http://127.0.0.1:18180/settings>。
-2. 在“Provider 凭据”中填写凭据对 ID、Key ID、Ark Base URL、修订号和 API Key。
-3. 保存后确认页面只显示 Key ID、Key 尾号、Base URL 主机提示和 revision；明文 Key 输入会立即清空。
+`runtime.yaml` 的 `models` 只引用 `model_list.yaml` 中存在且能力匹配的模型 ID。Image Agent 的六个内部阶段默认由三类模型映射；仅在确有需要时使用 `advanced_model_overrides`，覆盖值仍必须指向能力正确的模型。
 
-[完整 Ark Key Pair 示例](../config/examples/ark-credential-pair.json)是字段与测试的共同样例。使用时必须替换 `api_key` 占位值，且不要把替换后的文件写回仓库。Key 与 Base URL 是不可拆分的一对；修改同一凭据必须递增 `revision`，同一 `(credential_pair_id, revision)` 的内容不可变。
+## 运行与安全边界
 
-保存凭据会替换当前启用池。需要保留多个活动凭据时，应在一次受控写入中提交完整集合；运行中的实例继续固定到创建时分配的凭据 revision，除非人工执行显式重分配。
+- `server.host` 默认应保持 `127.0.0.1`。系统没有 RBAC、SSO 或多租户隔离，不得直接监听公网。
+- Image Agent 固定使用 `agents/image_agent_mvp` 和 `agents/image-agent.lock.json`，不存在外部目录回退模式。
+- 交付只写 Bundle；不存在 legacy、dual-write 或按开关选择写入目标。
+- 任务首次执行时固定无密钥配置快照；对应 API Key 只在进程内解析并注入子进程环境。
+- 历史任务、事件、资产和交付仍可读取；旧控制面配置和秘密不会被读取、导入或转换。
 
-## 六状态模型路由
+## 本地检查
 
-把 Ark 控制台中的推理、文生图和视觉模型 endpoint ID 填入六个固定状态。Provider 必须全部为 `ark`，能力类型不可互换。
-
-| 状态 | 含义 | 固定能力 |
-| --- | --- | --- |
-| `intake_clarify` | 需求澄清 | `reasoning_llm` |
-| `confirmation_build` | 确认稿构建 | `reasoning_llm` |
-| `initial_candidate_generation` | 首轮候选生成 | `text_to_image_model` |
-| `self_check_inspection` | 自检审阅 | `vision_language_model` |
-| `self_check_rework` | 自检返工 | `text_to_image_model` |
-| `human_prompt_rework` | 人工反馈返工 | `text_to_image_model` |
-
-[完整六状态路由示例](../config/examples/ark-image-model-routing.json)由文档门禁校验，避免文档与代码维护两份漂移 JSON。模型值是占位 endpoint ID，不声明某个公开模型名称长期可用；应使用当前 Ark 账户中已部署且与能力匹配的 endpoint。
-
-保存路由使用全局配置 revision 做乐观并发。出现 `REVISION_CONFLICT` 时重新加载设置、核对变化后再保存，不要覆盖他人的新修订。
-
-## Image Agent 运行策略
-
-`/settings` 可修改提问策略、候选并发、默认输出尺寸、响应格式、水印与离线模式。真实 Ark 运行前必须关闭 `offline_mode`。运行中实例无法安全热应用的变化会标记 `restart_required`；使用受控重启后才清除该标记。
-
-安全边界固定如下：
-
-- `candidate_concurrency` 为 1–5；`max_render_retries` 固定为 0，失败不自动产生新的付费调用。
-- `response_format` 只允许 `url` 或 `b64_json`。
-- 模型参数拒绝任何疑似凭据字段和值；Base URL 只能存在于 Key Pair。
-- Harness 只把所选凭据注入对应 Image Agent 子进程环境，不写入运行时配置快照或交付说明。
-
-## 诊断与真实 smoke
-
-先点击“运行配置预检（不生图）”。预检只验证当前配置 revision、六状态完整性、能力/Provider 一致性、启用凭据和运行策略，不向 Ark 发起图片生成。
-
-只有预检为 `READY` 后，才可勾选费用确认并打开付费 smoke 二次确认。付费 smoke 固定生成一张最小诊断图片；失败不会自动重试，再次运行必须重新勾选并确认费用。成功响应只显示模型、数量和耗时，不返回图片 URL、请求正文、完整 Base URL 或 API Key。
-
-隔离的发布验证可以从仓库外部提供 `.env`：
-
-```text
-HARNESS_REAL_PROVIDER_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-HARNESS_REAL_PROVIDER_API_KEY=replace-at-runtime
-HARNESS_REAL_PROVIDER_TEXT_MODEL=replace-with-endpoint
-HARNESS_REAL_PROVIDER_IMAGE_MODEL=replace-with-endpoint
-HARNESS_REAL_PROVIDER_VLM_MODEL=replace-with-endpoint
+```bash
+python3 scripts/dev.py config-check
 ```
 
-先运行 `make real-provider-preflight REAL_PROVIDER_ENV_FILE=/secure/provider.env`，明确授权费用后再运行 `make real-provider-smoke REAL_PROVIDER_ENV_FILE=/secure/provider.env`。该 `.env` 只服务隔离 smoke，不会自动成为 Harness 日常凭据池；文件必须位于仓库外并受操作系统权限保护。
+检查包括文件存在性、YAML 结构、环境引用、Provider/模型关联、能力匹配、运行策略和端口范围。该命令不联网、不调用模型、不产生费用。部署完成必须同时满足：
 
-## 失败处理与轮换
+1. `config-check` 退出码为 0；
+2. `python3 scripts/dev.py start --check --timeout 60` 成功。
 
-- `CREDENTIAL_PAIR_INVALID`：检查 ID、revision、Base URL 和两个不同的环境变量名。
-- `CREDENTIAL_PAIR_UNAVAILABLE`：选择已启用且 revision 匹配的 Ark 凭据。
-- `VALIDATION_ERROR`：补齐六状态、修正 Provider 或能力类型后重新保存。
-- `REVISION_CONFLICT`：重新读取 `/settings`，不要复用旧表单或旧幂等键。
-- 真实 smoke 失败：先保存修订并重新预检；确认 Provider 配额、endpoint 状态和网络后再人工授权一次新调用。
+## 秘密轮换
 
-疑似泄漏时立即在 Provider 侧吊销对应 Key，使用更高 revision 创建新 Key Pair，并按受控流程重分配或重建实例。不要通过编辑 `control-data/secrets/` 修复凭据。
+在 Provider 侧创建新 Key，更新根 `.env`，重新执行配置检查，然后受控重启服务。确认新进程健康后吊销旧 Key。不要编辑 `control-data/`，也不要把旧控制面凭据文件导入新配置。
+
+## 显式开发验证
+
+真实 Provider 验证不是产品设置功能。只有开发者明确选择、从仓库外部提供隔离环境文件并确认费用时，才运行：
+
+```bash
+make real-provider-preflight REAL_PROVIDER_ENV_FILE=/secure/provider.env
+make real-provider-smoke REAL_PROVIDER_ENV_FILE=/secure/provider.env
+```
+
+预检不产生图片；smoke 是独立开发门禁，失败不会自动重试。证据不得包含 Key、完整请求/响应正文或临时图片 URL。

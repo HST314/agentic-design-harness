@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the P0 integration baseline and Image Agent release lock."""
+"""Verify the embedded Image Agent release lock."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOCK = ROOT / "agents" / "image-agent.lock.json"
-DEFAULT_BASELINE = ROOT / "config" / "baselines" / "p0-integration.json"
 IGNORED_NAMES = frozenset(
     {
         ".git",
@@ -255,64 +254,6 @@ def dependency_lock_set_sha256(
     return digest.hexdigest()
 
 
-def verify_harness_baseline(baseline: dict[str, Any]) -> None:
-    harness = baseline["repositories"]["harness"]
-    revision = harness["revision"]
-    actual_tree = git_output(ROOT, "rev-parse", f"{revision}^{{tree}}")
-    if actual_tree != harness["git_tree"]:
-        raise ValueError("Harness baseline Git tree does not match its record")
-    if git_content_tree_sha256(ROOT, revision) != harness["source_content_sha256"]:
-        raise ValueError("Harness baseline source digest does not match its record")
-    subprocess.run(
-        ["git", "merge-base", "--is-ancestor", revision, "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    )
-    digest = hashlib.sha256()
-    paths: list[str] = []
-    for item in harness["dependency_files"]:
-        relative = item["path"]
-        paths.append(relative)
-        path = ROOT / relative
-        if sha256_file(path) != item["sha256"]:
-            raise ValueError(f"Harness dependency baseline drifted: {relative}")
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    if paths != sorted(paths) or digest.hexdigest() != harness["dependency_lock_set_sha256"]:
-        raise ValueError("Harness dependency lock set is not canonical")
-    for evidence in harness["gate_result"]["evidence"]:
-        if not (ROOT / evidence).is_file():
-            raise ValueError(f"Harness baseline gate evidence is missing: {evidence}")
-
-
-def verify_cross_references(lock: dict[str, Any], baseline: dict[str, Any]) -> None:
-    if baseline.get("schema_version") != "1.0":
-        raise ValueError("P0 baseline version is unsupported")
-    image = baseline["repositories"]["image_agent"]
-    expected = {
-        "revision": lock["revision"],
-        "source_content_sha256": lock["source_content_sha256"],
-        "dependency_lock_set_sha256": lock["dependencies"]["lock_set_sha256"],
-        "runtime_dependency_tree_sha256": lock["dependencies"]["runtime_tree_sha256"],
-    }
-    for field, value in expected.items():
-        if image.get(field) != value:
-            raise ValueError(f"Image Agent baseline and release lock differ at {field}")
-    harness_revision = baseline["repositories"]["harness"]["revision"]
-    if image["gate_result"].get("accepted_by_harness_revision") != harness_revision:
-        raise ValueError("Image Agent acceptance evidence names another Harness revision")
-    for repository in baseline["repositories"].values():
-        gate = repository.get("gate_result", {})
-        if gate.get("status") != "PASSED":
-            raise ValueError("P0 baseline contains a gate that did not pass")
-        for evidence in gate.get("evidence", []):
-            if not (ROOT / evidence).is_file():
-                raise ValueError(f"P0 baseline gate evidence is missing: {evidence}")
-
-
 def verify_submodule_reference(lock: dict[str, Any]) -> None:
     embedded_path = lock["embedded_path"]
     stage = str(git_output(ROOT, "ls-files", "--stage", "--", embedded_path))
@@ -341,7 +282,7 @@ def verify_submodule_reference(lock: dict[str, Any]) -> None:
         raise ValueError("Image Agent submodule origin differs from the release lock")
 
 
-def verify_image_source(lock: dict[str, Any], baseline: dict[str, Any], root: Path) -> None:
+def verify_image_source(lock: dict[str, Any], root: Path) -> None:
     revision = str(git_output(root, "rev-parse", "HEAD"))
     if revision != lock["revision"]:
         raise ValueError("Image Agent checkout is not at the locked revision")
@@ -349,9 +290,6 @@ def verify_image_source(lock: dict[str, Any], baseline: dict[str, Any], root: Pa
         raise ValueError("Image Agent checkout must be clean for lock verification")
     if content_tree_sha256(root) != lock["source_content_sha256"]:
         raise ValueError("Image Agent source content does not match the release lock")
-    image = baseline["repositories"]["image_agent"]
-    if git_output(root, "rev-parse", "HEAD^{tree}") != image["git_tree"]:
-        raise ValueError("Image Agent Git tree does not match the P0 baseline")
     actual_lock_set = dependency_lock_set_sha256(lock, root)
     if actual_lock_set != lock["dependencies"]["lock_set_sha256"]:
         raise ValueError("Image Agent dependency lock set does not match the release lock")
@@ -360,7 +298,6 @@ def verify_image_source(lock: dict[str, Any], baseline: dict[str, Any], root: Pa
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
-    parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     parser.add_argument("--image-agent-root", type=Path)
     parser.add_argument("--print-revision", action="store_true")
     return parser.parse_args()
@@ -374,9 +311,6 @@ def main() -> int:
         if args.print_revision:
             print(lock["revision"])
             return 0
-        baseline = load_object(args.baseline)
-        verify_cross_references(lock, baseline)
-        verify_harness_baseline(baseline)
         verify_submodule_reference(lock)
         for item in lock["dependencies"]["files"]:
             if item["scope"] == "harness":
@@ -388,11 +322,11 @@ def main() -> int:
             if args.image_agent_root is not None
             else (ROOT / lock["embedded_path"]).resolve()
         )
-        verify_image_source(lock, baseline, source_root)
+        verify_image_source(lock, source_root)
     except (KeyError, OSError, subprocess.CalledProcessError, ValueError) as exc:
         print(f"Image Agent lock verification failed: {exc}", file=sys.stderr)
         return 1
-    print("P0 integration baseline, Image Agent submodule and source checkout verified.")
+    print("Image Agent release lock, submodule and source checkout verified.")
     return 0
 
 

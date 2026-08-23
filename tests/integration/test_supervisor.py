@@ -19,17 +19,14 @@ from urllib.request import urlopen
 import harness.services.process_runtime as process_runtime
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
-from harness.services.credentials import CredentialPoolService
 from harness.services.process_control import force_kill_process_tree
 from harness.services.process_runtime import AgentRuntimeArtifact
 from harness.services.supervisor import ProcessSpec, ProcessSupervisor, process_start_identity
 from harness.services.task_config import TaskConfigService
 from harness.storage.atomic import atomic_write_json, read_json
-from harness.storage.repository import Actor
 from runtime_helpers import build_config_snapshot, build_service, create_task, envelope, image_plan
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
-CREDENTIAL_FIXTURE = FIXTURE_ROOT / "p1" / "credential-pairs.json"
 FAKE_AGENT = FIXTURE_ROOT / "fake_agent_process.py"
 
 
@@ -51,45 +48,13 @@ def make_artifact_writable(root: Path) -> None:
         path.chmod(0o755 if path.is_dir() else 0o644)
 
 
-def creation_summary(task_id: str, raw: dict) -> dict:
-    return {
-        "schema_version": "1.0",
-        **raw,
-        "task_id": task_id,
-        "requirement_lifecycle": {
-            "original_required": raw["required"],
-            "first_activated_at": None,
-            "authorized_downgrade": None,
-        },
-        "status": "CREATED",
-        "process": None,
-        "ui_url": None,
-        "created_at": "2026-08-20T12:00:00Z",
-    }
-
-
 class ProcessSupervisorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.store, self.commands = build_service(self.root)
         created = create_task(self.commands, "t_process", "auto")
-        self.credentials = CredentialPoolService(self.store)
-        pairs = json.loads(CREDENTIAL_FIXTURE.read_text(encoding="utf-8"))["pairs"]
-        self.credentials.configure_pool(pairs)
         draft = image_plan("t_process", 3)
-        for index, raw in enumerate(draft["instances"], start=1):
-            assigned = self.credentials.create_instance(
-                "t_process",
-                creation_summary("t_process", raw),
-                provider="fake",
-                creation_id=f"process_creation_{index}",
-                actor=Actor("human", "tester"),
-            )
-            raw["credential_pair_ref"] = assigned["credential"]["credential_pair_id"]
-            raw["credential_pair_revision"] = assigned["credential"][
-                "credential_pair_revision"
-            ]
         self.commands.save_plan(
             "t_process",
             stages=draft["stages"],
@@ -582,19 +547,6 @@ class ProcessSupervisorTests(unittest.TestCase):
     def test_manual_start_confirmation_cannot_be_bypassed(self) -> None:
         created = create_task(self.commands, "t_manual_process", "manual")
         draft = image_plan("t_manual_process")
-        assigned = self.credentials.create_instance(
-            "t_manual_process",
-            creation_summary("t_manual_process", draft["instances"][0]),
-            provider="fake",
-            creation_id="manual_process_creation",
-            actor=Actor("human", "tester"),
-        )
-        draft["instances"][0]["credential_pair_ref"] = assigned["credential"][
-            "credential_pair_id"
-        ]
-        draft["instances"][0]["credential_pair_revision"] = assigned["credential"][
-            "credential_pair_revision"
-        ]
         saved = self.commands.save_plan(
             "t_manual_process",
             stages=draft["stages"],

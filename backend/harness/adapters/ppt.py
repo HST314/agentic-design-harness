@@ -52,15 +52,6 @@ class PptAgentContractAdapter:
     ) -> AdapterCommandResult:
         self._unavailable(instance_id)
 
-    def apply_config(
-        self,
-        instance_id: str,
-        config: dict[str, Any],
-        revision: int,
-        operation_id: str,
-    ) -> AdapterCommandResult:
-        self._unavailable(instance_id)
-
     def collect_deliveries(self, instance_id: str) -> list[DeliveryCandidate]:
         self._unavailable(instance_id)
 

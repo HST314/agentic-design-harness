@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from copy import deepcopy
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -15,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class G4ApiTests(unittest.TestCase):
-    def test_usage_budget_config_and_key_pool_are_exposed_without_secret_echo(self) -> None:
+    def test_usage_and_budget_remain_available_while_legacy_config_routes_are_gone(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             app = create_app(
@@ -26,11 +25,20 @@ class G4ApiTests(unittest.TestCase):
                 )
             )
             with TestClient(app) as client:
-                paid_smoke = client.post(
-                    "/api/v1/config/diagnostics/paid-smoke",
-                    json={},
-                )
-                self.assertEqual(paid_smoke.status_code, 404, paid_smoke.text)
+                for method, route in (
+                    ("post", "/api/v1/config/diagnostics/paid-smoke"),
+                    ("post", "/api/v1/config/diagnostics/preflight"),
+                    ("get", "/api/v1/config/global"),
+                    ("get", "/api/v1/key-pool"),
+                    ("get", "/api/v1/instances/i_image_1/config"),
+                ):
+                    with self.subTest(route=route):
+                        response = (
+                            client.post(route, json={})
+                            if method == "post"
+                            else client.get(route)
+                        )
+                        self.assertEqual(response.status_code, 404, response.text)
                 container = app.state.container
                 create_task(container.commands, "t_g4_api")
                 container.commands.save_plan(
@@ -45,61 +53,6 @@ class G4ApiTests(unittest.TestCase):
                     "attempt_initial",
                 )
 
-                global_config = client.get("/api/v1/config/global")
-                self.assertEqual(global_config.status_code, 200, global_config.text)
-                config = deepcopy(global_config.json()["config"])
-                revision = config.pop("revision")
-                config["image_runtime_policy"]["max_auto_questions"] = 4
-                updated_config = client.put(
-                    "/api/v1/config/global",
-                    json={
-                        "config": config,
-                        "operation_id": "update_g4_config",
-                        "envelope": self._envelope(
-                            "update-g4-config-envelope", revision, "human"
-                        ),
-                    },
-                )
-                self.assertEqual(updated_config.status_code, 200, updated_config.text)
-                self.assertEqual(
-                    updated_config.json()["config"]["image_runtime_policy"][
-                        "max_auto_questions"
-                    ],
-                    4,
-                )
-                instance_config = client.get("/api/v1/instances/i_image_1/config")
-                self.assertEqual(instance_config.status_code, 200, instance_config.text)
-                self.assertEqual(
-                    instance_config.json()["config"]["source_global_revision"],
-                    revision + 1,
-                )
-
-                secret = "synthetic-g4-api-key"
-                key_pool = client.put(
-                    "/api/v1/key-pool",
-                    json={
-                        "pairs": [
-                            {
-                                "credential_pair_id": "cred_g4_api",
-                                "provider": "fake",
-                                "key_id": "key_g4_api",
-                                "base_url": "https://provider.invalid/v1",
-                                "api_key": secret,
-                                "api_key_env": "FAKE_API_KEY",
-                                "base_url_env": "FAKE_BASE_URL",
-                                "revision": 1,
-                                "enabled": True,
-                            }
-                        ],
-                        "envelope": self._envelope("update-key-pool", 0, "human"),
-                    },
-                )
-                self.assertEqual(key_pool.status_code, 200, key_pool.text)
-                self.assertNotIn(secret, key_pool.text)
-                redacted = client.get("/api/v1/key-pool")
-                self.assertNotIn(secret, redacted.text)
-                self.assertEqual(redacted.json()["items"][0]["key_tail"], "-key")
-
                 usage = {
                     "schema_version": "1.0",
                     "event_id": "usage_g4_api",
@@ -108,7 +61,6 @@ class G4ApiTests(unittest.TestCase):
                     "agent_type": "image",
                     "request_id": "provider_request_g4",
                     "model": "image-model",
-                    "credential_pair_ref": "cred_test_01",
                     "input_tokens": 20,
                     "output_tokens": 10,
                     "cached_input_tokens": 5,

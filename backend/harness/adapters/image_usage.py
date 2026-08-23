@@ -77,7 +77,6 @@ def map_usage_page(
     previous: int,
     task_id: str,
     instance_id: str,
-    credential_pair_ref: str | None,
 ) -> tuple[list[UsageEvent], int, bool]:
     """Validate one producer page and map it without estimating missing facts."""
 
@@ -106,7 +105,6 @@ def map_usage_page(
                 item,
                 task_id=task_id,
                 instance_id=instance_id,
-                credential_pair_ref=credential_pair_ref,
             )
         )
     if (items and next_cursor != sequence) or (not items and next_cursor != previous):
@@ -121,7 +119,6 @@ def _map_usage_item(
     *,
     task_id: str,
     instance_id: str,
-    credential_pair_ref: str | None,
 ) -> UsageEvent:
     usage_id = item.get("usage_id")
     request_id = item.get("request_id")
@@ -174,7 +171,6 @@ def _map_usage_item(
         "model": model,
         "call_type": call_type,
         "usage_basis": usage_basis,
-        "credential_pair_ref": credential_pair_ref,
         **tokens,
         "billing_units": billing_units,
         "raw_usage": raw_usage,

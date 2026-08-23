@@ -45,14 +45,9 @@ class ApplicationDeliveryMixin:
             )
         if observation.details.get("completed") is True:
             try:
-                if self.delivery_bundle_write_targets[1]:
-                    delivery = self._collect_bundles_and_request_review(
-                        task_id, instance_id, adapter, observation
-                    )
-                else:
-                    delivery = self._collect_publish_and_complete(
-                        task_id, instance_id, adapter, observation
-                    )
+                delivery = self._collect_bundles_and_request_review(
+                    task_id, instance_id, adapter, observation
+                )
             except HarnessError as exc:
                 if exc.code not in _DELIVERY_REJECTION_CODES:
                     raise

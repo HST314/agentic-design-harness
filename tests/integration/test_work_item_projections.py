@@ -20,21 +20,6 @@ class WorkItemProjectionApiTests(unittest.TestCase):
             with TestClient(app) as client:
                 task_id = "task_board_projection"
                 self._create_task(client, task_id)
-                app.state.container.credentials.configure_pool(
-                    [
-                        {
-                            "credential_pair_id": "cred_board_projection",
-                            "provider": "fake",
-                            "key_id": "key_board_projection",
-                            "base_url": "https://provider.invalid/v1",
-                            "api_key": "not-a-secret-board",
-                            "api_key_env": "FAKE_API_KEY",
-                            "base_url_env": "FAKE_BASE_URL",
-                            "revision": 1,
-                            "enabled": True,
-                        }
-                    ]
-                )
                 container = app.state.container
                 imported = container.assets.import_bytes(
                     task_id,
@@ -204,8 +189,6 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                                 "required": True,
                                 "approval_mode": "human",
                                 "config_revision": 1,
-                                "credential_pair_ref": "pending_assignment",
-                                "credential_pair_revision": 1,
                                 "workspace_relpath": "instances/instance_board_ppt",
                                 "task_card_relpath": "instances/instance_board_ppt/task-card.json",
                             }
@@ -236,7 +219,6 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                                 "created_at": created_at,
                             }
                         ],
-                        "providers": {},
                         "operation_id": "save_board_ppt_plan",
                         "envelope": self._envelope("save-board-ppt-plan", 1),
                     },
@@ -305,8 +287,6 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                 "required": True,
                 "approval_mode": "human",
                 "config_revision": 1,
-                "credential_pair_ref": "pending_assignment",
-                "credential_pair_revision": 1,
                 "workspace_relpath": f"instances/{instance_id}",
                 "task_card_relpath": f"instances/{instance_id}/task-card.json",
             }
@@ -346,10 +326,6 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                 "stages": stages,
                 "instances": instances,
                 "task_cards": cards,
-                "providers": {
-                    "instance_board_running": "fake",
-                    "instance_board_approval": "fake",
-                },
                 "operation_id": "save_board_projection_plan",
                 "envelope": self._envelope("save-board-projection-plan", 1),
             },

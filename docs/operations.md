@@ -24,7 +24,7 @@ python3 scripts/dev.py start
 
 ## 状态与文件布局
 
-- `control-data/`：事件日志、快照、索引、审批、配置投影、恢复意图和权限受限的密钥池。
+- `control-data/`：事件日志、快照、索引、审批、恢复意图和 usage cursor。
 - `workspace/tasks/`：输入资产、实例私有工作目录、交付候选、共享资产与 manifests。
 - `.runtime/`：可重建的 Image Agent 隔离依赖和只读运行时制品，不属于业务备份。
 - `agents/image-agent.lock.json`：运行时代码与依赖身份；必须与备份记录的主仓提交配套。
@@ -37,9 +37,9 @@ python3 scripts/dev.py start
 
 1. 停止新写入并正常关闭 Harness，确认 `/readyz` 不再可用。
 2. 在同一备份 revision 中复制两个根目录，保留权限、符号链接语义和时间信息。
-3. 记录主仓 commit、Image Agent lock 摘要、非敏感配置和 `delivery_bundle_migration_mode`。
+3. 记录主仓 commit、Image Agent lock 摘要以及三份根 YAML 的摘要；秘密另按安全流程备份。
 4. 恢复到空目录，并使用匹配的代码、依赖和 Image lock 启动。
-5. 启动会截断不完整 NDJSON 尾部、重建投影与索引、恢复配置/凭据/usage cursor、对账 publication intent，并观察活动 Agent，而不重放副作用命令。
+5. 启动会截断不完整 NDJSON 尾部、重建投影与索引、恢复 usage cursor、对账 publication intent，并观察活动 Agent，而不重放副作用命令。
 6. 检查 `recovery-warnings.ndjson`、`readyz`、任务事件、实例 job ID 和 BundleManifest 可见性。
 
 不要通过重新发送 start、advance、approval 或 delivery confirm 来“修复”恢复；这可能制造重复副作用。恢复 warning 需要先定位数据与代码身份，再决定恢复备份或使用专用幂等入口。
@@ -76,22 +76,20 @@ make verify
 
 GitHub Actions 在 Windows/Linux 运行后端、前端、启动器和 P6 专项矩阵，在 Linux 对固定 Image runtime 执行真实进程闭环，并生成 SBOM、文档检查和 `p6-platform-<OS>` 证据。P6 证据覆盖默认切换、双分支双资产、崩溃恢复、幂等、Key 脱敏和真实 Image Agent 进程；本地确定性 Provider 只属于进程/契约证据，不计为 Ark 通过。报告、浏览器结果和发布证据作为 CI artifact 保存，不手工提交到 `docs/`。
 
-真实 Ark 验收必须独立执行零费用预检、显式费用确认和一次最小生成；日志与证据不能包含 Key、完整 Base URL、请求/响应正文或图片临时 URL。未提供凭据导致的 skip 不是通过。
+真实 Ark 验收只在开发者明确选择时独立执行本地配置预检、显式费用确认和一次最小生成；日志与证据不能包含 Key、完整请求/响应正文或图片临时 URL。未提供凭据导致的 skip 不是通过。
 
 ## 升级、迁移与回滚
 
 升级前完成一致备份、`make verify`、适用的 Image E2E，并确认 submodule/lock 成对。先在恢复副本运行新版本，验证 ready、TaskCard revision、受管实例、至少两个分支候选、双资产原子发布和幂等重放，再切换正式目录。
 
-交付迁移顺序固定为 `legacy_only → dual_write → bundle_only`。P6 后默认值为 `bundle_only`；路径默认值为 `embedded_only`，且不再自动搜索相邻外部目录。紧急回滚必须显式提供 `external_only + image_agent_root`，同时通过同一 release lock；写入回滚可显式设为 `legacy_only`。回滚默认路径、写入模式或 UI 入口不能删除新 Bundle 数据，旧版本应保留只读能力或恢复升级前备份。
-
-代码回滚必须匹配状态格式、契约 major、主仓 commit 和 Image lock。若新版本已提交旧代码无法识别的事件，禁止直接在原状态目录降级；恢复升级前备份。Git 回滚不能替代数据回滚。
+部署只有锁定内嵌 Image Agent 与 Bundle 写入路径，没有外部目录、旧交付或双写开关。代码回滚必须匹配状态格式、契约 major、主仓 commit 和 Image lock。若目标版本无法读取现有事件，禁止在原状态目录直接降级；应恢复升级前一致备份。Git 回滚不能替代数据回滚。
 
 ## 日志与安全
 
 - 日志、事件、异常和 API 响应不得包含 Authorization、Cookie、API Key、Key/Base URL 完整组合或 Agent stdout/stderr 中的凭据。
-- `control-data/secrets` 权限只授予运行账户；备份、工单和聊天中同样按秘密处理。
+- 根 `.env` 权限只授予运行账户；备份、工单和聊天中同样按秘密处理。
 - 共享诊断材料前删除用户素材、Provider 返回内容、完整本机路径和临时下载 URL。
-- 发布前运行 `python scripts/secret_scan.py .`；发现疑似泄漏时先吊销 Provider Key，再修订凭据池和受影响实例。
+- 发布前运行 `python scripts/secret_scan.py .`；发现疑似泄漏时先吊销 Provider Key，再更新 `.env`、检查配置并受控重启。
 
 ## 已知限制
 

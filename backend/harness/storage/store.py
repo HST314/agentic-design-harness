@@ -378,8 +378,6 @@ class FileStateStore:
 
         allowed = {
             "config_revision",
-            "credential_pair_ref",
-            "credential_pair_revision",
             "process",
             "restart_required",
             "ui_url",

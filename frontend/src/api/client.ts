@@ -328,51 +328,6 @@ export interface RetryBudget {
   attempts: Array<{ attempt_id: string; status: string }>;
 }
 
-export interface GlobalConfigResponse {
-  schema_version: string;
-  config: GlobalConfig;
-}
-
-export type ImageModelRole = "reasoning_llm" | "text_to_image_model" | "vision_language_model";
-
-export interface ImageModelBinding {
-  state: string;
-  model_role: ImageModelRole;
-  provider: string;
-  model: string;
-  parameters: Record<string, string | number | boolean>;
-  fallback_model: string | null;
-}
-
-export interface GlobalConfig extends Record<string, unknown> {
-  schema_version: "1.0";
-  revision: number;
-  image_provider: string;
-  image_model_config: {
-    model_config_id: string;
-    state_bindings: ImageModelBinding[];
-  };
-  image_runtime_policy: Record<string, unknown> & {
-    question_preference: "proactive" | "blocking_only";
-    candidate_concurrency: number;
-    default_output_size: string;
-    response_format: "url" | "b64_json";
-    watermark: boolean;
-    offline_mode: boolean;
-  };
-  supervisor: Record<string, unknown>;
-}
-
-export interface CredentialSummary {
-  credential_pair_id: string;
-  provider: string;
-  key_id: string;
-  key_tail: string;
-  base_url_hint: string;
-  revision: number;
-  enabled: boolean;
-}
-
 export interface DeliveryBundleFile {
   private_relative_path: string;
   mime_type: string;
@@ -417,16 +372,13 @@ export interface BundleManifest {
 
 const DEPLOYMENT_ERROR_PREFIXES = [
   "CONFIG_",
-  "CREDENTIAL_",
   "MODEL_PROVIDER_",
 ] as const;
 
 const DEPLOYMENT_ERROR_CODES = new Set([
   "ADAPTER_UNAVAILABLE",
   "MASTER_RUN_FAILED",
-  "MASTER_UNAVAILABLE",
   "PROCESS_START_FAILED",
-  "PROVIDER_DIAGNOSTIC_FAILED",
   "UI_LINK_REJECTED",
 ]);
 
@@ -749,24 +701,6 @@ export class ApiClient {
     return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/retry-budget`, signal);
   }
 
-  globalConfig(signal?: AbortSignal): Promise<GlobalConfigResponse> {
-    return this.get("/api/v1/config/global", signal);
-  }
-
-  keyPool(
-    signal?: AbortSignal,
-  ): Promise<{ schema_version: string; items: CredentialSummary[] }> {
-    return this.get("/api/v1/key-pool", signal);
-  }
-
-  updateGlobalConfig(body: Record<string, unknown>): Promise<GlobalConfigResponse> {
-    return this.send("PUT", "/api/v1/config/global", body);
-  }
-
-  updateKeyPool(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.send("PUT", "/api/v1/key-pool", body);
-  }
-
   resolveApproval(
     approvalId: string,
     body: Record<string, unknown>,
@@ -818,13 +752,6 @@ export class ApiClient {
       `/api/v1/instances/${encodeURIComponent(instanceId)}/deliveries/retry`,
       body,
     );
-  }
-
-  updateInstanceConfig(
-    instanceId: string,
-    body: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.send("PUT", `/api/v1/instances/${encodeURIComponent(instanceId)}/config`, body);
   }
 
   async previewText(taskId: string, path: string): Promise<string> {
