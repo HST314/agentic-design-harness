@@ -19,9 +19,11 @@ CONTRACTS_ROOT = PROJECT_ROOT / "contracts" / "v1"
 
 def build_config_snapshot(
     *,
+    revision: str = "cfg_test_snapshot",
     base_url: str = "http://127.0.0.1:18000",
     api_key: str = "test-provider-secret-value",
     visual_analysis: str = "auto",
+    require_source_citations: bool = True,
     max_files_per_task: int = 20,
     max_pdf_pages: int = 100,
     supervisor_port_start: int = 18100,
@@ -32,7 +34,7 @@ def build_config_snapshot(
     return ConfigSnapshot.model_validate(
         {
             "schema_version": "1.0",
-            "revision": "cfg_test_snapshot",
+            "revision": revision,
             "providers": {
                 "schema_version": "1.0",
                 "providers": {"ark": {"base_url": base_url, "api_key": api_key}},
@@ -91,7 +93,7 @@ def build_config_snapshot(
                     "max_pdf_pages": max_pdf_pages,
                     "text_chunk_chars": 6000,
                     "visual_analysis": visual_analysis,
-                    "require_source_citations": True,
+                    "require_source_citations": require_source_citations,
                 },
                 "image_agent": {
                     "question_preference": "proactive",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any, NoReturn
 
@@ -15,6 +16,7 @@ def validate_plan_proposal(
     *,
     task_id: str,
     expected_revision: int,
+    source_citations_required: bool,
 ) -> None:
     """Validate orchestrator output before it becomes a durable planning fact."""
 
@@ -102,6 +104,24 @@ def validate_plan_proposal(
         if instance_id in instance_ids:
             _invalid("A Master instance cannot belong to multiple work items.")
         instance_ids.add(instance_id)
+        if source_citations_required:
+            _validate_source_citations(card)
+
+
+def _validate_source_citations(card: dict[str, Any]) -> None:
+    instructions = "\n".join(card["instructions"])
+    for source in card["input_assets"]:
+        asset_id = source["asset_id"]
+        location = re.compile(
+            rf"(?<![A-Za-z0-9_.-]){re.escape(asset_id)}"
+            r"/(?:page/[1-9][0-9]*|block/[A-Za-z0-9][A-Za-z0-9_.-]{0,127})"
+            r"(?![A-Za-z0-9_.-])"
+        )
+        if location.search(instructions) is None:
+            _invalid(
+                "Every input asset in a Master execution card requires an "
+                "asset_id/page or asset_id/block source citation."
+            )
 
 
 def materialize_plan_proposal(

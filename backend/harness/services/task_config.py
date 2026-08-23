@@ -29,8 +29,18 @@ class TaskConfigService:
         self.process_snapshot = process_snapshot
 
     def pin(self, task_id: str) -> dict[str, Any]:
+        """Pin the current configuration for an already durable task."""
+
+        return self._pin(task_id, require_task=True)
+
+    def pin_for_creation(self, task_id: str) -> dict[str, Any]:
+        """Pin before task creation so a process crash cannot shift revisions."""
+
+        return self._pin(task_id, require_task=False)
+
+    def _pin(self, task_id: str, *, require_task: bool) -> dict[str, Any]:
         validate_identifier(task_id, "task_id")
-        if self.store.task.get(task_id, task_id) is None:
+        if require_task and self.store.task.get(task_id, task_id) is None:
             raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
         path = self._path(task_id)
         if path.exists():
@@ -90,6 +100,12 @@ class TaskConfigService:
         if not path.exists():
             return self.pin(task_id)
         return self._load_document(path)
+
+    def source_citations_required(self, task_id: str) -> bool:
+        """Return the immutable task policy used to validate Master plans."""
+
+        document = self.get_public(task_id)
+        return bool(document["runtime"]["document_processing"]["require_source_citations"])
 
     def _require_process_snapshot(self) -> ConfigSnapshot:
         if self.process_snapshot is None:

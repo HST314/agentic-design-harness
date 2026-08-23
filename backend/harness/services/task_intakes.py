@@ -14,6 +14,7 @@ from ..storage.atomic import atomic_write_json
 from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 from .assets import AssetService
+from .task_config import TaskConfigService
 
 ACCEPTED_MIME_TYPES = (
     "image/jpeg",
@@ -53,10 +54,12 @@ class TaskIntakeService:
         store: FileStateStore,
         commands: TaskCommandService,
         assets: AssetService,
+        task_config: TaskConfigService,
     ) -> None:
         self.store = store
         self.commands = commands
         self.assets = assets
+        self.task_config = task_config
 
     def create(
         self,
@@ -90,6 +93,7 @@ class TaskIntakeService:
             replay = self._lookup(task_id, "create_task_intake", request, envelope)
             if replay is not None:
                 return replay
+            self.task_config.pin_for_creation(task_id)
             created = self.commands.create_task(
                 task_id=task_id,
                 title=self._provisional_title(normalized_prompt),
