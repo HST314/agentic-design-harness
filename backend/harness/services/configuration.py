@@ -21,6 +21,7 @@ from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 
 ApplyConfig = Callable[[str, str, Path], bool]
+INSTANCE_SNAPSHOT_LOCK_ATTEMPTS = 3
 IMAGE_STATE_ROLES: dict[
     str, Literal["reasoning_llm", "text_to_image_model", "vision_language_model"]
 ] = {
@@ -236,37 +237,42 @@ class ConfigurationService:
             ) from None
 
     def create_instance_snapshot(self, task_id: str, instance_id: str) -> dict[str, Any]:
-        with FileLock(self.lock_path, self.store.lock_timeout_seconds), FileLock(
-            self._task_config_lock(task_id), self.store.lock_timeout_seconds
-        ):
-            instance = self._instance(task_id, instance_id)
-            existing = self._read_instance_config(task_id, instance_id)
-            if existing is not None:
-                return existing
-            global_config = self.get_global()
-            assert global_config is not None
-            snapshot = self._instance_snapshot(
-                task_id,
-                instance_id,
-                config_revision=1,
-                source_global_revision=global_config["revision"],
-                scope="global",
-                body=self._body(global_config),
-                restart_required=False,
-            )
-            event = {
-                "event_id": f"evt_{uuid.uuid4().hex}",
-                "event_type": "INSTANCE_CONFIG_COMMITTED",
-                "task_id": task_id,
-                "instance_id": instance_id,
-                "snapshot": snapshot,
-                "actor": Actor("system", "instance_creation").as_dict(),
-                "idempotency_key": f"initial-config-{instance_id}",
-                "committed_at": utc_now(),
-            }
-            append_record(self._task_events(task_id), event)
-            self._materialize_instance_config(snapshot, instance)
-            return deepcopy(snapshot)
+        for attempt in range(INSTANCE_SNAPSHOT_LOCK_ATTEMPTS):
+            try:
+                with FileLock(self.lock_path, self.store.lock_timeout_seconds), FileLock(
+                    self._task_config_lock(task_id), self.store.lock_timeout_seconds
+                ):
+                    instance = self._instance(task_id, instance_id)
+                    snapshot = self._read_instance_config(task_id, instance_id)
+                    if snapshot is None:
+                        global_config = self.get_global()
+                        assert global_config is not None
+                        snapshot = self._instance_snapshot(
+                            task_id,
+                            instance_id,
+                            config_revision=1,
+                            source_global_revision=global_config["revision"],
+                            scope="global",
+                            body=self._body(global_config),
+                            restart_required=False,
+                        )
+                        event = {
+                            "event_id": f"evt_{uuid.uuid4().hex}",
+                            "event_type": "INSTANCE_CONFIG_COMMITTED",
+                            "task_id": task_id,
+                            "instance_id": instance_id,
+                            "snapshot": snapshot,
+                            "actor": Actor("system", "instance_creation").as_dict(),
+                            "idempotency_key": f"initial-config-{instance_id}",
+                            "committed_at": utc_now(),
+                        }
+                        append_record(self._task_events(task_id), event)
+                    return self._materialize_instance_config(snapshot, instance)
+            except HarnessError as exc:
+                lock_timed_out = exc.code == "REVISION_CONFLICT" and "lock" in exc.details
+                if not lock_timed_out or attempt == INSTANCE_SNAPSHOT_LOCK_ATTEMPTS - 1:
+                    raise
+        raise AssertionError("instance snapshot lock retry loop exhausted")
 
     def get_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
         self._instance(task_id, instance_id)
