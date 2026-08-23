@@ -431,6 +431,93 @@ class MasterThreadApiTests(unittest.TestCase):
                 self.assertEqual(len(application.started), 1)
                 self.assertNotIn("providers", application.saved[0])
 
+    def test_legacy_fabricated_citation_aborts_before_plan_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self._app(Path(temporary))
+            application = RecordingApplication()
+            app.state.container.master_threads.orchestrator = RecordingOrchestrator()
+            app.state.container.master_threads.application = application
+            with TestClient(app) as client:
+                task_id = self._create_submit(client, "auto")
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                service = app.state.container.master_threads
+                self._persist_fabricated_citation(service, task_id)
+
+                response = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/confirm",
+                    json={
+                        "task_expected_revision": session["task_revision"],
+                        "expected_card_revisions": {"card_master_1": 1},
+                        "envelope": self._envelope("reject-legacy-fabrication", 1),
+                    },
+                )
+
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn("block that does not exist", response.text)
+                self.assertEqual(application.saved, [])
+                self.assertEqual(application.started, [])
+                intent = read_json(service._confirm_intent_path(task_id, 1))
+                self.assertEqual(intent["state"], "ABORTED")
+                self.assertEqual(intent["error"]["code"], "VALIDATION_ERROR")
+
+    def test_recovery_aborts_fabricated_citations_before_confirmation_side_effects(
+        self,
+    ) -> None:
+        for intent_state in ("PREPARED", "PLAN_SAVED"):
+            with (
+                self.subTest(intent_state=intent_state),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                app = self._app(Path(temporary))
+                application = RecordingApplication()
+                app.state.container.master_threads.orchestrator = RecordingOrchestrator()
+                app.state.container.master_threads.application = application
+                with TestClient(app) as client:
+                    task_id = self._create_submit(client, "auto")
+                    session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                    service = app.state.container.master_threads
+                    proposal = self._persist_fabricated_citation(service, task_id)
+                    intent_path = service._confirm_intent_path(task_id, 1)
+                    atomic_write_json(
+                        intent_path,
+                        {
+                            "schema_version": "1.0",
+                            "kind": "CONFIRM_MASTER_PLAN",
+                            "task_id": task_id,
+                            "proposal_id": proposal["proposal_id"],
+                            "proposal_revision": 1,
+                            "expected_card_revisions": {"card_master_1": 1},
+                            "task_expected_revision": session["task_revision"],
+                            "actor": {
+                                "actor_type": "human",
+                                "actor_id": "human_operator",
+                            },
+                            "state": intent_state,
+                            "prepared_at": utc_now(),
+                            "plan_result": (
+                                {
+                                    "task_revision": session["task_revision"],
+                                    "task": {"task_id": task_id},
+                                }
+                                if intent_state == "PLAN_SAVED"
+                                else None
+                            ),
+                            "start_result": None,
+                            "result": None,
+                        },
+                    )
+
+                    with self.assertRaisesRegex(
+                        HarnessError, "block that does not exist"
+                    ):
+                        service.recover()
+
+                    self.assertEqual(application.saved, [])
+                    self.assertEqual(application.started, [])
+                    intent = read_json(intent_path)
+                    self.assertEqual(intent["state"], "ABORTED")
+                    self.assertEqual(intent["error"]["code"], "VALIDATION_ERROR")
+
     def test_recovery_rejects_a_non_human_confirmation_intent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
@@ -666,6 +753,31 @@ class MasterThreadApiTests(unittest.TestCase):
         )
         self.assertEqual(submitted.status_code, 200, submitted.text)
         return task_id
+
+    @staticmethod
+    def _persist_fabricated_citation(
+        service: Any, task_id: str
+    ) -> dict[str, Any]:
+        proposal = service.store.plan_proposal.get(task_id, "proposal_master_1")
+        if proposal is None:
+            raise AssertionError("expected the first Master proposal")
+        fabricated = deepcopy(proposal)
+        asset_id = fabricated["execution_cards"][0]["input_assets"][0]["asset_id"]
+        fabricated["execution_cards"][0]["instructions"] = [
+            f"引用 {asset_id}/block/does_not_exist。"
+        ]
+        service.store.plan_proposal.put(
+            task_id,
+            fabricated["proposal_id"],
+            fabricated,
+            expected_revision=service.store.plan_proposal.revision(
+                task_id, fabricated["proposal_id"]
+            ),
+            actor=Actor("system", "legacy_fixture"),
+            command="seed_legacy_fabricated_citation",
+            idempotency_key=f"seed-legacy-fabrication-{task_id}",
+        )
+        return fabricated
 
     @staticmethod
     def _app(root: Path):
