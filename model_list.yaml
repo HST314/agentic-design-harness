@@ -1,0 +1,31 @@
+schema_version: "1.0"
+
+text_models:
+  - id: ark-text-primary
+    label: 主文本推理模型
+    provider: ark
+    model: deepseek-v4-flash-ga-260731
+    capabilities:
+      - structured_output
+      - tool_calling
+    parameters: {}
+
+vlm_models:
+  - id: ark-vlm-primary
+    label: 主视觉理解模型
+    provider: ark
+    model: doubao-seed-evolving
+    capabilities:
+      - image_input
+      - structured_output
+    parameters: {}
+
+image_models:
+  - id: ark-image-primary
+    label: 主图像生成模型
+    provider: ark
+    model: doubao-seedream-5-0-260128
+    capabilities:
+      - text_to_image
+      - image_to_image
+    parameters: {}

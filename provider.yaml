@@ -1,0 +1,6 @@
+schema_version: "1.0"
+
+providers:
+  ark:
+    base_url: ${ARK_BASE_URL}
+    api_key: ${ARK_API_KEY}

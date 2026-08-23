@@ -1,15 +1,16 @@
-"""Validated runtime configuration with YAML and environment overlays."""
+"""Internal process settings derived from the validated deployment snapshot."""
 
 from __future__ import annotations
 
-import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .config_kernel import ConfigSnapshot, load_config_snapshot
 
 
 class HarnessSettings(BaseModel):
@@ -38,6 +39,7 @@ class HarnessSettings(BaseModel):
     )
     master_gateway_url: str | None = None
     master_gateway_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    config_snapshot: ConfigSnapshot | None = Field(default=None, repr=False)
 
     @field_validator("log_level")
     @classmethod
@@ -106,41 +108,23 @@ class HarnessSettings(BaseModel):
         }[self.delivery_bundle_migration_mode]
 
 
-_ENV_MAP = {
-    "HARNESS_CONTROL_ROOT": "control_root",
-    "HARNESS_WORKSPACE_ROOT": "workspace_root",
-    "HARNESS_HOST": "host",
-    "HARNESS_PORT": "port",
-    "HARNESS_LOG_LEVEL": "log_level",
-    "HARNESS_LOCK_TIMEOUT_SECONDS": "lock_timeout_seconds",
-    "HARNESS_CONTRACTS_ROOT": "contracts_root",
-    "HARNESS_IMAGE_AGENT_ROOT": "image_agent_root",
-    "HARNESS_IMAGE_AGENT_LOCK_PATH": "image_agent_lock_path",
-    "HARNESS_IMAGE_AGENT_PATH_MODE": "image_agent_path_mode",
-    "HARNESS_DELIVERY_BUNDLE_MIGRATION_MODE": "delivery_bundle_migration_mode",
-    "HARNESS_IMAGE_AGENT_PYTHON": "image_agent_python",
-    "HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT": "image_agent_dependency_root",
-    "HARNESS_IMAGE_AGENT_REVISION": "image_agent_revision",
-    "HARNESS_MASTER_GATEWAY_URL": "master_gateway_url",
-    "HARNESS_MASTER_GATEWAY_TIMEOUT_SECONDS": "master_gateway_timeout_seconds",
-}
+def settings_from_snapshot(project_root: Path, snapshot: ConfigSnapshot) -> HarnessSettings:
+    """Derive process settings without introducing a second configuration source."""
+
+    server = snapshot.runtime.server
+    return HarnessSettings(
+        host=server.host,
+        port=server.port,
+        log_level=server.log_level,
+        config_snapshot=snapshot,
+    ).resolve_from(project_root)
 
 
-def load_settings(project_root: Path, environ: dict[str, str] | None = None) -> HarnessSettings:
-    """Load optional YAML, then overlay explicitly supported environment keys."""
+def load_settings(
+    project_root: Path, environ: Mapping[str, str] | None = None
+) -> HarnessSettings:
+    """Validate the root configuration and derive internal process settings."""
 
-    source = os.environ if environ is None else environ
-    values: dict[str, Any] = {}
-    config_path = source.get("HARNESS_CONFIG")
-    if config_path:
-        candidate = Path(config_path)
-        if not candidate.is_absolute():
-            candidate = project_root / candidate
-        loaded = yaml.safe_load(candidate.read_text(encoding="utf-8"))
-        if loaded is not None and not isinstance(loaded, dict):
-            raise ValueError("Harness YAML configuration must be an object")
-        values.update(loaded or {})
-    for environment_name, field_name in _ENV_MAP.items():
-        if environment_name in source:
-            values[field_name] = source[environment_name]
-    return HarnessSettings.model_validate(values).resolve_from(project_root)
+    return settings_from_snapshot(
+        project_root, load_config_snapshot(project_root, environ)
+    )
