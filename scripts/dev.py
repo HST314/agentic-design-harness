@@ -56,6 +56,16 @@ class LauncherError(RuntimeError):
     """An actionable local environment or child-process failure."""
 
 
+class ConfigCheckFailed(LauncherError):
+    """A fully rendered deployment configuration failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class StartupConfiguration:
+    revision: str
+    backend_port: int
+
+
 def _fail(message: str) -> NoReturn:
     raise LauncherError(message)
 
@@ -638,18 +648,78 @@ class DevelopmentLauncher:
         self.install_frontend(force=force)
         print("[ok] Development environment is ready.", flush=True)
 
-    def _check_configuration(self) -> None:
-        environment = self.backend_environment()
-        environment.update(
-            {
-                "HARNESS_IMAGE_AGENT_ROOT": str(self.image_agent_root),
-                "HARNESS_IMAGE_AGENT_PATH_MODE": "embedded_only",
-                "HARNESS_IMAGE_AGENT_PYTHON": str(self.venv_python),
-                "HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT": str(
-                    self.image_dependency_root
-                ),
-            }
+    def config_check(self) -> StartupConfiguration:
+        """Validate deployment configuration without creating files or calling providers."""
+
+        if self.venv_python.is_file() and command_succeeds(
+            [self.venv_python, "-c", "import pydantic, yaml"]
+        ):
+            code = (
+                "import json, sys; from pathlib import Path; "
+                "from harness.core.config_kernel import ConfigurationError, "
+                "load_config_snapshot; "
+                "root=Path(sys.argv[1]); "
+                "\ntry: snapshot=load_config_snapshot(root)"
+                "\nexcept ConfigurationError as exc: print(str(exc), file=sys.stderr); "
+                "raise SystemExit(2)"
+                "\nprint(json.dumps({'revision': snapshot.revision, "
+                "'backend_port': snapshot.runtime.server.port}))"
+            )
+            result = subprocess.run(
+                [str(self.venv_python), "-c", code, str(self.root)],
+                cwd=self.root,
+                env=self.backend_environment(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                error = result.stderr.strip()
+                if error.startswith("CONFIG_ERROR:"):
+                    raise ConfigCheckFailed(error)
+                _fail("Configuration checker failed: " + (error or "unknown error"))
+            try:
+                checked = json.loads(result.stdout)
+                startup = StartupConfiguration(
+                    revision=str(checked["revision"]),
+                    backend_port=int(checked["backend_port"]),
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                _fail(f"Configuration checker returned an invalid result: {exc}")
+        else:
+            startup = self._config_check_in_process()
+        print(
+            f"[ok] Configuration snapshot {startup.revision} is valid (no provider calls).",
+            flush=True,
         )
+        return startup
+
+    def _config_check_in_process(self) -> StartupConfiguration:
+        backend_root = ROOT / "backend"
+        inserted = str(backend_root) not in sys.path
+        if inserted:
+            sys.path.insert(0, str(backend_root))
+        try:
+            from harness.core.config_kernel import ConfigurationError, load_config_snapshot
+
+            try:
+                snapshot = load_config_snapshot(self.root)
+            except ConfigurationError as exc:
+                raise ConfigCheckFailed(str(exc)) from exc
+        except ModuleNotFoundError as exc:
+            _fail(
+                "Configuration dependencies are unavailable; run scripts/dev.py setup first "
+                f"({exc.name})."
+            )
+        finally:
+            if inserted:
+                sys.path.remove(str(backend_root))
+        return StartupConfiguration(
+            revision=snapshot.revision,
+            backend_port=snapshot.runtime.server.port,
+        )
+
+    def _check_configuration(self) -> None:
         code = (
             "from pathlib import Path; from harness.core.config import load_settings; "
             f"s=load_settings(Path({str(self.root)!r})); "
@@ -660,7 +730,7 @@ class DevelopmentLauncher:
         if not command_succeeds(
             [self.venv_python, "-c", code],
             cwd=self.root,
-            environment=environment,
+            environment=self.backend_environment(),
         ):
             _fail("Harness configuration paths are incomplete or invalid.")
 
@@ -692,7 +762,10 @@ class DevelopmentLauncher:
         check_ports: bool = True,
         backend_port: int = DEFAULT_BACKEND_PORT,
         frontend_port: int = DEFAULT_FRONTEND_PORT,
+        configuration_checked: bool = False,
     ) -> None:
+        if not configuration_checked:
+            self.config_check()
         self.check_tools()
         self.verify_image_lock()
         if not self.backend_is_current():
@@ -720,29 +793,19 @@ class DevelopmentLauncher:
     def start(
         self,
         *,
-        backend_port: int = DEFAULT_BACKEND_PORT,
         frontend_port: int = DEFAULT_FRONTEND_PORT,
         timeout_seconds: float = 45.0,
         check_only: bool = False,
     ) -> int:
+        snapshot = self.config_check()
+        backend_port = snapshot.backend_port
         self.doctor(
             check_ports=True,
             backend_port=backend_port,
             frontend_port=frontend_port,
+            configuration_checked=True,
         )
         backend_environment = self.backend_environment()
-        backend_environment.update(
-            {
-                "HARNESS_HOST": "127.0.0.1",
-                "HARNESS_PORT": str(backend_port),
-                "HARNESS_IMAGE_AGENT_ROOT": str(self.image_agent_root),
-                "HARNESS_IMAGE_AGENT_PATH_MODE": "embedded_only",
-                "HARNESS_IMAGE_AGENT_PYTHON": str(self.venv_python),
-                "HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT": str(
-                    self.image_dependency_root
-                ),
-            }
-        )
         frontend_environment = self.npm_environment()
         frontend_environment["HARNESS_BACKEND_URL"] = (
             f"http://127.0.0.1:{backend_port}"
@@ -924,13 +987,17 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser = subparsers.add_parser("setup", help="install locked dependencies")
     setup_parser.add_argument("--force", action="store_true")
 
+    config_parser = subparsers.add_parser(
+        "config-check", help="validate root YAML and environment references"
+    )
+    config_parser.add_argument("--root", type=Path, default=ROOT)
+
     doctor_parser = subparsers.add_parser("doctor", help="validate the local environment")
     doctor_parser.add_argument("--skip-ports", action="store_true")
     doctor_parser.add_argument("--backend-port", type=int, default=DEFAULT_BACKEND_PORT)
     doctor_parser.add_argument("--frontend-port", type=int, default=DEFAULT_FRONTEND_PORT)
 
     start_parser = subparsers.add_parser("start", help="start backend and frontend")
-    start_parser.add_argument("--backend-port", type=int, default=DEFAULT_BACKEND_PORT)
     start_parser.add_argument("--frontend-port", type=int, default=DEFAULT_FRONTEND_PORT)
     start_parser.add_argument("--timeout", type=float, default=45.0)
     start_parser.add_argument(
@@ -955,6 +1022,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "setup":
             launcher.setup(force=args.force)
             return 0
+        if args.command == "config-check":
+            DevelopmentLauncher(root=args.root.resolve()).config_check()
+            return 0
         if args.command == "doctor":
             if not _valid_port(args.backend_port) or not _valid_port(args.frontend_port):
                 _fail("Ports must be between 1 and 65535.")
@@ -966,18 +1036,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 frontend_port=args.frontend_port,
             )
             return 0
-        if not _valid_port(args.backend_port) or not _valid_port(args.frontend_port):
-            _fail("Ports must be between 1 and 65535.")
-        if args.backend_port == args.frontend_port:
-            _fail("Backend and frontend ports must differ.")
+        if not _valid_port(args.frontend_port):
+            _fail("Frontend port must be between 1 and 65535.")
         if args.timeout <= 0:
             _fail("Startup timeout must be positive.")
         return launcher.start(
-            backend_port=args.backend_port,
             frontend_port=args.frontend_port,
             timeout_seconds=args.timeout,
             check_only=args.check,
         )
+    except ConfigCheckFailed as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     except (LauncherError, OSError, subprocess.CalledProcessError) as exc:
         print(f"Development launcher failed: {exc}", file=sys.stderr)
         return 1

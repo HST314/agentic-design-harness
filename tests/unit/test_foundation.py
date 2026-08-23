@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import stat
 import tempfile
 import unittest
@@ -17,22 +18,34 @@ from harness.storage.atomic import atomic_write_json, atomic_write_yaml
 
 
 class FoundationTests(unittest.TestCase):
-    def test_yaml_and_environment_configuration_is_validated(self) -> None:
+    def test_process_settings_are_derived_from_root_configuration_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            config = root / "harness.yaml"
-            config.write_text("port: 18100\nlog_level: warning\n", encoding="utf-8")
+            repository_root = Path(__file__).resolve().parents[2]
+            for filename in ("provider.yaml", "model_list.yaml", "runtime.yaml"):
+                shutil.copyfile(repository_root / filename, root / filename)
+            (root / ".env").write_text(
+                "ARK_API_KEY=test-secret\n"
+                "ARK_BASE_URL=https://ark.example.test/api/v3\n",
+                encoding="utf-8",
+            )
+            runtime = yaml.safe_load((root / "runtime.yaml").read_text(encoding="utf-8"))
+            runtime["server"]["port"] = 19001
+            runtime["server"]["log_level"] = "WARNING"
+            (root / "runtime.yaml").write_text(
+                yaml.safe_dump(runtime, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
             settings = load_settings(
                 root,
                 {
-                    "HARNESS_CONFIG": str(config),
-                    "HARNESS_PORT": "18101",
-                    "HARNESS_WORKSPACE_ROOT": "runtime-workspace",
+                    "HARNESS_PORT": "19999",
+                    "HARNESS_WORKSPACE_ROOT": "ignored-workspace",
                 },
             )
-            self.assertEqual(settings.port, 18101)
+            self.assertEqual(settings.port, 19001)
             self.assertEqual(settings.log_level, "WARNING")
-            self.assertEqual(settings.workspace_root, root / "runtime-workspace")
+            self.assertEqual(settings.workspace_root, root / "workspace")
 
     def test_atomic_json_and_yaml_replace_with_private_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -75,24 +88,23 @@ class FoundationTests(unittest.TestCase):
             external = root / "external_image_agent"
             embedded.mkdir(parents=True)
             external.mkdir()
-            selected = load_settings(root, {})
+            selected = HarnessSettings().resolve_from(root)
             self.assertEqual(selected.image_agent_path_mode, "embedded_only")
             self.assertEqual(selected.image_agent_root, embedded)
 
             embedded.rmdir()
-            no_fallback = load_settings(root, {})
+            no_fallback = HarnessSettings().resolve_from(root)
             self.assertEqual(no_fallback.image_agent_root, embedded)
 
-            external_only = load_settings(
-                root,
-                {
-                    "HARNESS_IMAGE_AGENT_PATH_MODE": "external_only",
-                    "HARNESS_IMAGE_AGENT_ROOT": "external_image_agent",
-                },
-            )
+            external_only = HarnessSettings(
+                image_agent_path_mode="external_only",
+                image_agent_root=Path("external_image_agent"),
+            ).resolve_from(root)
             self.assertEqual(external_only.image_agent_root, external)
             with self.assertRaisesRegex(ValueError, "explicit image_agent_root"):
-                load_settings(root, {"HARNESS_IMAGE_AGENT_PATH_MODE": "external_only"})
+                HarnessSettings(
+                    image_agent_path_mode="external_only"
+                ).resolve_from(root)
 
     def test_delivery_bundle_migration_modes_expose_explicit_write_targets(self) -> None:
         self.assertEqual(HarnessSettings().delivery_bundle_write_targets, (False, True))

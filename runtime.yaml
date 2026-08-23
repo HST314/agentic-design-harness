@@ -1,0 +1,46 @@
+schema_version: "1.0"
+
+server:
+  host: 0.0.0.0
+  port: 18080
+  log_level: INFO
+
+models:
+  master: ark-text-primary
+  text_reasoning: ark-text-primary
+  vision_understanding: ark-vlm-primary
+  image_generation: ark-image-primary
+
+master:
+  model_timeout_seconds: 180
+  max_tool_rounds: 8
+  max_clarification_questions: 3
+  require_plan_confirmation: true
+
+document_processing:
+  max_files_per_task: 20
+  max_total_bytes: 209715200
+  max_pdf_pages: 100
+  text_chunk_chars: 6000
+  visual_analysis: auto
+  require_source_citations: true
+
+image_agent:
+  question_preference: proactive
+  candidate_concurrency: 5
+  default_output_size: 2560x1440
+  response_format: url
+  watermark: false
+  advanced_model_overrides:
+    intake_clarify: null
+    confirmation_build: null
+    initial_candidate_generation: null
+    self_check_inspection: null
+    self_check_rework: null
+    human_prompt_rework: null
+
+supervisor:
+  port_range_start: 18100
+  port_range_end: 18199
+  startup_timeout_seconds: 30
+  shutdown_grace_seconds: 5
