@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
@@ -13,6 +13,7 @@ from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
 from harness.services.master_orchestrator import MasterRunObservation
 from harness.storage.atomic import atomic_write_json, read_json
+from harness.storage.repository import Actor, utc_now
 from runtime_helpers import build_config_snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +23,7 @@ class RecordingOrchestrator:
     def __init__(self) -> None:
         self.runs: dict[str, dict[str, Any]] = {}
         self.revision = 0
+        self.source_citation = "block/text_b1"
 
     def submit_message(self, task_id: str, message: dict[str, Any]) -> str:
         self.revision += 1
@@ -91,7 +93,7 @@ class RecordingOrchestrator:
                     "instructions": [
                         "遵守品牌安全区。",
                         *[
-                            f"引用 {asset['asset_id']}/block/text_b1。"
+                            f"引用 {asset['asset_id']}/{self.source_citation}。"
                             for asset in message["asset_refs"]
                         ],
                     ],
@@ -339,6 +341,14 @@ class MasterThreadApiTests(unittest.TestCase):
                         }],
                         "envelope": self._envelope("reject-card-mime", 1),
                     },
+                    {
+                        **base,
+                        "instructions": [
+                            f"引用 {card['input_assets'][0]['asset_id']}"
+                            "/block/does_not_exist。"
+                        ],
+                        "envelope": self._envelope("reject-card-fabricated-block", 1),
+                    },
                 ]
                 for request in invalid_requests:
                     with self.subTest(key=request["envelope"]["idempotency_key"]):
@@ -457,6 +467,45 @@ class MasterThreadApiTests(unittest.TestCase):
                 )
                 self.assertEqual(application.saved, [])
                 self.assertEqual(application.started, [])
+
+    def test_recovery_rejects_a_fabricated_citation_before_plan_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self._app(Path(temporary))
+            orchestrator = RecordingOrchestrator()
+            app.state.container.master_threads.orchestrator = orchestrator
+            with TestClient(app) as client:
+                task_id = self._create_submit(client, "manual")
+                service = app.state.container.master_threads
+                thread = app.state.container.store.master_thread.get(task_id, task_id)
+                self.assertIsNotNone(thread)
+                message_id = thread["active_run"]["message_id"]
+                message = app.state.container.store.master_message.get(task_id, message_id)
+                self.assertIsNotNone(message)
+
+                orchestrator.source_citation = "block/does_not_exist"
+                run_id = orchestrator.submit_message(task_id, message)
+                now = utc_now()
+                service._put_thread(
+                    task_id,
+                    {
+                        **thread,
+                        "active_run": {
+                            "run_id": run_id,
+                            "message_id": message_id,
+                            "status": "RUNNING",
+                            "started_at": now,
+                            "updated_at": now,
+                        },
+                    },
+                    Actor("system", "recovery_test"),
+                    "checkpoint_running_master_for_test",
+                )
+
+                with self.assertRaisesRegex(HarnessError, "block that does not exist"):
+                    service.recover()
+
+                proposals = app.state.container.store.plan_proposal.list(task_id)
+                self.assertEqual([item["revision"] for item in proposals], [1])
 
     def test_recovery_aborts_r1_after_a_persisted_intent_is_superseded_by_r2(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -602,6 +651,10 @@ class MasterThreadApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        asset_id = uploaded.json()["asset"]["asset_id"]
+        cast(Any, client.app).state.container.asset_understanding.prepare(
+            task_id, [asset_id]
+        )
         submitted = client.post(
             f"/api/v1/task-intakes/{task_id}/submit",
             json={

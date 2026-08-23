@@ -9,10 +9,9 @@ from typing import Any, cast
 
 from ..adapters import AdapterRegistry
 from ..adapters.types import AgentInstanceSnapshot, StageSnapshot, TaskCard
-from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
-from ..domain.master import materialize_plan_proposal, validate_plan_proposal
+from ..domain.master import materialize_plan_proposal
 from ..domain.service import TaskCommandService
 from ..storage.atomic import atomic_write_json, read_json
 from ..storage.repository import Actor, utc_now
@@ -24,7 +23,7 @@ from .master_orchestrator import (
     MasterPlanner,
     MasterRunObservation,
 )
-from .task_config import TaskConfigService
+from .plan_proposals import PlanProposalValidationService
 
 
 class MasterThreadService:
@@ -33,22 +32,20 @@ class MasterThreadService:
     def __init__(
         self,
         store: FileStateStore,
-        contracts: ContractRegistry,
         commands: TaskCommandService,
         application: HarnessApplicationService,
         assets: AssetService,
         adapters: AdapterRegistry,
         orchestrator: MasterPlanner,
-        task_config: TaskConfigService,
+        plan_proposals: PlanProposalValidationService,
     ) -> None:
         self.store = store
-        self.contracts = contracts
         self.commands = commands
         self.application = application
         self.assets = assets
         self.adapters = adapters
         self.orchestrator = orchestrator
-        self.task_config = task_config
+        self.plan_proposals = plan_proposals
         self.intent_root = store.layout.control_root / "master-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -315,20 +312,15 @@ class MasterThreadService:
                 }
             )
             next_proposal["execution_cards"][card_index] = revised_card
-            validate_plan_proposal(
-                self.contracts,
+            self.plan_proposals.validate_new(
+                task_id,
                 next_proposal,
-                task_id=task_id,
                 expected_revision=proposal_revision + 1,
-                source_citations_required=self.task_config.source_citations_required(
-                    task_id
-                ),
             )
 
             actor = Actor(envelope.actor_type, envelope.actor_id)
-            self.store.plan_proposal.put(
+            self._put_plan_proposal(
                 task_id,
-                next_proposal_id,
                 next_proposal,
                 expected_revision=0,
                 actor=actor,
@@ -341,9 +333,8 @@ class MasterThreadService:
                 "updated_at": now,
                 "confirmed_at": None,
             }
-            self.store.plan_proposal.put(
+            self._put_plan_proposal(
                 task_id,
-                proposal["proposal_id"],
                 superseded,
                 expected_revision=self.store.plan_proposal.revision(
                     task_id, proposal["proposal_id"]
@@ -518,9 +509,8 @@ class MasterThreadService:
                     "updated_at": now,
                     "confirmed_at": now,
                 }
-                self.store.plan_proposal.put(
+                self._put_plan_proposal(
                     task_id,
-                    proposal_id,
                     confirmed,
                     expected_revision=self.store.plan_proposal.revision(
                         task_id, proposal_id
@@ -786,19 +776,16 @@ class MasterThreadService:
     ) -> dict[str, Any]:
         proposal = self.orchestrator.load_plan(task_id, active["run_id"])
         expected_revision = thread["latest_proposal_revision"] + 1
-        validate_plan_proposal(
-            self.contracts,
+        self.plan_proposals.validate_new(
+            task_id,
             proposal,
-            task_id=task_id,
             expected_revision=expected_revision,
-            source_citations_required=self.task_config.source_citations_required(task_id),
         )
         actor = Actor("master", "master_orchestrator")
         existing = self.store.plan_proposal.get(task_id, proposal["proposal_id"])
         if existing is None:
-            self.store.plan_proposal.put(
+            self._put_plan_proposal(
                 task_id,
-                proposal["proposal_id"],
                 deepcopy(proposal),
                 expected_revision=0,
                 actor=actor,
@@ -820,9 +807,8 @@ class MasterThreadService:
                     "updated_at": utc_now(),
                     "confirmed_at": None,
                 }
-                self.store.plan_proposal.put(
+                self._put_plan_proposal(
                     task_id,
-                    previous["proposal_id"],
                     updated,
                     expected_revision=self.store.plan_proposal.revision(
                         task_id, previous["proposal_id"]
@@ -1149,6 +1135,29 @@ class MasterThreadService:
             actor=actor,
             command=command,
             idempotency_key=self._identifier(command, message["task_id"], message["message_id"]),
+        )
+
+    def _put_plan_proposal(
+        self,
+        task_id: str,
+        proposal: dict[str, Any],
+        *,
+        expected_revision: int,
+        actor: Actor,
+        command: str,
+        idempotency_key: str,
+    ) -> None:
+        """Apply the shared citation truth gate to every proposal repository write."""
+
+        self.plan_proposals.validate_sources(task_id, proposal)
+        self.store.plan_proposal.put(
+            task_id,
+            proposal["proposal_id"],
+            proposal,
+            expected_revision=expected_revision,
+            actor=actor,
+            command=command,
+            idempotency_key=idempotency_key,
         )
 
     def _proposal_by_revision(self, task_id: str, revision: int) -> dict[str, Any]:

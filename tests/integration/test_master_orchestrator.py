@@ -77,8 +77,8 @@ class PlanningTextClient:
                     "agent_type": "image",
                     "objective": "Create the campaign key visual.",
                     "instructions": (
-                        [f"Use {asset_id}/block/text_b1 as the brief source."]
-                        if self.factory.cite_sources
+                        [f"Use {asset_id}/{self.factory.source_citation} as the brief source."]
+                        if self.factory.source_citation is not None
                         else ["Use the uploaded brief as the source."]
                     ),
                     "input_assets": [
@@ -137,7 +137,7 @@ class FakeModelFactory:
     def __init__(self) -> None:
         self.task_id = ""
         self.asset_id = ""
-        self.cite_sources = True
+        self.source_citation: str | None = "block/text_b1"
         self.calls: list[dict[str, Any]] = []
 
     def text(self, snapshot, model_id, *, timeout_seconds):
@@ -148,72 +148,73 @@ class FakeModelFactory:
 
 
 class MasterOrchestratorIntegrationTests(unittest.TestCase):
-    def test_required_source_citation_rejects_an_uncited_task_card(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            factory = FakeModelFactory()
-            factory.cite_sources = False
-            settings = HarnessSettings(
-                control_root=root / "control-data",
-                workspace_root=root / "workspace",
-                contracts_root=PROJECT_ROOT / "contracts" / "v1",
-                image_agent_lock_path=PROJECT_ROOT / "agents" / "image-agent.lock.json",
-                image_agent_root=PROJECT_ROOT / "agents" / "image_agent_mvp",
-                config_snapshot=build_config_snapshot(require_source_citations=True),
-            )
-            app = create_app(settings, model_clients=factory)
-            with TestClient(app) as client:
-                created = client.post(
-                    "/api/v1/task-intakes",
-                    json={
-                        "prompt": "Create a launch key visual from the brief.",
-                        "start_policy": "manual",
-                        "envelope": self._envelope("create-uncited-master", 0),
-                    },
+    def test_master_rejects_missing_or_fabricated_source_citations(self) -> None:
+        for citation in (None, "block/does_not_exist"):
+            with self.subTest(citation=citation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                factory = FakeModelFactory()
+                factory.source_citation = citation
+                settings = HarnessSettings(
+                    control_root=root / "control-data",
+                    workspace_root=root / "workspace",
+                    contracts_root=PROJECT_ROOT / "contracts" / "v1",
+                    image_agent_lock_path=PROJECT_ROOT / "agents" / "image-agent.lock.json",
+                    image_agent_root=PROJECT_ROOT / "agents" / "image_agent_mvp",
+                    config_snapshot=build_config_snapshot(require_source_citations=True),
                 )
-                self.assertEqual(created.status_code, 200, created.text)
-                body = created.json()
-                task_id = body["task"]["task_id"]
-                factory.task_id = task_id
-                uploaded = client.post(
-                    f"/api/v1/task-intakes/{task_id}/assets",
-                    files={
-                        "file": (
-                            "brief.md",
-                            b"# Brief\n\nUse blue and preserve generous logo clearance.",
-                            "text/markdown",
-                        )
-                    },
-                    data={
-                        "declared_mime_type": "text/markdown",
-                        "description": "brand brief",
-                        "idempotency_key": "upload-uncited-brief",
-                        "actor_id": "human_operator",
-                        "expected_revision": "1",
-                    },
-                )
-                self.assertEqual(uploaded.status_code, 200, uploaded.text)
-                factory.asset_id = uploaded.json()["asset"]["asset_id"]
+                app = create_app(settings, model_clients=factory)
+                with TestClient(app) as client:
+                    created = client.post(
+                        "/api/v1/task-intakes",
+                        json={
+                            "prompt": "Create a launch key visual from the brief.",
+                            "start_policy": "manual",
+                            "envelope": self._envelope("create-invalid-master", 0),
+                        },
+                    )
+                    self.assertEqual(created.status_code, 200, created.text)
+                    body = created.json()
+                    task_id = body["task"]["task_id"]
+                    factory.task_id = task_id
+                    uploaded = client.post(
+                        f"/api/v1/task-intakes/{task_id}/assets",
+                        files={
+                            "file": (
+                                "brief.md",
+                                b"# Brief\n\nUse blue and preserve generous logo clearance.",
+                                "text/markdown",
+                            )
+                        },
+                        data={
+                            "declared_mime_type": "text/markdown",
+                            "description": "brand brief",
+                            "idempotency_key": "upload-invalid-brief",
+                            "actor_id": "human_operator",
+                            "expected_revision": "1",
+                        },
+                    )
+                    self.assertEqual(uploaded.status_code, 200, uploaded.text)
+                    factory.asset_id = uploaded.json()["asset"]["asset_id"]
 
-                submitted = client.post(
-                    f"/api/v1/task-intakes/{task_id}/submit",
-                    json={
-                        "task_expected_revision": body["task_revision"],
-                        "envelope": self._envelope(
-                            "submit-uncited-master",
-                            uploaded.json()["intake_revision"],
-                        ),
-                    },
-                )
-                self.assertEqual(submitted.status_code, 200, submitted.text)
-                session = client.get(f"/api/v1/tasks/{task_id}/master/messages")
-                self.assertEqual(session.status_code, 200, session.text)
-                self.assertEqual(
-                    session.json()["thread"]["active_run"]["status"], "FAILED"
-                )
-                self.assertEqual(
-                    app.state.container.store.plan_proposal.list(task_id), []
-                )
+                    submitted = client.post(
+                        f"/api/v1/task-intakes/{task_id}/submit",
+                        json={
+                            "task_expected_revision": body["task_revision"],
+                            "envelope": self._envelope(
+                                "submit-invalid-master",
+                                uploaded.json()["intake_revision"],
+                            ),
+                        },
+                    )
+                    self.assertEqual(submitted.status_code, 200, submitted.text)
+                    session = client.get(f"/api/v1/tasks/{task_id}/master/messages")
+                    self.assertEqual(session.status_code, 200, session.text)
+                    self.assertEqual(
+                        session.json()["thread"]["active_run"]["status"], "FAILED"
+                    )
+                    self.assertEqual(
+                        app.state.container.store.plan_proposal.list(task_id), []
+                    )
 
     def test_internal_master_uses_asset_tool_persists_plan_and_audits_usage_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

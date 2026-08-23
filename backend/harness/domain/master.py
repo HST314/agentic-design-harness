@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
+
+_SOURCE_CITATION = re.compile(
+    r"(?<![A-Za-z0-9_.-])"
+    r"(?P<asset_id>[A-Za-z][A-Za-z0-9_-]{0,127})/"
+    r"(?:page/(?P<page>[1-9][0-9]*)|"
+    r"block/(?P<block_id>[A-Za-z][A-Za-z0-9_-]{0,127}))"
+    r"(?![A-Za-z0-9_.-])"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AssetSourceIndex:
+    """Persisted source locations that a PlanProposal may cite."""
+
+    page_count: int | None
+    block_ids: frozenset[str]
 
 
 def validate_plan_proposal(
@@ -16,7 +34,6 @@ def validate_plan_proposal(
     *,
     task_id: str,
     expected_revision: int,
-    source_citations_required: bool,
 ) -> None:
     """Validate orchestrator output before it becomes a durable planning fact."""
 
@@ -104,24 +121,47 @@ def validate_plan_proposal(
         if instance_id in instance_ids:
             _invalid("A Master instance cannot belong to multiple work items.")
         instance_ids.add(instance_id)
-        if source_citations_required:
-            _validate_source_citations(card)
 
 
-def _validate_source_citations(card: dict[str, Any]) -> None:
-    instructions = "\n".join(card["instructions"])
-    for source in card["input_assets"]:
-        asset_id = source["asset_id"]
-        location = re.compile(
-            rf"(?<![A-Za-z0-9_.-]){re.escape(asset_id)}"
-            r"/(?:page/[1-9][0-9]*|block/[A-Za-z0-9][A-Za-z0-9_.-]{0,127})"
-            r"(?![A-Za-z0-9_.-])"
-        )
-        if location.search(instructions) is None:
-            _invalid(
-                "Every input asset in a Master execution card requires an "
-                "asset_id/page or asset_id/block source citation."
-            )
+def validate_source_citations(
+    proposal: dict[str, Any], source_indexes: Mapping[str, AssetSourceIndex]
+) -> None:
+    """Require every cited page/block to exist in persisted asset understanding."""
+
+    for card in proposal["execution_cards"]:
+        instructions = "\n".join(card["instructions"])
+        input_asset_ids = {source["asset_id"] for source in card["input_assets"]}
+        citations_by_asset: dict[str, list[re.Match[str]]] = {
+            asset_id: [] for asset_id in input_asset_ids
+        }
+        for citation in _SOURCE_CITATION.finditer(instructions):
+            asset_id = citation.group("asset_id")
+            if asset_id not in input_asset_ids:
+                _invalid("A source citation references an undeclared input asset.")
+            citations_by_asset[asset_id].append(citation)
+
+        for asset_id, citations in citations_by_asset.items():
+            if not citations:
+                _invalid(
+                    "Every input asset in a Master execution card requires an "
+                    "asset_id/page or asset_id/block source citation."
+                )
+            source_index = source_indexes.get(asset_id)
+            if source_index is None:
+                _invalid("A cited input asset has no persisted source understanding.")
+            for citation in citations:
+                page = citation.group("page")
+                if page is not None:
+                    page_number = int(page)
+                    if (
+                        source_index.page_count is None
+                        or page_number > source_index.page_count
+                    ):
+                        _invalid("A source citation references a page that does not exist.")
+                    continue
+                block_id = citation.group("block_id")
+                if block_id not in source_index.block_ids:
+                    _invalid("A source citation references a block that does not exist.")
 
 
 def materialize_plan_proposal(
