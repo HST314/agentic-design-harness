@@ -7,7 +7,7 @@
       "revision": "5fddb81c6008377e0f0bfc3640563a7085c789e3",
       "git_tree": "c35feb40080a311fb4db4b2dbeaf46e3d96f504a",
       "source_content_sha256": "ca900b8348fc1dead6875d09b16972df23dfaf8458cbcc5267489507549ac566",
-      "dependency_lock_set_sha256": "f963f7fa228ecd288c1b563e7dd23d4028cda886ec35e4b3155b3e3ff2b42420",
+      "dependency_lock_set_sha256": "06a260e0700a9e4e18dd179eda89600f39ebdf3b8fe8871a28405f7a361a8d19",
       "dependency_files": [
         {
           "path": "frontend/package-lock.json",
@@ -15,15 +15,15 @@
         },
         {
           "path": "pyproject.toml",
-          "sha256": "3931f2c29c142c60530f07d577c67aec850d4a3c97fd0ac4a2de917adfb8967a"
+          "sha256": "e99b8b168ad213f9bbdbed2bf5339d3011618933bf0a560f553cfd1a153e73d1"
         },
         {
           "path": "requirements-dev.txt",
-          "sha256": "1c447203d2002e83435a68aaa88a39f78054cd93255a1bc91e66cd192fe33658"
+          "sha256": "a4b83675fa74dc2a6587831bf09a8f19be999ab7f015ef3dd45f93ee6371af00"
         },
         {
           "path": "requirements-runtime.txt",
-          "sha256": "5c537d37a1f416e2b8bdcb1a08ba293f82cdea6d3650fb30595f326d326d46e1"
+          "sha256": "aec7782c09738928558e2a75f0cf6b67d59135dc7aaddfd8bb4e004035b05fb0"
         },
         {
           "path": "requirements/image-agent-web.in",
@@ -41,9 +41,9 @@
     },
     "image_agent": {
       "repository": "https://github.com/HST314/image_agent_mvp.git",
-      "revision": "8f26bda6eff4fa9c2c5b20498755b329ac7995b5",
-      "git_tree": "91589d58b1e2e9eae8a55e7e15b75d4118b3ab43",
-      "source_content_sha256": "0c6360f36db8a46ef0e009992feb026a069be62e18abf5d8a4e6f1cfedbbb978",
+      "revision": "779ba208bf7ea4800444b0f7dfd485e96a8acf32",
+      "git_tree": "90c69aff98b292e3015b1ff49cd3919782b05d29",
+      "source_content_sha256": "d0f1a2a85d200705fbad4c147be3339f868f172b857fce46970c586f2f2d444a",
       "dependency_lock_set_sha256": "e2f66966ed45fe0a1df6f6323f38875a9f5db4e5f4030aee7e74875765e5b17d",
       "runtime_dependency_tree_sha256": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
       "gate_result": {

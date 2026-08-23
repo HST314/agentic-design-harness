@@ -14,12 +14,20 @@ from harness.adapters.image import ImageAgentAdapter, image_dependency_pythonpat
 from harness.adapters.image_delivery import normalize_image_delivery, stage_final_delivery
 from harness.adapters.image_workflow import map_advance_payload
 from harness.core.errors import HarnessError
+from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.assets import AssetService
-from harness.services.configuration import ConfigurationService
+from harness.services.task_config import TaskConfigService
 from harness.storage.atomic import digest_json
 from harness.storage.repository import utc_now
 from PIL import Image
-from runtime_helpers import build_service, create_task, envelope, instance, stage
+from runtime_helpers import (
+    build_config_snapshot,
+    build_service,
+    create_task,
+    envelope,
+    instance,
+    stage,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_SCHEMA = ROOT / "tests" / "fixtures" / "image-agent-contract" / "ImageTaskCard.schema.json"
@@ -49,8 +57,8 @@ class ImageAdapterTests(unittest.TestCase):
         self.store, self.commands = build_service(self.root)
         create_task(self.commands, "t_image_adapter")
         self.assets = AssetService(self.store)
-        self.configuration = ConfigurationService(self.store)
-        self.configuration.initialize()
+        self.task_config = TaskConfigService(self.store, build_config_snapshot())
+        self.image_config = ImageAgentConfigMaterializer(self.store, self.task_config)
         source_root = self.root / "image-source"
         (source_root / "schemas").mkdir(parents=True)
         shutil.copyfile(IMAGE_SCHEMA, source_root / "schemas" / "ImageTaskCard.schema.json")
@@ -58,7 +66,7 @@ class ImageAdapterTests(unittest.TestCase):
             self.store,
             self.store.contracts,
             self.assets,
-            self.configuration,
+            self.image_config,
             source_root=source_root,
             interpreter=Path(sys.executable),
             dependency_root=source_root,
@@ -439,135 +447,15 @@ class ImageAdapterTests(unittest.TestCase):
             self.adapter._check_compatibility("http://127.0.0.1:1")
         self.assertEqual(rejected.exception.code, "VALIDATION_ERROR")
 
-    def test_apply_config_hot_loads_policy_and_model_bindings(self) -> None:
-        calls = []
-
-        def request(_base_url, method, path, payload=None, **_kwargs):
-            calls.append((method, path, payload))
-            if path == "/api/settings/models" and method == "GET":
-                return {
-                    "library": {
-                        "reasoning": [
-                            {
-                                "id": "model_target",
-                                "provider": "fake",
-                                "model": "target-model",
-                            }
-                        ]
-                    },
-                    "states": [
-                        {
-                            "state": "intake_clarify",
-                            "group": "reasoning",
-                            "binding": {
-                                "provider": "fake",
-                                "model": "old-model",
-                            },
-                        }
-                    ],
-                }
-            return {"status": "ok"}
-
-        runtime_files = {
-            "runtime.yaml": {"offline_mode": True},
-            "model-config.yaml": {
-                "state_bindings": [
-                    {
-                        "state": "intake_clarify",
-                        "provider": "fake",
-                        "model": "target-model",
-                    }
-                ]
-            },
-        }
-        state = {"schema_version": "1.0"}
-        with (
-            patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
-            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
-            patch.object(self.adapter, "_check_compatibility"),
-            patch.object(self.configuration, "image_runtime_files", return_value=runtime_files),
-            patch.object(self.adapter, "_request", side_effect=request),
-            patch.object(self.adapter, "_state", return_value=state),
-            patch.object(self.adapter, "_write_state") as write_state,
-        ):
+    def test_apply_config_rejects_private_task_config_writeback(self) -> None:
+        with patch.object(self.adapter, "_request") as request:
             result = self.adapter.apply_config(
-                "i_image_adapter", {"config": {}}, 4, "config_apply_4"
+                "i_image_adapter", {"watermark": True}, 5, "config_apply_5"
             )
-
-        self.assertTrue(result.accepted)
-        self.assertEqual(result.details["updated_model_bindings"], ["intake_clarify"])
-        self.assertIn(
-            (
-                "POST",
-                "/api/settings/models",
-                {
-                    "bindings": {"intake_clarify": "model_target"},
-                    "actor": "harness_config_service",
-                    "confirmed": True,
-                },
-            ),
-            calls,
-        )
-        self.assertEqual(state["config_revision"], 4)
-        write_state.assert_called_once()
-
-    def test_apply_config_preflights_models_before_mutating_policy(self) -> None:
-        calls = []
-
-        def request(_base_url, method, path, payload=None, **_kwargs):
-            calls.append((method, path, payload))
-            if path == "/api/settings/models" and method == "GET":
-                return {
-                    "library": {"reasoning": []},
-                    "states": [
-                        {
-                            "state": "intake_clarify",
-                            "group": "reasoning",
-                            "binding": {
-                                "provider": "other",
-                                "model": "other-model",
-                            },
-                        }
-                    ],
-                }
-            return {}
-
-        with (
-            patch.object(
-                self.adapter,
-                "_task_id_for_instance",
-                return_value="t_image_adapter",
-            ),
-            patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
-            patch.object(self.adapter, "_check_compatibility"),
-            patch.object(self.adapter, "_request", side_effect=request),
-            patch.object(
-                self.adapter.configuration,
-                "image_runtime_files",
-                return_value={
-                    "runtime.yaml": {"workspace_max_iterations": 8},
-                    "model-config.yaml": {
-                        "state_bindings": [
-                            {
-                                "state": "intake_clarify",
-                                "provider": "fake",
-                                "model": "missing-model",
-                            }
-                        ]
-                    },
-                },
-            ),
-        ):
-            result = self.adapter.apply_config(
-                "i_image_adapter", {"config": {}}, 5, "config_apply_5"
-            )
-
         self.assertFalse(result.accepted)
-        self.assertTrue(result.details["restart_required"])
-        self.assertEqual(
-            calls,
-            [("GET", "/api/settings/models", None)],
-        )
+        self.assertFalse(result.details["restart_required"])
+        self.assertEqual(result.details["reason"], "TASK_CONFIG_IS_IMMUTABLE")
+        request.assert_not_called()
 
     def test_stop_cancels_only_an_active_image_job(self) -> None:
         state = {"job_id": "job_123"}

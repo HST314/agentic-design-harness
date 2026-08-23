@@ -23,6 +23,7 @@ from ..core.config import HarnessSettings, load_settings
 from ..core.errors import ErrorCatalog, HarnessError
 from ..core.logging import configure_logging, redact
 from ..domain.service import TaskCommandService
+from ..services.agent_config_materialization import ImageAgentConfigMaterializer
 from ..services.agent_workbench import AgentWorkbenchService
 from ..services.application import HarnessApplicationService
 from ..services.approvals import ApprovalInboxService
@@ -41,7 +42,6 @@ from ..services.task_config import TaskConfigService
 from ..services.task_intakes import TaskIntakeService
 from ..services.usage import UsageService
 from ..services.work_item_projections import WorkItemProjectionService
-from ..storage.atomic import read_json
 from ..storage.store import FileStateStore
 from .v1 import build_v1_router
 
@@ -56,6 +56,7 @@ class Container:
     assets: AssetService
     asset_understanding: AssetUnderstandingService
     task_config: TaskConfigService
+    image_agent_config: ImageAgentConfigMaterializer
     approvals: ApprovalInboxService
     credentials: CredentialPoolService
     configuration: ConfigurationService
@@ -105,6 +106,7 @@ def build_container(
     configuration = ConfigurationService(store)
     usage = UsageService(store)
     task_config = TaskConfigService(store, settings.config_snapshot)
+    image_agent_config = ImageAgentConfigMaterializer(store, task_config)
     model_clients = model_clients or OpenAICompatibleProviderAdapter()
     asset_understanding = AssetUnderstandingService(
         assets,
@@ -117,8 +119,7 @@ def build_container(
     supervisor = ProcessSupervisor(
         store,
         commands,
-        credentials,
-        configuration,
+        image_agent_config,
         host=settings.host,
     )
     adapters = AdapterRegistry(
@@ -127,7 +128,7 @@ def build_container(
                 store,
                 contracts,
                 assets,
-                configuration,
+                image_agent_config,
                 source_root=settings.image_agent_root,
                 interpreter=settings.image_agent_python,
                 dependency_root=settings.image_agent_dependency_root,
@@ -139,21 +140,6 @@ def build_container(
         ]
     )
 
-    def apply_live_config(task_id: str, instance_id: str, snapshot_path: Path) -> bool:
-        instance = store.instance.get(task_id, instance_id)
-        if instance is None:
-            return False
-        adapter = adapters.get(instance["agent_type"])
-        snapshot = read_json(snapshot_path)
-        result = adapter.apply_config(
-            instance_id,
-            snapshot,
-            snapshot["config_revision"],
-            f"config_{instance_id}_{snapshot['config_revision']}",
-        )
-        return result.accepted
-
-    configuration.apply_config = apply_live_config
     application = HarnessApplicationService(
         store,
         commands,
@@ -206,6 +192,7 @@ def build_container(
         assets=assets,
         asset_understanding=asset_understanding,
         task_config=task_config,
+        image_agent_config=image_agent_config,
         approvals=approvals,
         credentials=credentials,
         configuration=configuration,
@@ -274,14 +261,7 @@ def create_app(
         application_recoveries = container.application.recover()
         master_recoveries = container.master_threads.recover()
         adapter_recoveries = recover_adapters(container)
-        global_config = container.configuration.get_global()
-        if global_config is None:
-            raise HarnessError(
-                "VALIDATION_ERROR", "The global configuration did not initialize."
-            )
-        container.supervisor.start_monitoring(
-            global_config["supervisor"]["health_interval_seconds"]
-        )
+        container.supervisor.start_monitoring()
         logger.info(
             "control_plane_started",
             extra={

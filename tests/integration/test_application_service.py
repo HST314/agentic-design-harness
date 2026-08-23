@@ -20,16 +20,24 @@ from harness.adapters import (
     ValidationResult,
 )
 from harness.core.errors import HarnessError, SimulatedCrash
+from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.application import HarnessApplicationService
 from harness.services.approvals import ApprovalInboxService
 from harness.services.assets import AssetService
-from harness.services.configuration import ConfigurationService
 from harness.services.credentials import CredentialPoolService
 from harness.services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from harness.services.supervisor import ProcessSupervisor
+from harness.services.task_config import TaskConfigService
 from harness.storage.atomic import read_json
 from harness.storage.ndjson import recover_records
-from runtime_helpers import build_service, create_task, envelope, image_plan, ppt_plan
+from runtime_helpers import (
+    build_config_snapshot,
+    build_service,
+    create_task,
+    envelope,
+    image_plan,
+    ppt_plan,
+)
 
 CREDENTIAL_FIXTURE = (
     Path(__file__).resolve().parents[1] / "fixtures" / "p1" / "credential-pairs.json"
@@ -114,11 +122,9 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.credentials.configure_pool(pairs)
         self.assets = AssetService(self.store)
         self.approvals = ApprovalInboxService(self.store)
-        self.configuration = ConfigurationService(self.store)
-        self.configuration.initialize()
-        self.supervisor = ProcessSupervisor(
-            self.store, self.commands, self.credentials, self.configuration
-        )
+        self.task_config = TaskConfigService(self.store, build_config_snapshot())
+        self.image_config = ImageAgentConfigMaterializer(self.store, self.task_config)
+        self.supervisor = ProcessSupervisor(self.store, self.commands, self.image_config)
         self.fake_adapter = FakeImageAdapter()
         self.adapters = AdapterRegistry([self.fake_adapter, PptAgentContractAdapter()])
         self.application = HarnessApplicationService(

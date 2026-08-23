@@ -215,7 +215,7 @@ class AdvancedModelOverrides(StrictConfigModel):
 
 class ImageAgentConfig(StrictConfigModel):
     question_preference: Literal["proactive", "on_demand"]
-    candidate_concurrency: int = Field(ge=1, le=100)
+    candidate_concurrency: int = Field(ge=1, le=5)
     default_output_size: str
     response_format: Literal["url", "b64_json"]
     watermark: bool

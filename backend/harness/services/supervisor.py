@@ -22,8 +22,10 @@ from ..storage.locks import FileLock
 from ..storage.ndjson import append_record
 from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
-from .configuration import ConfigurationService
-from .credentials import CredentialPoolService, ResolvedCredential
+from .agent_config_materialization import (
+    ImageAgentConfigMaterializer,
+    ImageAgentLaunchConfiguration,
+)
 from .process_control import (
     process_group_contains,
     process_start_identity,
@@ -61,15 +63,13 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
         self,
         store: FileStateStore,
         commands: TaskCommandService,
-        credentials: CredentialPoolService,
-        configuration: ConfigurationService,
+        image_config: ImageAgentConfigMaterializer,
         *,
         host: str = "127.0.0.1",
     ) -> None:
         self.store = store
         self.commands = commands
-        self.credentials = credentials
-        self.configuration = configuration
+        self.image_config = image_config
         self.host = host
         self.process_root = store.layout.control_root / "processes"
         self.launch_root = self.process_root / "launches"
@@ -208,24 +208,22 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 )
             if not preserve_business_state:
                 self._validate_start_eligibility(task_id, instance)
-            config = self.configuration.create_instance_snapshot(task_id, instance_id)
-            resolved = self.credentials.resolve_for_instance(task_id, instance_id)
-            if config["config"]["image_provider"] != resolved.provider:
+            if instance["agent_type"] != "image":
                 raise HarnessError(
-                    "CREDENTIAL_PAIR_INVALID",
-                    "The instance Provider does not match its complete credential pair.",
-                    {"instance_id": instance_id},
+                    "ADAPTER_UNAVAILABLE",
+                    "Only Image Agent process materialization is available in this release.",
                 )
+            launch_config = self.image_config.resolve_launch(task_id, instance_id)
             runtime_identity = pinned_artifact.identity
             code_identity = runtime_identity.digest
             self._enforce_code_identity(task_id, instance_id, code_identity)
-            supervisor = config["config"]["supervisor"]
+            supervisor = launch_config.supervisor
             port = self.port_allocator.allocate(
                 task_id,
                 instance_id,
                 launch_id,
-                supervisor["port_range_start"],
-                supervisor["port_range_end"],
+                supervisor.port_range_start,
+                supervisor.port_range_end,
             )
             prepared = {
                 "schema_version": "1.0",
@@ -249,39 +247,43 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 "started_at": None,
                 "exit_code": None,
                 "health_failures": 0,
-                "startup_timeout_seconds": supervisor["startup_timeout_seconds"],
-                "config_revision": config["config_revision"],
+                "startup_timeout_seconds": supervisor.startup_timeout_seconds,
+                "shutdown_grace_seconds": supervisor.shutdown_grace_seconds,
+                "source_config_revision": launch_config.source_config_revision,
+                "config_hash": launch_config.config_hash,
             }
             atomic_write_json(record_path, prepared)
             if not preserve_business_state:
                 self._transition(task_id, instance_id, "STARTING", f"{launch_id}-starting")
             process: subprocess.Popen[Any] | None = None
-            secret_path: Path | None = None
+            launch_spec_path: Path | None = None
             try:
                 command = [
                     item.replace("{port}", str(port)).replace("{host}", self.host)
                     for item in spec.command
                 ]
                 command = pinned_artifact.execution_command(command)
-                reject_credential_arguments(command, resolved.api_key, resolved.base_url)
+                reject_credential_arguments(command, *launch_config.redaction_values)
                 environment = self._child_environment(
-                    task_id, instance_id, port, spec, resolved, config
+                    task_id, instance_id, port, spec, launch_config
                 )
                 instance_root = self.store.layout.initialize_instance(task_id, instance_id)
-                secret_path = instance_root / "runtime" / f".{launch_id}.launch-secret.json"
+                launch_spec_path = instance_root / "runtime" / f".{launch_id}.launch-spec.json"
                 stdout_path = instance_root / "logs" / "stdout.log"
                 stderr_path = instance_root / "logs" / "stderr.log"
                 handshake_path = instance_root / "runtime" / f"{launch_id}.child.json"
                 atomic_write_json(
-                    secret_path,
+                    launch_spec_path,
                     {
                         "command": command,
                         "cwd": str(instance_root),
                         "environment": environment,
+                        "secret_environment_names": sorted(
+                            launch_config.provider_environment
+                        ),
                         "stdout_path": str(stdout_path),
                         "stderr_path": str(stderr_path),
                         "handshake_path": str(handshake_path),
-                        "redactions": [resolved.api_key, resolved.base_url],
                         "inherited_fds": (
                             [pinned_artifact.source_descriptor]
                             if pinned_artifact.source_descriptor is not None
@@ -295,8 +297,9 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                     key: value for key, value in os.environ.items() if key in _INHERITED_ENVIRONMENT
                 }
                 wrapper_environment["PYTHONUNBUFFERED"] = "1"
+                wrapper_environment.update(launch_config.provider_environment)
                 process = subprocess.Popen(
-                    [sys.executable, str(wrapper), str(secret_path)],
+                    [sys.executable, str(wrapper), str(launch_spec_path)],
                     cwd=instance_root,
                     env=wrapper_environment,
                     stdin=subprocess.DEVNULL,
@@ -333,7 +336,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 atomic_write_json(record_path, prepared)
                 if crash_hook:
                     crash_hook("after_process_record")
-                deadline = time.monotonic() + supervisor["startup_timeout_seconds"]
+                deadline = time.monotonic() + supervisor.startup_timeout_seconds
                 while time.monotonic() < deadline:
                     if process.poll() is not None:
                         raise RuntimeError("process exited before readiness")
@@ -341,7 +344,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                         port, spec.readiness_path
                     ):
                         break
-                    time.sleep(min(0.05, supervisor["health_interval_seconds"]))
+                    time.sleep(0.05)
                 else:
                     raise TimeoutError("process readiness timed out")
                 prepared["state"] = "RUNNING"
@@ -350,20 +353,15 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 self._write_process_projection(prepared, "RUNNING")
                 if not preserve_business_state:
                     self._transition(task_id, instance_id, "RUNNING", f"{launch_id}-running")
-                self.configuration.mark_restarted(
-                    task_id,
-                    instance_id,
-                    applied_revision=config["config_revision"],
-                )
                 self._append_process_event(task_id, "PROCESS_READY", prepared)
                 return deepcopy(prepared)
             except Exception as exc:
                 if process is not None and process_start_identity(process.pid) is not None:
                     self._terminate_group(
-                        process.pid, float(supervisor["shutdown_grace_seconds"])
+                        process.pid, float(supervisor.shutdown_grace_seconds)
                     )
-                if secret_path is not None:
-                    secret_path.unlink(missing_ok=True)
+                if launch_spec_path is not None:
+                    launch_spec_path.unlink(missing_ok=True)
                 self.port_allocator.release(launch_id, port)
                 prepared.update(
                     {
@@ -417,8 +415,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
         instance_id: str,
         port: int,
         spec: ProcessSpec,
-        credential: ResolvedCredential,
-        config: dict[str, Any],
+        launch_config: ImageAgentLaunchConfiguration,
     ) -> dict[str, str]:
         environment = {
             key: value for key, value in os.environ.items() if key in _INHERITED_ENVIRONMENT
@@ -433,12 +430,11 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 "HARNESS_INSTANCE_ID": instance_id,
                 "HARNESS_INSTANCE_PORT": str(port),
                 "IMAGE_AGENT_PROJECTS_ROOT": str(instance_root / "work"),
-                "IMAGE_AGENT_RUNTIME_POLICY": str(instance_root / "runtime" / "runtime.yaml"),
-                "IMAGE_AGENT_MODEL_CONFIG": str(instance_root / "runtime" / "model-config.yaml"),
-                "HARNESS_CONFIG_REVISION": str(config["config_revision"]),
+                "IMAGE_AGENT_RUNTIME_POLICY": str(launch_config.runtime_path),
+                "IMAGE_AGENT_MODEL_CONFIG": str(launch_config.model_config_path),
+                "HARNESS_CONFIG_REVISION": launch_config.source_config_revision,
             }
         )
-        environment.update(credential.as_environment())
         return environment
 
     def _enforce_code_identity(
@@ -579,11 +575,6 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 "RUNNING",
                 f"{record['launch_id']}-running-recovered",
             )
-        self.configuration.mark_restarted(
-            record["task_id"],
-            record["instance_id"],
-            applied_revision=record.get("config_revision"),
-        )
         self._append_process_event(record["task_id"], "PROCESS_READY", record)
         return {"launch_id": record["launch_id"], "status": "RUNNING"}
 

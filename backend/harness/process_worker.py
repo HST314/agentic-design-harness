@@ -255,12 +255,20 @@ def main() -> int:
             spec = json.load(handle)
     finally:
         spec_path.unlink(missing_ok=True)
+    environment = dict(spec["environment"])
+    redactions: list[bytes] = []
+    for name in spec.get("secret_environment_names", ()):
+        value = os.environ.pop(name, None)
+        if value is None:
+            raise RuntimeError(f"required child secret environment variable is missing: {name}")
+        environment[name] = value
+        redactions.append(value.encode("utf-8"))
     inherited_fds = tuple(spec.get("inherited_fds", ())) if os.name != "nt" else ()
     if os.name == "nt":
         process = subprocess.Popen(
             spec["command"],
             cwd=spec["cwd"],
-            env=spec["environment"],
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -270,7 +278,7 @@ def main() -> int:
         process = subprocess.Popen(
             spec["command"],
             cwd=spec["cwd"],
-            env=spec["environment"],
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -299,7 +307,6 @@ def main() -> int:
     break_signal = getattr(signal, "SIGBREAK", None)
     if break_signal is not None:
         signal.signal(break_signal, forward_signal)
-    redactions = [item.encode("utf-8") for item in spec["redactions"]]
     assert process.stdout is not None
     assert process.stderr is not None
     threads = [

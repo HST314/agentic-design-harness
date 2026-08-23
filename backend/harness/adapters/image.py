@@ -17,8 +17,8 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
+from ..services.agent_config_materialization import ImageAgentConfigMaterializer
 from ..services.assets import AssetService
-from ..services.configuration import ConfigurationService
 from ..services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from ..storage.atomic import atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
@@ -90,7 +90,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         store: FileStateStore,
         contracts: ContractRegistry,
         assets: AssetService,
-        configuration: ConfigurationService,
+        image_config: ImageAgentConfigMaterializer,
         *,
         source_root: Path,
         interpreter: Path,
@@ -103,7 +103,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.store = store
         self.contracts = contracts
         self.assets = assets
-        self.configuration = configuration
+        self.image_config = image_config
         self.source_root = source_root
         self.interpreter = interpreter
         self.dependency_root = dependency_root
@@ -159,7 +159,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         instance_id = str(request.instance["instance_id"])
         task_id = str(request.instance["task_id"])
         instance_root = self.store.layout.initialize_instance(task_id, instance_id)
-        self.configuration.create_instance_snapshot(task_id, instance_id)
+        self.image_config.materialize(task_id, instance_id)
         image_card = self.map_task_card(request)
         runtime_root = instance_root / "runtime"
         atomic_write_json(runtime_root / "image-task-card.json", image_card, mode=0o640)
@@ -348,10 +348,6 @@ class ImageAgentAdapter(ImageObservationMixin):
         state = self._state(task_id, instance_id)
         base_url = self._base_url(task_id, instance_id)
         compatibility = self._check_compatibility(base_url)
-        runtime_config = read_json(
-            self.store.layout.initialize_instance(task_id, instance_id) / "runtime-config.json"
-        )
-        offline_mode = runtime_config["config"]["image_runtime_policy"]["offline_mode"]
         card = read_json(
             self.store.layout.initialize_instance(task_id, instance_id)
             / "runtime"
@@ -381,7 +377,7 @@ class ImageAgentAdapter(ImageObservationMixin):
                     {
                         "project_id": instance_id,
                         "task_card": card,
-                        "offline": offline_mode,
+                        "offline": False,
                         "defer_run": True,
                     },
                     expected_statuses=(201,),
@@ -521,97 +517,14 @@ class ImageAgentAdapter(ImageObservationMixin):
         operation_id: str,
     ) -> AdapterCommandResult:
         validate_identifier(operation_id, "operation_id")
-        task_id = self._task_id_for_instance(instance_id)
-        base_url = self._base_url(task_id, instance_id)
-        self._check_compatibility(base_url)
-        files = self.configuration.image_runtime_files(config)
-        policy = files["runtime.yaml"]
-        target_bindings = {
-            item["state"]: item for item in files["model-config.yaml"]["state_bindings"]
-        }
-        settings = self._request(base_url, "GET", "/api/settings/models")
-        updates: dict[str, str] = {}
-        if not isinstance(settings, dict):
-            self._protocol_error("Image Agent model settings response is malformed.")
-        library = settings.get("library")
-        states = settings.get("states")
-        if not isinstance(library, dict) or not isinstance(states, list):
-            self._protocol_error("Image Agent model settings response is malformed.")
-        for state in states:
-            if not isinstance(state, dict) or not isinstance(state.get("state"), str):
-                self._protocol_error("Image Agent model settings response is malformed.")
-            target = target_bindings.get(state["state"])
-            if target is None:
-                continue
-            current = state.get("binding")
-            if (
-                isinstance(current, dict)
-                and current.get("provider") == target["provider"]
-                and current.get("model") == target["model"]
-            ):
-                continue
-            group = state.get("group")
-            options = library.get(group) if isinstance(group, str) else None
-            if not isinstance(options, list):
-                self._protocol_error("Image Agent model library response is malformed.")
-            match = next(
-                (
-                    item
-                    for item in options
-                    if isinstance(item, dict)
-                    and item.get("provider") == target["provider"]
-                    and item.get("model") == target["model"]
-                    and isinstance(item.get("id"), str)
-                ),
-                None,
-            )
-            if match is None:
-                return AdapterCommandResult(
-                    accepted=False,
-                    operation_id=operation_id,
-                    details={
-                        "config_revision": revision,
-                        "restart_required": True,
-                        "reason": "MODEL_BINDING_NOT_HOT_APPLICABLE",
-                        "state": state["state"],
-                    },
-                )
-            updates[state["state"]] = match["id"]
-        # Complete the model preflight before the first mutation. A binding
-        # that cannot be hot-applied must not leave only the policy half of the
-        # requested configuration active.
-        self._request(
-            base_url,
-            "POST",
-            f"/api/projects/{instance_id}/policy",
-            {
-                "policy": policy,
-                "actor": "harness_config_service",
-                "confirmed": True,
-            },
-        )
-        if updates:
-            self._request(
-                base_url,
-                "POST",
-                "/api/settings/models",
-                {
-                    "bindings": updates,
-                    "actor": "harness_config_service",
-                    "confirmed": True,
-                },
-            )
-        state = self._state(task_id, instance_id)
-        state["config_revision"] = revision
-        state["config_operation_id"] = operation_id
-        self._write_state(task_id, instance_id, state)
+        validate_identifier(instance_id, "instance_id")
         return AdapterCommandResult(
-            accepted=True,
+            accepted=False,
             operation_id=operation_id,
             details={
                 "config_revision": revision,
                 "restart_required": False,
-                "updated_model_bindings": sorted(updates),
+                "reason": "TASK_CONFIG_IS_IMMUTABLE",
             },
         )
 
