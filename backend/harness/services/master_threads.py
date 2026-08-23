@@ -20,11 +20,15 @@ from ..storage.store import FileStateStore
 from .application import HarnessApplicationService
 from .assets import AssetService
 from .credentials import CredentialPoolService
-from .master_gateway import MasterGateway, MasterGatewayFailure, MasterRunObservation
+from .master_orchestrator import (
+    MasterOrchestratorFailure,
+    MasterPlanner,
+    MasterRunObservation,
+)
 
 
 class MasterThreadService:
-    """Keep one durable Master thread per task and never treat gateway state as truth."""
+    """Keep one durable Master thread per task around in-process orchestration."""
 
     def __init__(
         self,
@@ -35,7 +39,7 @@ class MasterThreadService:
         assets: AssetService,
         credentials: CredentialPoolService,
         adapters: AdapterRegistry,
-        gateway: MasterGateway,
+        orchestrator: MasterPlanner,
     ) -> None:
         self.store = store
         self.contracts = contracts
@@ -44,7 +48,7 @@ class MasterThreadService:
         self.assets = assets
         self.credentials = credentials
         self.adapters = adapters
-        self.gateway = gateway
+        self.orchestrator = orchestrator
         self.intent_root = store.layout.control_root / "master-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -723,15 +727,10 @@ class MasterThreadService:
             return thread
         try:
             if active["status"] == "SUBMITTING":
-                if not self.gateway.available:
-                    raise MasterGatewayFailure(
-                        "MASTER_UNAVAILABLE",
-                        "未配置真实 MasterGateway, 无法分析消息或生成计划。",
-                    )
                 message = self.store.master_message.get(task_id, active["message_id"])
                 if message is None:
                     raise HarnessError("TASK_NOT_FOUND", "The queued Master message is missing.")
-                run_id = self.gateway.submit_message(task_id, message)
+                run_id = self.orchestrator.submit_message(task_id, message)
                 now = utc_now()
                 thread = self._put_thread(
                     task_id,
@@ -745,18 +744,18 @@ class MasterThreadService:
                         },
                         "last_error": None,
                     },
-                    Actor("master", "master_gateway"),
+                    Actor("master", "master_orchestrator"),
                     "submit_master_run",
                 )
                 active = thread["active_run"]
             if active["status"] != "RUNNING" or active["run_id"] is None:
                 return thread
-            observation = self.gateway.observe_run(active["run_id"])
+            observation = self.orchestrator.observe_run(task_id, active["run_id"])
             if observation.status == "RUNNING":
                 return thread
             if observation.status == "NEEDS_INPUT":
                 content = (observation.message or "Master 需要补充信息后才能继续。").strip()
-                return self._append_gateway_message(
+                return self._append_master_message(
                     task_id,
                     thread,
                     active,
@@ -767,22 +766,24 @@ class MasterThreadService:
                     command="record_master_clarification",
                 )
             if observation.status == "FAILED":
-                raise MasterGatewayFailure(
+                raise MasterOrchestratorFailure(
                     "MASTER_RUN_FAILED",
                     (observation.message or "Master 计划运行失败, 请补充要求后重试。").strip(),
                 )
-            return self._store_gateway_plan(task_id, thread, active, observation)
-        except MasterGatewayFailure as exc:
-            return self._record_gateway_error(task_id, thread, active, exc.code, exc.message)
+            return self._store_orchestrated_plan(task_id, thread, active, observation)
+        except MasterOrchestratorFailure as exc:
+            return self._record_orchestrator_error(
+                task_id, thread, active, exc.code, exc.message
+            )
 
-    def _store_gateway_plan(
+    def _store_orchestrated_plan(
         self,
         task_id: str,
         thread: dict[str, Any],
         active: dict[str, Any],
         observation: MasterRunObservation,
     ) -> dict[str, Any]:
-        proposal = self.gateway.load_plan(active["run_id"])
+        proposal = self.orchestrator.load_plan(task_id, active["run_id"])
         expected_revision = thread["latest_proposal_revision"] + 1
         validate_plan_proposal(
             self.contracts,
@@ -790,7 +791,7 @@ class MasterThreadService:
             task_id=task_id,
             expected_revision=expected_revision,
         )
-        actor = Actor("master", "master_gateway")
+        actor = Actor("master", "master_orchestrator")
         existing = self.store.plan_proposal.get(task_id, proposal["proposal_id"])
         if existing is None:
             self.store.plan_proposal.put(
@@ -870,7 +871,7 @@ class MasterThreadService:
         self._apply_generated_title(task_id, observation.task_title, proposal["proposal_id"])
         return self.store.master_thread.get(task_id, task_id) or thread
 
-    def _append_gateway_message(
+    def _append_master_message(
         self,
         task_id: str,
         thread: dict[str, Any],
@@ -894,7 +895,7 @@ class MasterThreadService:
                 content=content,
                 asset_refs=[],
             )
-            self._put_message(message, Actor("master", "master_gateway"), command)
+            self._put_message(message, Actor("master", "master_orchestrator"), command)
             latest_sequence = message["sequence"]
         else:
             latest_sequence = max(thread["latest_sequence"], existing["sequence"])
@@ -910,11 +911,11 @@ class MasterThreadService:
                 },
                 "last_error": None,
             },
-            Actor("master", "master_gateway"),
+            Actor("master", "master_orchestrator"),
             command,
         )
 
-    def _record_gateway_error(
+    def _record_orchestrator_error(
         self,
         task_id: str,
         thread: dict[str, Any],
@@ -940,7 +941,9 @@ class MasterThreadService:
                 asset_refs=[],
             )
             self._put_message(
-                error_message, Actor("system", "master_gateway_boundary"), "record_master_error"
+                error_message,
+                Actor("system", "master_orchestrator_boundary"),
+                "record_master_error",
             )
             latest_sequence = error_message["sequence"]
         else:
@@ -957,7 +960,7 @@ class MasterThreadService:
                 ),
                 "last_error": {"code": code, "message": safe_message, "occurred_at": now},
             },
-            Actor("system", "master_gateway_boundary"),
+            Actor("system", "master_orchestrator_boundary"),
             "record_master_error",
         )
 
@@ -1005,7 +1008,7 @@ class MasterThreadService:
             CommandEnvelope(
                 idempotency_key=self._identifier("master_title", task_id, proposal_id),
                 actor_type="master",
-                actor_id="master_gateway",
+                actor_id="master_orchestrator",
                 expected_revision=self.store.task.revision(task_id, task_id),
             ),
         )
@@ -1097,7 +1100,8 @@ class MasterThreadService:
             "latest_proposal": deepcopy(latest),
             "task": deepcopy(task),
             "task_revision": self.store.task.revision(task_id, task_id),
-            "gateway_available": self.gateway.available,
+            # Kept until the designer-shell cleanup stage removes the old response field.
+            "gateway_available": True,
             "assets": assets,
         }
 

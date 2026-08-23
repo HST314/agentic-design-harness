@@ -2,25 +2,28 @@
 
 控制面默认位于 `http://127.0.0.1:18080`，业务 API 使用 `/api/v1`；OpenAPI 为 `/openapi.json`，交互文档为 `/docs`。不要直接修改 `control-data/`、任务工作区或 Image Agent 私有目录。
 
-## 两种 Master 接入方式
+## Master 执行方式
 
-- React Master 工作区通过 `MasterGateway` 提交用户消息、观察 run 并保存 PlanProposal。
+- React Master 工作区通过控制面 API 提交用户消息；`MasterOrchestrator` 在后端进程内执行模型调用、素材检索并保存 PlanProposal。
 - 受信编排方可直接调用 `/api/v1` 创建任务、提交计划和处理审批。
 
-未配置 `HARNESS_MASTER_GATEWAY_URL` 时，工作区返回 `MASTER_UNAVAILABLE`，不会伪造回复或计划。网关地址必须是不含凭据、查询串或片段的 HTTP(S) 服务根地址。
+Master 使用任务创建时固定的无密钥配置快照。Provider API Key 仅在调用时从当前进程配置解析，不写入任务快照、消息、计划、日志或事件。未加载有效的三文件配置时，Master 会明确失败，不会伪造回复或计划。
 
-## Master Gateway 契约
+## 进程内编排与素材工具
 
-Harness 在网关根地址后调用：
+Master 通过 Ark/OpenAI-compatible Chat Completions 客户端请求结构化输出。文本模型可以调用以下受限工具；所有结果均携带素材、页码、区块或区域定位信息：
 
-| 方法 | 路径 | 语义 |
+| 工具 | 语义 |
 | --- | --- | --- |
-| `POST` | `/v1/runs` | 提交 `{task_id, message}`，按 `message.message_id` 幂等，返回 `{run_id}` |
-| `GET` | `/v1/runs/{run_id}` | 返回 `running`、`needs_input`、`plan_ready` 或 `failed` |
-| `GET` | `/v1/runs/{run_id}/plan` | `plan_ready` 后返回计划提案 |
-| `POST` | `/v1/runs/{run_id}/cancel` | 取消仍在执行的 run |
+| `list_assets` | 列出输入素材的类型、页数、解析状态和摘要 |
+| `read_asset_blocks` | 按区块 ID 或连续页码读取带来源的文本块 |
+| `search_asset` | 在解析文本中检索并返回来源定位 |
+| `inspect_asset_region` | 让 VLM 检查图片或 PDF 页面中的归一化区域 |
+| `get_asset_warnings` | 返回加密、损坏、页数超限、扫描质量或截断警告 |
 
-每个主任务只有一个永久 Master 线程。Harness 在调用网关前持久化 `SUBMITTING`，重启后使用同一 message ID 恢复，因此网关必须实现请求幂等。计划必须包含闭合、无环且 ID 唯一的 stages、work_items 和 execution_cards；每个活动 WorkItem 恰好映射一个当前实例与任务卡。
+TXT、Markdown 和数字型 PDF 由确定性解析器处理；图片与扫描型 PDF 按 `runtime.yaml` 的 `document_processing.visual_analysis` 策略使用 VLM。坏文件、加密 PDF 和页数超限均返回可审计业务警告，不会静默跳过。
+
+每个主任务只有一个永久 Master 线程。控制面先持久化 `SUBMITTING`，进程内 run 由 `(task_id, message_id)` 确定并可安全重放；模型与 VLM 调用使用稳定的幂等键，并将 token、模型、Provider、请求 ID 和配置哈希写入用量审计。计划必须包含闭合、无环且 ID 唯一的 stages、work_items 和 execution_cards；每个活动 WorkItem 恰好映射一个当前实例与任务卡。
 
 ## 写操作信封
 
@@ -81,7 +84,7 @@ POST /api/v1/tasks/{task_id}/plan-proposals/{proposal_revision}/confirm
 预期错误符合 `contracts/v1/schemas/error-response.schema.json`。调用方按 `error.code` 分支：
 
 - `REVISION_CONFLICT`：重新读取并重新决策。
-- `MASTER_UNAVAILABLE`：配置真实网关，或明确使用受信直接 API 流程。
+- `MASTER_RUN_FAILED`：检查任务配置快照、素材警告和 Provider 调用错误后，以相同消息幂等恢复。
 - `MANAGED_BY_HARNESS`：不要绕过 Harness 直接向受管 Image Agent 创建任务。
 - `ADAPTER_UNAVAILABLE`：保留 PPT 的不可用状态，不伪造完成。
 - `ASSET_CORRUPTED`：停止引用并按 manifest/磁盘恢复流程处理。

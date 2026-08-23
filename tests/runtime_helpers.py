@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.contracts import ContractRegistry
+from harness.core.config_kernel import ConfigSnapshot
 from harness.domain.commands import CommandEnvelope
 from harness.domain.service import TaskCommandService
 from harness.storage.atomic import atomic_write_json
@@ -14,6 +15,104 @@ from harness.storage.store import FileStateStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS_ROOT = PROJECT_ROOT / "contracts" / "v1"
+
+
+def build_config_snapshot(
+    *,
+    base_url: str = "http://127.0.0.1:18000",
+    api_key: str = "test-provider-secret-value",
+    visual_analysis: str = "auto",
+    max_files_per_task: int = 20,
+    max_pdf_pages: int = 100,
+) -> ConfigSnapshot:
+    return ConfigSnapshot.model_validate(
+        {
+            "schema_version": "1.0",
+            "revision": "cfg_test_snapshot",
+            "providers": {
+                "schema_version": "1.0",
+                "providers": {"ark": {"base_url": base_url, "api_key": api_key}},
+            },
+            "model_list": {
+                "schema_version": "1.0",
+                "text_models": [
+                    {
+                        "id": "ark-text-primary",
+                        "label": "Test text model",
+                        "provider": "ark",
+                        "model": "text-model",
+                        "capabilities": ["structured_output", "tool_calling"],
+                        "parameters": {},
+                    }
+                ],
+                "vlm_models": [
+                    {
+                        "id": "ark-vlm-primary",
+                        "label": "Test vision model",
+                        "provider": "ark",
+                        "model": "vision-model",
+                        "capabilities": ["image_input", "structured_output"],
+                        "parameters": {},
+                    }
+                ],
+                "image_models": [
+                    {
+                        "id": "ark-image-primary",
+                        "label": "Test image model",
+                        "provider": "ark",
+                        "model": "image-model",
+                        "capabilities": ["text_to_image", "image_to_image"],
+                        "parameters": {},
+                    }
+                ],
+            },
+            "runtime": {
+                "schema_version": "1.0",
+                "server": {"host": "127.0.0.1", "port": 18080, "log_level": "INFO"},
+                "models": {
+                    "master": "ark-text-primary",
+                    "text_reasoning": "ark-text-primary",
+                    "vision_understanding": "ark-vlm-primary",
+                    "image_generation": "ark-image-primary",
+                },
+                "master": {
+                    "model_timeout_seconds": 10,
+                    "max_tool_rounds": 4,
+                    "max_clarification_questions": 3,
+                    "require_plan_confirmation": True,
+                },
+                "document_processing": {
+                    "max_files_per_task": max_files_per_task,
+                    "max_total_bytes": 209715200,
+                    "max_pdf_pages": max_pdf_pages,
+                    "text_chunk_chars": 6000,
+                    "visual_analysis": visual_analysis,
+                    "require_source_citations": True,
+                },
+                "image_agent": {
+                    "question_preference": "proactive",
+                    "candidate_concurrency": 5,
+                    "default_output_size": "2560x1440",
+                    "response_format": "url",
+                    "watermark": False,
+                    "advanced_model_overrides": {
+                        "intake_clarify": None,
+                        "confirmation_build": None,
+                        "initial_candidate_generation": None,
+                        "self_check_inspection": None,
+                        "self_check_rework": None,
+                        "human_prompt_rework": None,
+                    },
+                },
+                "supervisor": {
+                    "port_range_start": 18100,
+                    "port_range_end": 18199,
+                    "startup_timeout_seconds": 30,
+                    "shutdown_grace_seconds": 5,
+                },
+            },
+        }
+    )
 
 
 def build_store(root: Path) -> FileStateStore:

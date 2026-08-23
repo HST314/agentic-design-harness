@@ -20,8 +20,9 @@
 ```mermaid
 flowchart LR
     Human[人工操作员] --> Web[React 工作台]
-    Master[Master Gateway] --> API[FastAPI /api/v1]
     Web --> API
+    API[FastAPI /api/v1] --> Master[进程内 Master 编排]
+    Master --> Domain[应用服务与领域命令]
     API --> Domain[应用服务与领域命令]
     Domain --> Review[审批 / TaskCard / 交付门禁]
     Domain --> Store[(control-data + workspace)]

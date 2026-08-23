@@ -15,7 +15,7 @@
 | 前端“服务不可达” / `ECONNREFUSED` | 后端未 ready 或代理端口错误 | 依次检查 `/healthz`、`/readyz` 和 Vite 代理目标 |
 | 后端根地址返回 404 | `/` 没有页面路由 | 正常；打开 18180 Web 或 18080 `/docs` |
 | `writer lease` | 两个 Harness 共用 `control_root` | 只保留一个进程，或使用互不重叠的数据根目录 |
-| `MASTER_UNAVAILABLE` | 未配置真实 Master Gateway | 设置并重启，或使用明确的受信 API 流程 |
+| `MASTER_RUN_FAILED` | 配置快照、素材解析、模型结构化输出或 Provider 调用失败 | 检查事件中的稳定错误、素材 warning 和三文件配置后，使用同一消息幂等重试 |
 | `MANAGED_BY_HARNESS` | 直接向受管 Image Agent 创建工程 | 回到 Master/计划页创建并确认 TaskCard |
 | `REVISION_CONFLICT` | 页面或调用方持有旧 revision | 重新读取、重新审阅、使用新幂等键提交 |
 | `ASSET_CORRUPTED` | MIME、大小、SHA 或文件身份变化 | 停止发布，检查磁盘和来源，恢复可信备份或重新生成候选 |
@@ -74,7 +74,7 @@ health 成功但 ready 失败时，检查配置路径、契约目录、状态目
 
 ## Master、TaskCard 与受管实例
 
-- Master run 长时间 `SUBMITTING`：检查 Gateway 可达性和 `message_id` 幂等实现；不要创建第二个永久线程。
+- Master run 长时间 `SUBMITTING`：检查任务配置快照、素材 warning、Provider 错误与对应持久化 run；使用原 `message_id` 恢复，不要创建第二个永久线程。
 - 计划确认冲突：重新读取最新 proposal、task 和所有 card revisions；旧提案已 `SUPERSEDED` 时不可启动。
 - Image Agent 页面没有新建表单：这是受管模式的正确行为。任务必须从主系统创建。
 - UI link 被拒绝或 frame blocked：检查实例是否为当前 WorkItem、Agent 是否 ready，以及返回头 `X-Frame-Options`/CSP；不要把任意 URL 直接塞给 iframe。

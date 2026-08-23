@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/asset-understanding.schema.json",
+  "title": "AssetUnderstanding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "asset_id",
+    "source_sha256",
+    "status",
+    "media_type",
+    "page_count",
+    "summary",
+    "blocks",
+    "warnings",
+    "parser_version",
+    "model_config_hash",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {"$ref": "common.schema.json#/$defs/schemaVersion"},
+    "asset_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"type": "string", "enum": ["READY", "FAILED"]},
+    "media_type": {
+      "type": "string",
+      "enum": [
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "text/markdown",
+        "text/plain"
+      ]
+    },
+    "page_count": {
+      "oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]
+    },
+    "summary": {"type": "string", "maxLength": 4000},
+    "blocks": {
+      "type": "array",
+      "maxItems": 20000,
+      "items": {"$ref": "#/$defs/block"}
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {"$ref": "#/$defs/warning"}
+    },
+    "parser_version": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+    "model_config_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+  },
+  "$defs": {
+    "bbox": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "array",
+          "prefixItems": [
+            {"type": "number", "minimum": 0, "maximum": 1},
+            {"type": "number", "minimum": 0, "maximum": 1},
+            {"type": "number", "minimum": 0, "maximum": 1},
+            {"type": "number", "minimum": 0, "maximum": 1}
+          ],
+          "minItems": 4,
+          "maxItems": 4
+        }
+      ]
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "block_id",
+        "page",
+        "kind",
+        "text",
+        "bbox",
+        "extraction_method",
+        "confidence"
+      ],
+      "properties": {
+        "block_id": {"$ref": "common.schema.json#/$defs/identifier"},
+        "page": {
+          "oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["heading", "paragraph", "table", "image_description"]
+        },
+        "text": {"type": "string", "minLength": 1, "maxLength": 1000000},
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "extraction_method": {
+          "type": "string",
+          "enum": ["utf8", "embedded_text", "vlm"]
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "page"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "page": {
+          "oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]
+        }
+      }
+    }
+  }
+}
