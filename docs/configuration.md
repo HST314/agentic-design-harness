@@ -14,9 +14,10 @@
 | `HARNESS_WORKSPACE_ROOT` | `workspace` | 任务输入、私有输出与共享资产 |
 | `HARNESS_IMAGE_AGENT_PATH_MODE` | `embedded_only` | Image Agent 路径模式；P6 后默认只接受内嵌源码 |
 | `HARNESS_DELIVERY_BUNDLE_MIGRATION_MODE` | `bundle_only` | 交付数据写入模式；P6 后默认只写 Bundle |
-| `HARNESS_MASTER_GATEWAY_URL` | 未配置 | Master Gateway 的 HTTP(S) 服务根地址 |
 
 配置文件与相对目录都从仓库根目录解析。日常开发优先使用 `scripts/dev.py`，它会显式选择内嵌 Image Agent 和项目虚拟环境。
+
+Master 不依赖外部 Gateway。进程启动时从仓库根目录的 `provider.yaml`、`model_list.yaml`、`runtime.yaml` 与 `.env` 加载 Provider、模型和运行策略；任务首次执行时固定无密钥快照，后续模型调用只在内存中解析对应 API Key。
 
 P6 已移除“内嵌目录缺失时自动查找相邻旧仓库”的隐式回退。紧急路径回滚必须同时显式设置 `HARNESS_IMAGE_AGENT_PATH_MODE=external_only` 和一个通过 release lock 校验的 `HARNESS_IMAGE_AGENT_ROOT`；只设置模式会失败关闭。交付写入可在受控回滚窗口显式设为 `legacy_only`，但既有 Bundle 候选、AssetManifest 与 BundleManifest 必须保持只读可见。
 

@@ -36,6 +36,14 @@ _SENSITIVE_PARAMETER = re.compile(
     r"(^|[_-])(api[_-]?)?(key|token|secret|password|url|endpoint)($|[_-])",
     re.IGNORECASE,
 )
+_RESERVED_MODEL_PARAMETERS = {
+    "messages",
+    "model",
+    "response_format",
+    "stream",
+    "tool_choice",
+    "tools",
+}
 
 Capability = Literal[
     "structured_output",
@@ -139,6 +147,11 @@ class ModelDefinition(StrictConfigModel):
             raise ValueError(
                 "must not contain secret, credential, URL, or endpoint fields: "
                 + ", ".join(rejected)
+            )
+        reserved = sorted(set(value) & _RESERVED_MODEL_PARAMETERS)
+        if reserved:
+            raise ValueError(
+                "must not override request-owned fields: " + ", ".join(reserved)
             )
         return MappingProxyType(dict(value))
 

@@ -2,6 +2,7 @@ fastapi==0.141.1
 jsonschema==4.26.0
 Pillow==12.3.0
 pydantic==2.10.4
+pypdfium2==5.13.0
 python-multipart==0.0.32
 PyYAML==6.0.2
 colorama==0.4.6 ; platform_system == "Windows"

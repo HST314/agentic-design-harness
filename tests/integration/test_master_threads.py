@@ -11,15 +11,13 @@ from harness.api.app import create_app
 from harness.core.config import HarnessSettings
 from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
-from harness.services.master_gateway import MasterRunObservation
+from harness.services.master_orchestrator import MasterRunObservation
 from harness.storage.atomic import atomic_write_json, read_json
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-class RecordingGateway:
-    available = True
-
+class RecordingOrchestrator:
     def __init__(self) -> None:
         self.runs: dict[str, dict[str, Any]] = {}
         self.revision = 0
@@ -30,14 +28,16 @@ class RecordingGateway:
         self.runs[run_id] = {"task_id": task_id, "message": deepcopy(message)}
         return run_id
 
-    def observe_run(self, run_id: str) -> MasterRunObservation:
+    def observe_run(self, task_id: str, run_id: str) -> MasterRunObservation:
+        self._assert_owner(task_id, run_id)
         return MasterRunObservation(
             "PLAN_READY",
             f"计划 r{self._revision(run_id)} 已生成, 请确认。",
             "秋季发布会主视觉",
         )
 
-    def load_plan(self, run_id: str) -> dict[str, Any]:
+    def load_plan(self, task_id: str, run_id: str) -> dict[str, Any]:
+        self._assert_owner(task_id, run_id)
         run = self.runs[run_id]
         revision = self._revision(run_id)
         task_id = run["task_id"]
@@ -106,8 +106,9 @@ class RecordingGateway:
             "confirmed_at": None,
         }
 
-    def cancel_run(self, run_id: str) -> dict[str, Any]:
-        return {"run_id": run_id, "cancelled": True}
+    def _assert_owner(self, task_id: str, run_id: str) -> None:
+        if self.runs[run_id]["task_id"] != task_id:
+            raise AssertionError("run belongs to another task")
 
     @staticmethod
     def _revision(run_id: str) -> int:
@@ -149,9 +150,9 @@ class MasterThreadApiTests(unittest.TestCase):
     def test_revisioned_thread_adjustment_and_manual_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
-            gateway = RecordingGateway()
+            orchestrator = RecordingOrchestrator()
             application = RecordingApplication()
-            app.state.container.master_threads.gateway = gateway
+            app.state.container.master_threads.orchestrator = orchestrator
             app.state.container.master_threads.application = application
             app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
@@ -219,7 +220,7 @@ class MasterThreadApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
             application = RecordingApplication()
-            app.state.container.master_threads.gateway = RecordingGateway()
+            app.state.container.master_threads.orchestrator = RecordingOrchestrator()
             app.state.container.master_threads.application = application
             app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
@@ -301,7 +302,7 @@ class MasterThreadApiTests(unittest.TestCase):
     def test_task_card_edit_revalidates_secrets_manifests_and_delivery_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
-            app.state.container.master_threads.gateway = RecordingGateway()
+            app.state.container.master_threads.orchestrator = RecordingOrchestrator()
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "manual")
                 session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
@@ -356,7 +357,7 @@ class MasterThreadApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
             application = RecordingApplication()
-            app.state.container.master_threads.gateway = RecordingGateway()
+            app.state.container.master_threads.orchestrator = RecordingOrchestrator()
             app.state.container.master_threads.application = application
             app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
@@ -426,7 +427,7 @@ class MasterThreadApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
             application = RecordingApplication()
-            app.state.container.master_threads.gateway = RecordingGateway()
+            app.state.container.master_threads.orchestrator = RecordingOrchestrator()
             app.state.container.master_threads.application = application
             app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:
@@ -463,7 +464,7 @@ class MasterThreadApiTests(unittest.TestCase):
     def test_recovery_aborts_r1_after_a_persisted_intent_is_superseded_by_r2(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
-            app.state.container.master_threads.gateway = RecordingGateway()
+            app.state.container.master_threads.orchestrator = RecordingOrchestrator()
             app.state.container.master_threads.application = (
                 InterruptedBeforePlanSaveApplication()
             )
@@ -521,22 +522,22 @@ class MasterThreadApiTests(unittest.TestCase):
                 )
                 self.assertEqual(service.recover(), [])
 
-    def test_unconfigured_gateway_persists_a_truthful_error(self) -> None:
+    def test_direct_test_settings_without_deployment_snapshot_fail_truthfully(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
             with TestClient(app) as client:
                 task_id = self._create_submit(client, "manual")
                 session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
-                self.assertFalse(session["gateway_available"])
-                self.assertEqual(session["thread"]["last_error"]["code"], "MASTER_UNAVAILABLE")
+                self.assertTrue(session["gateway_available"])
+                self.assertEqual(session["thread"]["last_error"]["code"], "MASTER_RUN_FAILED")
                 self.assertIsNone(session["latest_proposal"])
                 self.assertEqual([item["role"] for item in session["messages"]], ["user", "system"])
 
     def test_startup_recovery_resumes_a_partial_master_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
-            gateway = RecordingGateway()
-            app.state.container.master_threads.gateway = gateway
+            orchestrator = RecordingOrchestrator()
+            app.state.container.master_threads.orchestrator = orchestrator
             app.state.container.master_threads.application = InterruptedApplication()
             app.state.container.master_threads.credentials = EnabledCredentials()
             with TestClient(app) as client:

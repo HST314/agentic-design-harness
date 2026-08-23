@@ -26,14 +26,18 @@ from ..domain.service import TaskCommandService
 from ..services.agent_workbench import AgentWorkbenchService
 from ..services.application import HarnessApplicationService
 from ..services.approvals import ApprovalInboxService
+from ..services.asset_tools import AssetToolRegistry
+from ..services.asset_understanding import AssetUnderstandingService
 from ..services.assets import AssetService
 from ..services.configuration import ConfigurationService
 from ..services.credentials import CredentialPoolService
-from ..services.master_gateway import HttpMasterGateway, UnavailableMasterGateway
+from ..services.master_orchestrator import MasterOrchestrator
 from ..services.master_threads import MasterThreadService
+from ..services.model_clients import ModelClientFactory, OpenAICompatibleProviderAdapter
 from ..services.retry_budget import RetryBudgetService
 from ..services.settings_diagnostics import SettingsDiagnosticsService
 from ..services.supervisor import ProcessSupervisor
+from ..services.task_config import TaskConfigService
 from ..services.task_intakes import TaskIntakeService
 from ..services.usage import UsageService
 from ..services.work_item_projections import WorkItemProjectionService
@@ -50,6 +54,8 @@ class Container:
     store: FileStateStore
     commands: TaskCommandService
     assets: AssetService
+    asset_understanding: AssetUnderstandingService
+    task_config: TaskConfigService
     approvals: ApprovalInboxService
     credentials: CredentialPoolService
     configuration: ConfigurationService
@@ -70,7 +76,11 @@ class ContractValidationRequest(BaseModel):
     payload: dict[str, Any]
 
 
-def build_container(settings: HarnessSettings) -> Container:
+def build_container(
+    settings: HarnessSettings,
+    *,
+    model_clients: ModelClientFactory | None = None,
+) -> Container:
     image_release_lock = load_image_agent_lock(settings.image_agent_lock_path)
     if (
         settings.image_agent_revision is not None
@@ -94,6 +104,15 @@ def build_container(settings: HarnessSettings) -> Container:
     credentials = CredentialPoolService(store)
     configuration = ConfigurationService(store)
     usage = UsageService(store)
+    task_config = TaskConfigService(store, settings.config_snapshot)
+    model_clients = model_clients or OpenAICompatibleProviderAdapter()
+    asset_understanding = AssetUnderstandingService(
+        assets,
+        task_config,
+        model_clients,
+        usage,
+    )
+    asset_tools = AssetToolRegistry(assets, asset_understanding)
     retry_budgets = RetryBudgetService(store, approvals)
     supervisor = ProcessSupervisor(
         store,
@@ -147,13 +166,13 @@ def build_container(settings: HarnessSettings) -> Container:
         settings.delivery_bundle_write_targets,
     )
     task_intakes = TaskIntakeService(store, commands, assets)
-    master_gateway = (
-        HttpMasterGateway(
-            settings.master_gateway_url,
-            timeout_seconds=settings.master_gateway_timeout_seconds,
-        )
-        if settings.master_gateway_url
-        else UnavailableMasterGateway()
+    master_orchestrator = MasterOrchestrator(
+        store,
+        contracts,
+        task_config,
+        model_clients,
+        asset_tools,
+        usage,
     )
     master_threads = MasterThreadService(
         store,
@@ -163,7 +182,7 @@ def build_container(settings: HarnessSettings) -> Container:
         assets,
         credentials,
         adapters,
-        master_gateway,
+        master_orchestrator,
     )
     work_items = WorkItemProjectionService(
         store,
@@ -185,6 +204,8 @@ def build_container(settings: HarnessSettings) -> Container:
         store=store,
         commands=commands,
         assets=assets,
+        asset_understanding=asset_understanding,
+        task_config=task_config,
         approvals=approvals,
         credentials=credentials,
         configuration=configuration,
@@ -229,11 +250,15 @@ def recover_adapters(container: Container) -> list[dict[str, Any]]:
     return recovered
 
 
-def create_app(settings: HarnessSettings | None = None) -> FastAPI:
+def create_app(
+    settings: HarnessSettings | None = None,
+    *,
+    model_clients: ModelClientFactory | None = None,
+) -> FastAPI:
     project_root = Path(__file__).resolve().parents[3]
     resolved = settings or load_settings(project_root)
     configure_logging(resolved.log_level)
-    container = build_container(resolved)
+    container = build_container(resolved, model_clients=model_clients)
     logger = logging.getLogger("harness.lifecycle")
 
     @asynccontextmanager

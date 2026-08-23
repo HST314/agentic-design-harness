@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -15,6 +16,7 @@ from ..storage.layout import validate_identifier
 from ..storage.locks import FileLock
 from ..storage.repository import utc_now
 from ..storage.store import FileStateStore
+from .model_clients import ModelResult
 
 _TERMINAL_INSTANCE_STATUSES = {
     "SUCCEEDED",
@@ -119,6 +121,104 @@ class UsageService:
             "cursor": state["instances"][instance_id]["cursor"],
         }
 
+    def record_master_model_call(self, task_id: str, result: ModelResult) -> dict[str, Any]:
+        """Append one secret-free model usage fact for the in-process Master."""
+
+        instance_id = self.master_instance_id(task_id)
+        event_digest = hashlib.sha256(
+            f"{task_id}\0{result.request_id}\0{result.call_type}".encode()
+        ).hexdigest()
+        event_id = f"usage_{event_digest[:32]}"
+        existing = next(
+            (
+                item
+                for item in self.store.usage.list(task_id)
+                if item.get("event_id") == event_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return self.ingest_master(task_id, [existing])
+        usage = result.usage
+        event = {
+            "schema_version": "1.1",
+            "event_id": event_id,
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "agent_type": "master",
+            "request_id": result.request_id,
+            "provider_request_id": result.provider_request_id,
+            "provider": result.provider,
+            "model": result.model,
+            "call_type": result.call_type,
+            "usage_basis": "tokens",
+            "credential_pair_ref": None,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cached_input_tokens": usage.cached_input_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+            "total_tokens": usage.total_tokens,
+            "billing_units": [],
+            "raw_usage": deepcopy(usage.raw_usage),
+            "occurred_at": utc_now(),
+        }
+        return self.ingest_master(task_id, [event])
+
+    def ingest_master(
+        self, task_id: str, events: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        validate_identifier(task_id, "task_id")
+        if self.store.task.get(task_id, task_id) is None:
+            raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
+        instance_id = self.master_instance_id(task_id)
+        lock_path = self.store.layout.control_root / "locks" / f"usage-{task_id}.lock"
+        with FileLock(lock_path, self.store.lock_timeout_seconds):
+            existing = {item["event_id"]: item for item in self.store.usage.list(task_id)}
+            staged: dict[str, dict[str, Any]] = {}
+            duplicates = 0
+            for raw in events:
+                event = dict(deepcopy(raw))
+                self._validate_master_event(task_id, instance_id, event)
+                previous = staged.get(event["event_id"], existing.get(event["event_id"]))
+                if previous is not None:
+                    if digest_json(previous) != digest_json(event):
+                        raise HarnessError(
+                            "IDEMPOTENCY_CONFLICT",
+                            "A usage event id was reused with different accounting data.",
+                            {"event_id": event["event_id"]},
+                        )
+                    duplicates += 1
+                    continue
+                staged[event["event_id"]] = event
+            for event in staged.values():
+                if not self.store.usage.append(task_id, event):
+                    raise RuntimeError("Master usage disappeared during the ingestion lock")
+                existing[event["event_id"]] = event
+            state = self._read_state(task_id)
+            master_events = [
+                item for item in existing.values() if item["instance_id"] == instance_id
+            ]
+            state["instances"][instance_id] = {
+                "instance_id": instance_id,
+                "agent_type": "master",
+                "status": "PARTIAL",
+                "event_count": len(master_events),
+                "cursor": master_events[-1]["event_id"] if master_events else None,
+                "last_checked_at": utc_now(),
+                "source": "internal",
+            }
+            state["updated_at"] = utc_now()
+            atomic_write_json(self._state_path(task_id), state)
+        return {
+            "schema_version": "1.0",
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "accepted": len(staged),
+            "duplicates": duplicates,
+            "completeness": "PARTIAL",
+            "cursor": state["instances"][instance_id]["cursor"],
+        }
+
     def collect_instance(
         self, task_id: str, instance_id: str, adapter: AgentAdapter
     ) -> dict[str, Any]:
@@ -157,6 +257,17 @@ class UsageService:
         state = self._read_state(task_id)
         plan = self.store.plan.get(task_id, task_id)
         planned_instances = [] if plan is None else plan["instances"]
+        master_id = self.master_instance_id(task_id)
+        if master_id in state["instances"]:
+            planned_instances = [
+                *planned_instances,
+                {
+                    "instance_id": master_id,
+                    "agent_type": "master",
+                    "status": "RUNNING",
+                    "credential_pair_ref": None,
+                },
+            ]
         if instance_id is not None:
             planned_instances = [
                 item for item in planned_instances if item["instance_id"] == instance_id
@@ -249,6 +360,8 @@ class UsageService:
                     or entry.get("cursor") is None
                 ):
                     instance = self.store.instance.get(task_id, instance_id)
+                    if instance is None and instance_id == self.master_instance_id(task_id):
+                        instance = {"instance_id": instance_id, "agent_type": "master"}
                     if instance is None:
                         raise HarnessError(
                             "VALIDATION_ERROR",
@@ -307,11 +420,51 @@ class UsageService:
         if event["reasoning_tokens"] > event["output_tokens"]:
             raise HarnessError("VALIDATION_ERROR", "Reasoning usage exceeds total output usage.")
 
+    def _validate_master_event(
+        self, task_id: str, instance_id: str, event: dict[str, Any]
+    ) -> None:
+        self.store.contracts.validate("token-usage-event", event)
+        if (
+            event["task_id"] != task_id
+            or event["instance_id"] != instance_id
+            or event["agent_type"] != "master"
+            or event["credential_pair_ref"] is not None
+        ):
+            raise HarnessError("VALIDATION_ERROR", "The Master usage owner is invalid.")
+        if event["call_type"] not in {
+            "reasoning_llm",
+            "vision_language_model",
+        }:
+            raise HarnessError("VALIDATION_ERROR", "The Master usage call type is invalid.")
+        if event["total_tokens"] != event["input_tokens"] + event["output_tokens"]:
+            raise HarnessError(
+                "VALIDATION_ERROR", "Usage total_tokens must equal input plus output."
+            )
+        if event["cached_input_tokens"] > event["input_tokens"]:
+            raise HarnessError("VALIDATION_ERROR", "Cached input usage exceeds total input usage.")
+        if event["reasoning_tokens"] > event["output_tokens"]:
+            raise HarnessError("VALIDATION_ERROR", "Reasoning usage exceeds total output usage.")
+
     def _instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
+        if instance_id == self.master_instance_id(task_id):
+            task = self.store.task.get(task_id, task_id)
+            if task is not None:
+                return {
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "agent_type": "master",
+                    "credential_pair_ref": None,
+                    "status": "RUNNING",
+                }
         instance = self.store.instance.get(task_id, instance_id)
         if instance is None or instance.get("task_id") != task_id:
             raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
         return instance
+
+    @staticmethod
+    def master_instance_id(task_id: str) -> str:
+        digest = hashlib.sha256(task_id.encode()).hexdigest()
+        return f"master_{digest[:24]}"
 
     def _state_path(self, task_id: str) -> Path:
         return self.store.layout.control_root / "tasks" / task_id / "usage-state.json"

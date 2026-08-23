@@ -6,7 +6,6 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -37,8 +36,6 @@ class HarnessSettings(BaseModel):
         default=None,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
     )
-    master_gateway_url: str | None = None
-    master_gateway_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     config_snapshot: ConfigSnapshot | None = Field(default=None, repr=False)
 
     @field_validator("log_level")
@@ -48,23 +45,6 @@ class HarnessSettings(BaseModel):
         if normalized not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("unsupported log level")
         return normalized
-
-    @field_validator("master_gateway_url")
-    @classmethod
-    def validate_master_gateway_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("master_gateway_url must be an HTTP(S) service root")
-        return value.rstrip("/")
 
     def resolve_from(self, project_root: Path) -> HarnessSettings:
         updates: dict[str, Any] = {}

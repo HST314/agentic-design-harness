@@ -16,7 +16,7 @@ def validate_plan_proposal(
     task_id: str,
     expected_revision: int,
 ) -> None:
-    """Validate gateway output before it becomes a durable planning fact."""
+    """Validate orchestrator output before it becomes a durable planning fact."""
 
     contracts.validate("plan-proposal", proposal)
     if proposal["task_id"] != task_id:

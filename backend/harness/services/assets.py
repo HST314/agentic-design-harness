@@ -751,6 +751,17 @@ class AssetService(AssetRecoveryMixin):
             raise
         return deepcopy(manifest)
 
+    def open_verified_asset(self, task_id: str, asset_id: str) -> OpenedCommittedAsset:
+        """Open the exact committed inode after live manifest verification."""
+
+        manifest = self.verify_asset(task_id, asset_id)
+        workspace = self.store.layout.workspace_root / "tasks" / task_id
+        return open_committed_asset(
+            workspace,
+            manifest["relative_path"],
+            self._visible_asset_events(task_id),
+        )
+
     def list_files(self, task_id: str, group: str = "all") -> list[dict[str, Any]]:
         workspace = self.initialize_task_workspace(task_id)
         if group not in {"inputs", "shared", "instances", "all"}:
