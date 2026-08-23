@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
+import harness.storage.ndjson as ndjson
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.storage.atomic import atomic_write_json
 from harness.storage.ndjson import NdjsonCorruptionError, append_record, recover_records
@@ -242,6 +245,37 @@ class StateStoreRecoveryTests(unittest.TestCase):
         self.assertEqual(records, [{"event_id": "evt_one"}])
         self.assertEqual(warnings[0]["type"], "NDJSON_TAIL_TRUNCATED")
         self.assertTrue(path.read_bytes().endswith(b"\n"))
+
+    def test_recovery_waits_for_an_inflight_journal_append(self) -> None:
+        path = self.root / "events.ndjson"
+        complete_record = self.root / "complete-record.ndjson"
+        append_record(path, {"event_id": "evt_one"})
+        append_record(complete_record, {"event_id": "evt_two"})
+        second_line = complete_record.read_bytes()
+        split = len(second_line) // 2
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            with ndjson._journal_guard(path):
+                with path.open("ab") as handle:
+                    handle.write(second_line[:split])
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                future = executor.submit(recover_records, path)
+                time.sleep(0.02)
+                self.assertFalse(future.done())
+                with path.open("ab") as handle:
+                    handle.write(second_line[split:])
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            records = future.result(timeout=1)
+        finally:
+            executor.shutdown(wait=True)
+
+        self.assertEqual(
+            [record["event_id"] for record in records],
+            ["evt_one", "evt_two"],
+        )
 
     def test_interior_ndjson_corruption_is_fatal(self) -> None:
         path = self.root / "events.ndjson"
