@@ -5,10 +5,12 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.configuration import ConfigurationService, GlobalConfigBody
+from harness.storage.ndjson import recover_records
 from harness.storage.repository import Actor
 from runtime_helpers import build_service, create_task, envelope, image_plan
 
@@ -378,6 +380,53 @@ class ConfigurationServiceTests(unittest.TestCase):
         self.assertEqual(
             snapshot["config"]["image_runtime_policy"]["max_auto_questions"], 2
         )
+
+    def test_instance_snapshot_retries_a_transient_projection_lock_timeout(self) -> None:
+        retry_instance = deepcopy(self.store.instance.get("t_config", "i_image_2"))
+        retry_instance.update(
+            {
+                "instance_id": "i_retry",
+                "workspace_relpath": "instances/i_retry",
+                "task_card_relpath": "instances/i_retry/task-card.json",
+            }
+        )
+        self.store.instance.put(
+            "t_config",
+            "i_retry",
+            retry_instance,
+            expected_revision=0,
+            actor=self.actor,
+            command="test_retry_instance",
+            idempotency_key="test-retry-instance",
+        )
+        original_update = self.store.update_instance_fields
+        attempts = 0
+
+        def timeout_once(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise HarnessError(
+                    "REVISION_CONFLICT",
+                    "Timed out waiting for the state writer lock.",
+                    {"lock": "command-t_config.lock"},
+                )
+            return original_update(*args, **kwargs)
+
+        with patch.object(self.store, "update_instance_fields", side_effect=timeout_once):
+            snapshot = self.config.create_instance_snapshot("t_config", "i_retry")
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(snapshot["config_revision"], 1)
+        projected = self.store.instance.get("t_config", "i_retry")
+        self.assertEqual(projected["config_revision"], 1)
+        committed = [
+            event
+            for event in recover_records(self.config._task_events("t_config"))
+            if event.get("event_type") == "INSTANCE_CONFIG_COMMITTED"
+            and event.get("instance_id") == "i_retry"
+        ]
+        self.assertEqual(len(committed), 1)
 
 
 if __name__ == "__main__":

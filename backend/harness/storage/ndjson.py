@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from .atomic import canonical_json_bytes, digest_json, fsync_directory
@@ -15,29 +17,44 @@ class NdjsonCorruptionError(RuntimeError):
     pass
 
 
+# FileStateStore owns one writer lease per control root, so journal concurrency
+# inside that process is thread-level. Serialize appends with reads/repairs to
+# keep a reader from mistaking an in-flight append for a torn crash tail.
+_JOURNAL_LOCKS = tuple(RLock() for _ in range(64))
+
+
+@contextmanager
+def _journal_guard(path: Path) -> Iterator[None]:
+    normalized = path.absolute()
+    lock = _JOURNAL_LOCKS[hash(normalized) % len(_JOURNAL_LOCKS)]
+    with lock:
+        yield
+
+
 def _record_with_checksum(record: dict[str, Any]) -> dict[str, Any]:
     clean = {key: value for key, value in record.items() if key != "_record_checksum"}
     return {**clean, "_record_checksum": digest_json(clean)}
 
 
 def append_record(path: Path, record: dict[str, Any], mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    line = canonical_json_bytes(_record_with_checksum(record)) + b"\n"
-    descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, mode)
-    descriptor_open = True
-    try:
-        handle = os.fdopen(descriptor, "ab", closefd=True)
-        descriptor_open = False
-        with handle:
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(path, mode)
-        fsync_directory(path.parent)
-    except BaseException:
-        if descriptor_open:
-            os.close(descriptor)
-        raise
+    with _journal_guard(path):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        line = canonical_json_bytes(_record_with_checksum(record)) + b"\n"
+        descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, mode)
+        descriptor_open = True
+        try:
+            handle = os.fdopen(descriptor, "ab", closefd=True)
+            descriptor_open = False
+            with handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(path, mode)
+            fsync_directory(path.parent)
+        except BaseException:
+            if descriptor_open:
+                os.close(descriptor)
+            raise
 
 
 def _decode_verified(raw_line: bytes) -> dict[str, Any]:
@@ -53,6 +70,14 @@ def _decode_verified(raw_line: bytes) -> dict[str, Any]:
 def recover_records(
     path: Path,
     warning_sink: Callable[[dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    with _journal_guard(path):
+        return _recover_records(path, warning_sink)
+
+
+def _recover_records(
+    path: Path,
+    warning_sink: Callable[[dict[str, Any]], None] | None,
 ) -> list[dict[str, Any]]:
     if not path.exists():
         return []
