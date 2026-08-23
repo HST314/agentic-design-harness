@@ -33,6 +33,7 @@ from ..services.assets import AssetService
 from ..services.master_orchestrator import MasterOrchestrator
 from ..services.master_threads import MasterThreadService
 from ..services.model_clients import ModelClientFactory, OpenAICompatibleProviderAdapter
+from ..services.plan_proposals import PlanProposalValidationService
 from ..services.retry_budget import RetryBudgetService
 from ..services.supervisor import ProcessSupervisor
 from ..services.task_config import TaskConfigService
@@ -52,6 +53,7 @@ class Container:
     commands: TaskCommandService
     assets: AssetService
     asset_understanding: AssetUnderstandingService
+    plan_proposals: PlanProposalValidationService
     task_config: TaskConfigService
     image_agent_config: ImageAgentConfigMaterializer
     approvals: ApprovalInboxService
@@ -98,6 +100,11 @@ def build_container(
         model_clients,
         usage,
     )
+    plan_proposals = PlanProposalValidationService(
+        contracts,
+        task_config,
+        asset_understanding,
+    )
     asset_tools = AssetToolRegistry(assets, asset_understanding)
     retry_budgets = RetryBudgetService(store, approvals)
     supervisor = ProcessSupervisor(
@@ -135,21 +142,20 @@ def build_container(
     task_intakes = TaskIntakeService(store, commands, assets, task_config)
     master_orchestrator = MasterOrchestrator(
         store,
-        contracts,
         task_config,
         model_clients,
         asset_tools,
         usage,
+        plan_proposals,
     )
     master_threads = MasterThreadService(
         store,
-        contracts,
         commands,
         application,
         assets,
         adapters,
         master_orchestrator,
-        task_config,
+        plan_proposals,
     )
     work_items = WorkItemProjectionService(
         store,
@@ -167,6 +173,7 @@ def build_container(
         commands=commands,
         assets=assets,
         asset_understanding=asset_understanding,
+        plan_proposals=plan_proposals,
         task_config=task_config,
         image_agent_config=image_agent_config,
         approvals=approvals,

@@ -9,15 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
-from ..domain.master import validate_plan_proposal
 from ..storage.atomic import atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
 from ..storage.repository import utc_now
 from ..storage.store import FileStateStore
 from .asset_tools import AssetToolRegistry
 from .model_clients import ModelClientFactory, ModelClientFailure, ToolCall
+from .plan_proposals import PlanProposalValidationService
 from .task_config import TaskConfigService
 from .usage import UsageService
 
@@ -67,18 +66,18 @@ class MasterOrchestrator:
     def __init__(
         self,
         store: FileStateStore,
-        contracts: ContractRegistry,
         task_config: TaskConfigService,
         model_clients: ModelClientFactory,
         asset_tools: AssetToolRegistry,
         usage: UsageService,
+        plan_proposals: PlanProposalValidationService,
     ) -> None:
         self.store = store
-        self.contracts = contracts
         self.task_config = task_config
         self.model_clients = model_clients
         self.asset_tools = asset_tools
         self.usage = usage
+        self.plan_proposals = plan_proposals
 
     def submit_message(self, task_id: str, message: dict[str, Any]) -> str:
         message_id = message.get("message_id")
@@ -190,9 +189,6 @@ class MasterOrchestrator:
                 task_id,
                 output,
                 snapshot.runtime.master,
-                source_citations_required=(
-                    snapshot.runtime.document_processing.require_source_citations
-                ),
             )
             run.update(
                 {
@@ -257,9 +253,10 @@ class MasterOrchestrator:
             "You are the in-process Master planner. Clarify only when essential; otherwise "
             "produce a contract-valid PlanProposal with status PENDING_CONFIRMATION. Use only "
             "registered asset tools. Cite factual asset decisions in TaskCard instructions as "
-            "asset_id/page/block_id and keep input_assets on authoritative manifests. Never invent "
-            "asset contents, provider configuration, credentials, or supported Agent types. "
-            "Return exactly the requested structured response. Context: "
+            "asset_id/page/<page_number> or asset_id/block/<block_id>, and keep input_assets on "
+            "authoritative manifests. Never invent asset contents, provider configuration, "
+            "credentials, or supported Agent types. Return exactly the requested structured "
+            "response. Context: "
             + json.dumps(system_context, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
@@ -280,8 +277,6 @@ class MasterOrchestrator:
         task_id: str,
         output: dict[str, Any],
         master_config: Any,
-        *,
-        source_citations_required: bool,
     ) -> dict[str, Any]:
         if set(output) != {"status", "message", "task_title", "proposal"}:
             self._invalid_output("Master returned unexpected structured fields.")
@@ -319,12 +314,10 @@ class MasterOrchestrator:
                 self._invalid_output("A ready Master response requires a PlanProposal.")
             thread = self.store.master_thread.get(task_id, task_id)
             expected = 1 if thread is None else thread["latest_proposal_revision"] + 1
-            validate_plan_proposal(
-                self.contracts,
+            self.plan_proposals.validate_new(
+                task_id,
                 cast(dict[str, Any], proposal),
-                task_id=task_id,
                 expected_revision=expected,
-                source_citations_required=source_citations_required,
             )
         return {
             "status": status,

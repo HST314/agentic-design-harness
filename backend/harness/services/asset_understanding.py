@@ -117,6 +117,7 @@ class AssetUnderstandingService:
             )
         public_config = self.task_config.get_public(task_id)
         path = self._path(task_id, asset_id)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if path.exists():
             cached = read_json(path)
             if (
@@ -165,6 +166,36 @@ class AssetUnderstandingService:
         }
         self.assets.store.contracts.validate("asset-understanding", document)
         atomic_write_json(path, document, mode=0o640)
+        return deepcopy(document)
+
+    def load_persisted(self, task_id: str, asset_id: str) -> dict[str, Any]:
+        """Load a current durable understanding without creating or refreshing it."""
+
+        validate_identifier(task_id, "task_id")
+        validate_identifier(asset_id, "asset_id")
+        path = self._path(task_id, asset_id)
+        if not path.exists():
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "A cited asset has no persisted source understanding.",
+                {"asset_id": asset_id},
+            )
+        document = read_json(path)
+        self.assets.store.contracts.validate("asset-understanding", document)
+        manifest = self.assets.verify_asset(task_id, asset_id)
+        public_config = self.task_config.get_public(task_id)
+        if (
+            document["asset_id"] != asset_id
+            or document["status"] != "READY"
+            or document["source_sha256"] != manifest["sha256"]
+            or document["parser_version"] != PARSER_VERSION
+            or document["model_config_hash"] != public_config["config_hash"]
+        ):
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "A cited asset has no current persisted source understanding.",
+                {"asset_id": asset_id},
+            )
         return deepcopy(document)
 
     def inspect_region(
@@ -567,15 +598,14 @@ class AssetUnderstandingService:
         return normalized
 
     def _path(self, task_id: str, asset_id: str) -> Path:
-        path = (
+        return (
             self.assets.store.layout.workspace_root
             / "tasks"
             / task_id
             / "inputs"
             / "understanding"
+            / f"{asset_id}.json"
         )
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        return path / f"{asset_id}.json"
 
     @staticmethod
     def _content_error(code: str, message: str) -> NoReturn:
