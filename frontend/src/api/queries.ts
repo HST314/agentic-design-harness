@@ -83,15 +83,3 @@ export const deliveryBundlesQuery = (taskId: string) => queryOptions({
   refetchIntervalInBackground: false,
   retry: false,
 });
-
-export const settingsQuery = queryOptions({
-  queryKey: ["settings"],
-  queryFn: async ({ signal }: { signal: AbortSignal }) => {
-    const [globalConfig, keyPool] = await Promise.all([
-      api.globalConfig(signal),
-      api.keyPool(signal),
-    ]);
-    return { globalConfig, keyPool };
-  },
-  retry: false,
-});

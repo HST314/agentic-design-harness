@@ -181,7 +181,6 @@ def build_container(
     settings_diagnostics = SettingsDiagnosticsService(
         configuration,
         credentials,
-        settings.control_root,
     )
     return Container(
         settings=settings,

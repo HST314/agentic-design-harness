@@ -283,45 +283,6 @@ test.beforeEach(async ({ page }) => {
       }),
     });
   });
-  await page.route("**/api/v1/config/global", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        schema_version: "1.0",
-        config: {
-          revision: route.request().method() === "PUT" ? 4 : 3,
-          image_provider: "fake",
-          image_runtime_policy: { offline_mode: true },
-          image_model_config: { model_config_id: "ui_model", state_bindings: [] },
-          supervisor: { health_interval_seconds: 2 },
-        },
-      }),
-    });
-  });
-  await page.route("**/api/v1/key-pool", async (route) => {
-    const body = route.request().method() === "GET"
-      ? {
-          schema_version: "1.0",
-          items: [
-            {
-              credential_pair_id: "cred_ui",
-              provider: "fake",
-              key_id: "key_ui",
-              key_tail: "-1234",
-              base_url_hint: "https://provider.invalid/…",
-              revision: 1,
-              enabled: true,
-            },
-          ],
-        }
-      : { schema_version: "1.0", items: [] };
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(body),
-    });
-  });
   await page.route("**/api/v1/instances/i_ui", async (route) => {
     if (route.request().method() === "PUT") {
       await route.fulfill({
@@ -373,7 +334,11 @@ test.beforeEach(async ({ page }) => {
           status: "WAITING_APPROVAL",
           step_id: "waiting_clarification",
           capabilities: ["answer_clarification"],
-          details: { job_status: "succeeded", timeline_cursor: 7 },
+          details: {
+            job_status: "succeeded",
+            timeline_cursor: 7,
+            compatibility_error: "runtime.yaml endpoint does not match the Adapter version",
+          },
         },
       }),
     });
@@ -517,13 +482,13 @@ test("shell has no horizontal overflow on phone and landscape", async ({ page })
     }));
     expect(dimensions.scrollWidth).toBe(dimensions.clientWidth);
     await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
-    await page.goto("/settings");
-    const settingsDimensions = await page.evaluate(() => ({
+    await page.goto("/tasks/new");
+    const intakeDimensions = await page.evaluate(() => ({
       clientWidth: document.documentElement.clientWidth,
       scrollWidth: document.documentElement.scrollWidth,
     }));
-    expect(settingsDimensions.scrollWidth).toBe(settingsDimensions.clientWidth);
-    await expect(page.getByRole("heading", { name: "Ark 与 Image Agent 设置" })).toBeVisible();
+    expect(intakeDimensions.scrollWidth).toBe(intakeDimensions.clientWidth);
+    await expect(page.getByRole("heading", { name: "创建新的设计任务" })).toBeVisible();
   }
 });
 
@@ -549,6 +514,8 @@ test("task and instance pages preserve the Image workbench boundary", async ({ p
   await page.getByRole("link", { name: /Image Agent/ }).click();
   await expect(page).toHaveURL(/\/instances\/i_ui$/);
   await expect(page.getByText("等待下一步决议")).toBeVisible();
+  await expect(page.getByRole("alert").getByText("专业创作服务暂时不可用")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(/PID|端口|Timeline 游标|runtime\.yaml|endpoint|Adapter|配置修订|凭据/);
   const workbench = page.getByRole("link", { name: "打开工作台" });
   await expect(workbench).toHaveAttribute("href", "http://127.0.0.1:18123/");
   await expect(workbench).toHaveAttribute("target", "_blank");
@@ -758,18 +725,6 @@ test("task detail exposes approvals, Token and read-only events as deep links", 
   await expect(page.getByText("保存执行计划")).toBeVisible();
   await page.reload();
   await expect(page.getByRole("heading", { name: "任务事件" })).toBeVisible();
-});
-
-test("settings keep credentials redacted and clear submitted secrets", async ({ page }) => {
-  await page.goto("/settings");
-  await expect(page.getByRole("heading", { name: "Ark 与 Image Agent 设置" })).toBeVisible();
-  await expect(page.getByText("-1234", { exact: true })).toBeVisible();
-  const secret = "browser-only-secret";
-  const apiKey = page.getByLabel("Ark API Key");
-  await apiKey.fill(secret);
-  await page.getByRole("button", { name: "安全保存 Ark 凭据" }).click();
-  await expect(apiKey).toHaveValue("");
-  await expect(page.locator("body")).not.toContainText(secret);
 });
 
 test("human approval resolves once and the inbox records it as handled", async ({ page }) => {

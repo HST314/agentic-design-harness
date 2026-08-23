@@ -476,19 +476,6 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
 .usage-events article:last-child { border-bottom: 0; }
 .usage-events span, .usage-events small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-events small { grid-column: 1 / -1; color: var(--color-secondary-text); font-size: 12px; }
-.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 16px; }
-.settings-card { min-width: 0; padding: 20px; border: 1px solid var(--color-border); border-radius: 14px; background: var(--color-surface); box-shadow: var(--shadow-card); }
-.settings-card > div:first-child h3 { margin: 3px 0 6px; font-size: 18px; }
-.settings-card > div:first-child p:last-child { color: var(--color-secondary-text); font-size: 14px; }
-.settings-card form { display: grid; gap: 14px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--color-border); }
-.instance-config-card { margin: 16px 0; }
-.settings-card textarea { line-height: 1.55; }
-.credential-list { display: grid; gap: 10px; margin-top: 16px; }
-.credential-list article { padding: 14px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-muted); }
-.credential-list article > div { display: flex; align-items: center; gap: 10px; }
-.credential-list dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0 0; }
-.credential-list dt { color: var(--color-secondary-text); font-size: 12px; }
-.credential-list dd { overflow: hidden; margin: 3px 0 0; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 
 :focus-visible { outline: 3px solid var(--color-ring); outline-offset: 3px; }
 
@@ -527,9 +514,8 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
   .approval-form { grid-template-columns: 1fr; }
   .approval-form .field:nth-child(3), .approval-form .form-actions, .approval-form .form-feedback { grid-column: auto; }
   .approval-routing .button, .pending-card .button { width: 100%; }
-  .metric-grid, .settings-grid, .usage-visual-grid { grid-template-columns: 1fr; }
+  .metric-grid, .usage-visual-grid { grid-template-columns: 1fr; }
   .budget-card { grid-template-columns: 1fr; }
-  .credential-list dl { grid-template-columns: 1fr; }
   .field input, .field select, .field textarea { font-size: 16px; }
   .notification-summary article { grid-template-columns: auto minmax(0, 1fr); }
   .notification-summary time { grid-column: 2; }
@@ -537,7 +523,6 @@ h1 { margin-bottom: 0; font-size: clamp(24px, 3vw, 32px); line-height: 1.2; lett
 
 @media (min-width: 761px) and (max-width: 1080px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .settings-grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

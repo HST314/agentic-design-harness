@@ -68,7 +68,8 @@ test("embeds only the server-approved current Image instance with keyboard exits
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_image");
   await expect(page.getByRole("heading", { name: "KV 方向 A" })).toBeVisible();
-  await expect(page.getByText("实例归属、Adapter 来源与 frame 策略已检查")).toBeVisible();
+  await expect(page.getByText("专业工作台连接已验证")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(/Adapter|frame 策略|iframe|sandbox/);
   const iframe = page.locator("iframe[title='Image Agent 工作台：KV 方向 A']");
   await expect(iframe).toHaveAttribute("src", "http://127.0.0.1:19091/");
   await expect(iframe).toHaveAttribute("sandbox", /allow-downloads/);
@@ -110,7 +111,7 @@ test("keeps PPT as a truthful unavailable boundary without requesting a UI link"
   await page.route("**/api/v1/instances/*/ui-link?*", async (route) => { linkRequests += 1; await route.abort(); });
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
-  await expect(page.getByRole("heading", { name: "PPT 工作台不可用" })).toBeVisible();
-  await expect(page.getByText(/不会请求或接受任何用户提供的工作台 URL/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "PPT 工作台暂不可用" })).toBeVisible();
+  await expect(page.getByText(/返回看板调整计划/)).toBeVisible();
   expect(linkRequests).toBe(0);
 });

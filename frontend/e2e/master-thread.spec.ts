@@ -178,7 +178,7 @@ test("requires an explicit final confirmation before starting the reviewed revis
   await page.getByRole("button", { name: "确认并运行" }).click();
   const dialog = page.getByRole("dialog", { name: "启动计划 r1" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("分配凭据并启动满足门禁的实例");
+  await expect(dialog).toContainText("启动满足业务门禁的实例");
   await dialog.getByRole("button", { name: "确认并启动" }).click();
   await expect(page.getByText("计划已确认，实例启动结果已记录。")).toBeVisible();
   await expect(page.getByText("已确认", { exact: true })).toBeVisible();
@@ -205,7 +205,7 @@ test("auto mode keeps human review and starts only after the final revision and 
   await expect(dialog.locator("dl").getByText("r2", { exact: true })).toBeVisible();
   await expect(dialog.locator("dl").getByText("r1", { exact: true })).toBeVisible();
   await expect(dialog).toContainText("实例 instance_direction_a");
-  await expect(dialog).toContainText("可能产生真实模型费用");
+  await expect(dialog).toContainText("可能产生创作服务费用");
   expect(confirmationRequests).toBe(0);
 
   await dialog.getByRole("button", { name: "确认并启动" }).click();

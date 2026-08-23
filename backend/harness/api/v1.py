@@ -212,14 +212,6 @@ class SettingsPreflightRequest(StrictRequest):
     expected_config_revision: int = Field(ge=1)
 
 
-class PaidSmokeRequest(StrictRequest):
-    credential_pair_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
-    credential_pair_revision: int = Field(ge=1)
-    cost_confirmation: Literal[True]
-    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
-    envelope: CommandEnvelope
-
-
 class ReassignCredentialRequest(StrictRequest):
     credential_pair_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     credential_pair_revision: int = Field(ge=1)
@@ -599,23 +591,11 @@ def build_v1_router(container: Container) -> APIRouter:
             pending = container.approvals.list_approvals(
                 instance_id=instance_id, status="PENDING"
             )
-            credential = next(
-                (
-                    item
-                    for item in container.credentials.list_redacted()
-                    if item["credential_pair_id"] == instance["credential_pair_ref"]
-                    and item["revision"] == instance["credential_pair_revision"]
-                ),
-                None,
-            )
-            config = container.configuration.get_instance(task_id, instance_id)
             return {
                 "schema_version": "1.0",
                 "task_id": task_id,
                 "task_revision": container.store.task.revision(task_id, task_id),
                 "pending_approval": pending[0] if pending else None,
-                "credential": credential,
-                "config": config,
                 **result,
             }
 
@@ -1077,18 +1057,6 @@ def build_v1_router(container: Container) -> APIRouter:
         return await run_in_threadpool(
             container.settings_diagnostics.preflight,
             body.expected_config_revision,
-        )
-
-    @router.post("/config/diagnostics/paid-smoke", tags=["configuration"])
-    async def run_paid_smoke(body: PaidSmokeRequest) -> dict[str, Any]:
-        _require_human(body.envelope, "Only a human may confirm a paid Provider smoke run.")
-        return await run_in_threadpool(
-            container.settings_diagnostics.run_paid_smoke,
-            expected_config_revision=body.envelope.expected_revision,
-            credential_pair_id=body.credential_pair_id,
-            credential_pair_revision=body.credential_pair_revision,
-            operation_id=body.operation_id,
-            actor=Actor(body.envelope.actor_type, body.envelope.actor_id),
         )
 
     @router.post(

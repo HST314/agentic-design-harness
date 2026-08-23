@@ -62,7 +62,6 @@ let pollTimer: number | undefined;
 const navigation: Array<{ route: RouteName; label: string; icon: string }> = [
   { route: "tasks", label: "任务", icon: "layers" },
   { route: "inbox", label: "收件箱", icon: "inbox" },
-  { route: "settings", label: "设置", icon: "settings" },
 ];
 
 const pageCopy: Record<
@@ -93,11 +92,6 @@ const pageCopy: Record<
     eyebrow: "FIFO 队列",
     title: "收件箱",
     description: "按事件顺序处理人工审批与运行通知，已读和已处理分别记录。",
-  },
-  settings: {
-    eyebrow: "运行配置",
-    title: "设置",
-    description: "全局配置与凭据只通过受控 API 管理。",
   },
 };
 
@@ -154,8 +148,7 @@ async function renderRoute(route: Route, version: number): Promise<void> {
     else if (route.name === "taskSection") {
       await renderTaskSection(route.taskId, route.section, version);
     } else if (route.name === "instance") await renderInstance(route.instanceId, version);
-    else if (route.name === "inbox") await renderInbox(version);
-    else await renderSettings(version);
+    else await renderInbox(version);
   } catch (error) {
     if (version !== renderVersion) return;
     renderError(error);
@@ -300,7 +293,11 @@ function renderTaskApprovals(items: Approval[]): string {
 }
 
 function renderAuditEvents(items: AuditEvent[]): string {
-  return `<section class="event-section" aria-labelledby="events-title"><div class="section-heading"><div><p class="eyebrow">只读审计</p><h2 id="events-title">任务事件</h2><p>事件投影不暴露命令载荷、幂等键、文件路径或凭据内容。</p></div><span class="count-pill">${items.length} 条</span></div>${items.length ? `<div class="event-table" role="region" aria-label="任务审计事件" tabindex="0"><table><thead><tr><th scope="col">时间</th><th scope="col">Actor</th><th scope="col">命令</th><th scope="col">对象</th><th scope="col">修订</th><th scope="col">结果</th></tr></thead><tbody>${items.map((item) => `<tr><td>${formatDate(item.occurred_at)}</td><td>${escapeHtml(item.actor.actor_type)} / ${escapeHtml(item.actor.actor_id)}</td><th scope="row">${escapeHtml(commandLabel(item.command))}</th><td>${escapeHtml(item.object_type)} · ${escapeHtml(item.object_id)}</td><td>r${item.revision}</td><td><span class="badge badge--success"><span aria-hidden="true"></span>已提交</span></td></tr>`).join("")}</tbody></table></div>` : '<p class="resource-empty">当前任务没有可展示的提交事件。</p>'}</section>`;
+  const visibleItems = items.filter((item) => ![
+    "save_global_config",
+    "update_instance_config",
+  ].includes(item.command));
+  return `<section class="event-section" aria-labelledby="events-title"><div class="section-heading"><div><p class="eyebrow">只读审计</p><h2 id="events-title">任务事件</h2><p>只展示当前任务可核对的业务操作记录。</p></div><span class="count-pill">${visibleItems.length} 条</span></div>${visibleItems.length ? `<div class="event-table" role="region" aria-label="任务审计事件" tabindex="0"><table><thead><tr><th scope="col">时间</th><th scope="col">Actor</th><th scope="col">命令</th><th scope="col">对象</th><th scope="col">修订</th><th scope="col">结果</th></tr></thead><tbody>${visibleItems.map((item) => `<tr><td>${formatDate(item.occurred_at)}</td><td>${escapeHtml(item.actor.actor_type)} / ${escapeHtml(item.actor.actor_id)}</td><th scope="row">${escapeHtml(commandLabel(item.command))}</th><td>${escapeHtml(item.object_type)} · ${escapeHtml(item.object_id)}</td><td>r${item.revision}</td><td><span class="badge badge--success"><span aria-hidden="true"></span>已提交</span></td></tr>`).join("")}</tbody></table></div>` : '<p class="resource-empty">当前任务没有可展示的提交事件。</p>'}</section>`;
 }
 
 function wireTaskActions(response: TaskDetailResponse): void {
@@ -345,9 +342,7 @@ async function renderInstance(instanceId: string, version: number): Promise<void
   if (["STARTING", "RUNNING"].includes(response.instance.status)) {
     pollTimer = window.setTimeout(
       () => {
-        if (!root.querySelector("[data-instance-config]:focus-within")) {
-          void renderRoute({ name: "instance", instanceId }, version);
-        }
+        void renderRoute({ name: "instance", instanceId }, version);
       },
       5000,
     );
@@ -359,12 +354,6 @@ function renderInstanceContent(
   usage: UsageSummary,
 ): void {
   const { instance, observation } = response;
-  const process = instance.process;
-  const instanceConfig = response.config ?? {
-    config_revision: instance.config_revision,
-    restart_required: false,
-    config: {},
-  };
   const safeUiUrl = instance.ui_url?.match(/^https?:\/\//) ? instance.ui_url : null;
   pageContent().innerHTML = `
     ${breadcrumb([
@@ -373,7 +362,7 @@ function renderInstanceContent(
       { label: instance.instance_id },
     ])}
     <div class="detail-hero detail-hero--instance">
-      <div><div class="hero-status">${statusBadge(instance.status)}<span class="identifier">${escapeHtml(instance.instance_id)}</span></div><h2>${escapeHtml(agentDescriptor(instance.agent_type).instanceTitle)}</h2><p>Harness 负责进程、状态和审计；专业创作流程保留在独立工作台。</p></div>
+      <div><div class="hero-status">${statusBadge(instance.status)}<span class="identifier">${escapeHtml(instance.instance_id)}</span></div><h2>${escapeHtml(agentDescriptor(instance.agent_type).instanceTitle)}</h2><p>在此查看创作进度、处理审批，并按需进入专业工作台。</p></div>
       <div class="hero-actions">
         <button class="button button--secondary" type="button" data-refresh>${icon("refresh")}刷新状态</button>
         ${
@@ -394,36 +383,16 @@ function renderInstanceContent(
         : ""
     }
     <div class="detail-grid">
-      <section class="info-card"><p class="eyebrow">运行进程</p><h3>隔离运行环境</h3><dl class="detail-list">
-        ${detailItem("进程状态", process?.state ?? "未启动")}
-        ${detailItem("PID", process?.pid?.toString() ?? "—")}
-        ${detailItem("端口", process?.port?.toString() ?? "—")}
-        ${detailItem("配置修订", `r${instance.config_revision}`)}
-      </dl></section>
-      <section class="info-card"><p class="eyebrow">Agent 观测</p><h3>${observation?.step_id ? escapeHtml(observation.step_id) : "等待运行数据"}</h3><dl class="detail-list">
-        ${detailItem("Job", observation?.details.job_status ?? "未上报")}
-        ${detailItem("Timeline 游标", observation?.details.timeline_cursor?.toString() ?? "—")}
+      <section class="info-card"><p class="eyebrow">创作进度</p><h3>${observation?.step_id ? "正在推进当前步骤" : "等待下一步"}</h3><dl class="detail-list">
+        ${detailItem("创作类型", agentDescriptor(instance.agent_type).label)}
         ${detailItem("审批模式", instance.approval_mode === "human" ? "人工" : "Master")}
-        ${detailItem("能力数量", observation?.capabilities.length.toString() ?? "0")}
-      </dl></section>
-      <section class="info-card"><p class="eyebrow">脱敏凭据</p><h3>${escapeHtml(response.credential?.credential_pair_id ?? instance.credential_pair_ref ?? "未分配")}</h3><dl class="detail-list">
-        ${detailItem("Provider", response.credential?.provider ?? "未公开")}
-        ${detailItem("Key ID", response.credential?.key_id ?? "未公开")}
-        ${detailItem("Key 尾号", response.credential?.key_tail ?? "••••")}
-        ${detailItem("凭据修订", `r${response.credential?.revision ?? instance.credential_pair_revision ?? 1}`)}
+        ${detailItem("待处理事项", response.pending_approval ? "需要人工审批" : "暂无")}
       </dl></section>
     </div>
-    <section class="settings-card instance-config-card" aria-labelledby="instance-config-title">
-      <div><p class="eyebrow">实例局部配置</p><h3 id="instance-config-title">有效参数 r${instanceConfig.config_revision}</h3><p>${instanceConfig.restart_required ? "该变更需要受控重启后生效。" : "保存后由 Adapter 尝试热应用；无法热应用时会明确标记需重启。"}</p></div>
-      <form data-instance-config data-config-revision="${instanceConfig.config_revision}">
-        <div class="field"><label for="instance-config-json">配置 JSON</label><textarea id="instance-config-json" name="config" rows="10" spellcheck="false">${escapeHtml(JSON.stringify(instanceConfig.config, null, 2))}</textarea></div>
-        <div class="form-actions"><button class="button button--primary" type="submit">保存实例配置</button></div><p class="form-feedback" role="status" aria-live="polite"></p>
-      </form>
-    </section>
     ${renderUsagePanel(usage)}
     ${
       observation?.details.compatibility_error
-        ? `<div class="alert alert--danger" role="alert"><strong>兼容性检查失败</strong><span>${escapeHtml(observation.details.compatibility_error)}</span></div>`
+        ? '<div class="alert alert--danger" role="alert"><strong>专业创作服务暂时不可用</strong><span>当前任务进度已保留，请稍后重试；若持续失败，请联系支持人员。</span></div>'
         : ""
     }
     ${
@@ -456,19 +425,6 @@ function renderInstanceContent(
       button.removeAttribute("aria-busy");
       showInlineError(button, error);
     }
-  });
-  root.querySelector<HTMLFormElement>("[data-instance-config]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    await submitJsonForm(form, async (value) => {
-      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("实例配置必须是 JSON 对象。");
-      await api.updateInstanceConfig(instance.instance_id, {
-        patch: value,
-        operation_id: operationId("instance_config"),
-        envelope: commandEnvelope("human", "human_operator", Number(form.dataset.configRevision)),
-      });
-      await renderInstance(instance.instance_id, renderVersion);
-    }, "config");
   });
   root.querySelector<HTMLButtonElement>("[data-refresh]")?.addEventListener("click", (event) => {
     const button = event.currentTarget as HTMLButtonElement;
@@ -703,42 +659,6 @@ function wireResourcePreviews(taskId: string): void {
   });
 }
 
-async function renderSettings(version: number): Promise<void> {
-  const [globalConfig, keyPool] = await Promise.all([
-    api.globalConfig(),
-    api.keyPool(),
-  ]);
-  if (version !== renderVersion) return;
-  const revision = globalConfig.config.revision;
-  const { revision: _revision, ...editableConfig } = globalConfig.config;
-  pageContent().innerHTML = `
-    <div class="page-heading"><div><p class="eyebrow">受控配置</p><h2>运行配置与凭据池</h2><p>全局保存覆盖所有未归档实例；凭据始终按 Key + Base URL 完整配对。</p></div><span class="count-pill">全局 r${revision}</span></div>
-    <div class="settings-grid">
-      <section class="settings-card" aria-labelledby="global-config-title">
-        <div><p class="eyebrow">全局配置</p><h3 id="global-config-title">Image 运行参数</h3><p>仅接受受控 Schema 字段；运行中实例会热应用，无法热应用时明确标记需要重启。</p></div>
-        <form data-global-config data-revision="${revision}">
-          <div class="field"><label for="global-config-json">配置 JSON</label><textarea id="global-config-json" name="config" rows="18" spellcheck="false">${escapeHtml(JSON.stringify(editableConfig, null, 2))}</textarea><small>保存采用 revision 检查，避免覆盖其他操作人的新版本。</small></div>
-          <div class="form-actions"><button class="button button--primary" type="submit">保存全局配置</button></div>
-          <p class="form-feedback" role="status" aria-live="polite"></p>
-        </form>
-      </section>
-      <section class="settings-card" aria-labelledby="key-pool-title">
-        <div><p class="eyebrow">凭据池</p><h3 id="key-pool-title">完整凭据对</h3><p>明文 Key 只在本次提交中发送，响应、事件和页面均不回显。</p></div>
-        <div class="credential-list">${
-          keyPool.items.length
-            ? keyPool.items.map((item) => `<article><div>${statusBadge(item.enabled ? "READY" : "CANCELLED")}<span class="identifier">${escapeHtml(item.credential_pair_id)}</span></div><dl>${detailItem("Provider", item.provider)}${detailItem("Key ID", item.key_id)}${detailItem("Key 尾号", item.key_tail)}${detailItem("服务地址", item.base_url_hint)}${detailItem("修订", `r${item.revision}`)}</dl></article>`).join("")
-            : '<p class="resource-empty">尚未配置凭据对。</p>'
-        }</div>
-        <form data-key-pool>
-          <div class="field"><label for="key-pool-json">替换凭据池（JSON 数组）</label><textarea id="key-pool-json" name="pairs" rows="10" spellcheck="false" placeholder='[{"credential_pair_id":"cred_01", …}]'></textarea><small>同一 revision 不可修改；编辑时递增 revision。保存后输入框会立即清空。</small></div>
-          <div class="form-actions"><button class="button button--primary" type="submit">安全保存凭据池</button></div>
-          <p class="form-feedback" role="status" aria-live="polite"></p>
-        </form>
-      </section>
-    </div>`;
-  wireSettingsActions();
-}
-
 function renderUsagePanel(usage: UsageSummary, budget?: RetryBudget): string {
   const maximum = budget?.retry_policy.max_auto_retry_tokens_task ?? 0;
   const consumed = budget
@@ -759,12 +679,12 @@ function renderUsagePanel(usage: UsageSummary, budget?: RetryBudget): string {
       ${metricCard("总 Token", formatNumber(usage.tokens.total_tokens), `${usage.event_count} 次调用`)}
       ${metricCard("输入 / 输出", `${formatNumber(usage.tokens.input_tokens)} / ${formatNumber(usage.tokens.output_tokens)}`, `缓存 ${formatNumber(usage.tokens.cached_input_tokens)}`)}
       ${metricCard("已知费用", usage.cost.completeness === "UNKNOWN" ? "费用未知" : formatMicros(usage.cost.known_micros), `${usage.cost.unpriced_event_count} 条未定价`)}
-      ${metricCard("模型", formatNumber(usage.models.length), usage.models[0]?.model ?? "尚无记录")}
+      ${metricCard("智能服务", formatNumber(usage.models.length), "按服务调用聚合")}
     </div>
-    ${usage.time_buckets.length || usage.models.length || usage.instances.length ? `<div class="usage-visual-grid">${usage.time_buckets.length ? `<figure class="usage-chart"><figcaption><strong>按小时 Token</strong><span>柱高表示相对用量，数值标签可被辅助技术读取。</span></figcaption><div class="usage-bars" role="img" aria-label="${escapeHtml(usage.time_buckets.map((item) => `${formatDate(item.hour)} ${formatNumber(item.tokens.total_tokens)} Token`).join("；"))}">${usage.time_buckets.slice(-12).map((item) => `<div><span style="height:${Math.max(8, Math.round((item.tokens.total_tokens / peakTokens) * 100))}%"></span><small>${new Date(item.hour).getHours().toString().padStart(2, "0")}:00</small><b>${formatNumber(item.tokens.total_tokens)}</b></div>`).join("")}</div></figure>` : ""}${usage.models.length ? `<figure class="model-share"><figcaption><strong>模型占比</strong><span>同时使用文字和长度表达，避免只依赖颜色。</span></figcaption><div>${usage.models.map((item) => { const share = Math.round((item.tokens.total_tokens / modelTotal) * 100); return `<article><p><span>${escapeHtml(item.model)}</span><strong>${share}%</strong></p><div role="progressbar" aria-label="${escapeHtml(item.model)} Token 占比" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${share}"><span style="width:${share}%"></span></div></article>`; }).join("")}</div></figure>` : ""}${usage.instances.length ? `<figure class="instance-share"><figcaption><strong>实例占比</strong><span>每个实例均显示精确百分比和可读进度。</span></figcaption><div>${usage.instances.map((item) => { const share = Math.round((item.tokens.total_tokens / instanceTotal) * 100); return `<article><p><span>${escapeHtml(item.instance_id)}</span><strong>${share}%</strong></p><div role="progressbar" aria-label="${escapeHtml(item.instance_id)} Token 占比" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${share}"><span style="width:${share}%"></span></div></article>`; }).join("")}</div></figure>` : ""}</div>` : ""}
+    ${usage.time_buckets.length || usage.models.length || usage.instances.length ? `<div class="usage-visual-grid">${usage.time_buckets.length ? `<figure class="usage-chart"><figcaption><strong>按小时 Token</strong><span>柱高表示相对用量，数值标签可被辅助技术读取。</span></figcaption><div class="usage-bars" role="img" aria-label="${escapeHtml(usage.time_buckets.map((item) => `${formatDate(item.hour)} ${formatNumber(item.tokens.total_tokens)} Token`).join("；"))}">${usage.time_buckets.slice(-12).map((item) => `<div><span style="height:${Math.max(8, Math.round((item.tokens.total_tokens / peakTokens) * 100))}%"></span><small>${new Date(item.hour).getHours().toString().padStart(2, "0")}:00</small><b>${formatNumber(item.tokens.total_tokens)}</b></div>`).join("")}</div></figure>` : ""}${usage.models.length ? `<figure class="model-share"><figcaption><strong>智能服务占比</strong><span>同时使用文字和长度表达，避免只依赖颜色。</span></figcaption><div>${usage.models.map((item, index) => { const label = `智能服务 ${index + 1}`; const share = Math.round((item.tokens.total_tokens / modelTotal) * 100); return `<article><p><span>${label}</span><strong>${share}%</strong></p><div role="progressbar" aria-label="${label} Token 占比" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${share}"><span style="width:${share}%"></span></div></article>`; }).join("")}</div></figure>` : ""}${usage.instances.length ? `<figure class="instance-share"><figcaption><strong>实例占比</strong><span>每个实例均显示精确百分比和可读进度。</span></figcaption><div>${usage.instances.map((item) => { const share = Math.round((item.tokens.total_tokens / instanceTotal) * 100); return `<article><p><span>${escapeHtml(item.instance_id)}</span><strong>${share}%</strong></p><div role="progressbar" aria-label="${escapeHtml(item.instance_id)} Token 占比" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${share}"><span style="width:${share}%"></span></div></article>`; }).join("")}</div></figure>` : ""}</div>` : ""}
     ${budget ? `<div class="budget-card"><div><p class="eyebrow">自动重试预算</p><h3>${budget.retry_budget_ledger.frozen ? "预算已冻结" : `已用与预留 ${formatNumber(consumed)} / ${formatNumber(maximum)}`}</h3><p>${budget.retry_budget_ledger.frozen ? escapeHtml(budget.retry_budget_ledger.frozen_reason ?? "实际用量超过预留") : `每组最多 ${budget.retry_policy.max_auto_retries_per_retry_group} 次；费用上限${budget.retry_policy.max_auto_retry_cost_micros === null ? "未配置" : formatMicros(budget.retry_policy.max_auto_retry_cost_micros)}。`}</p></div>${maximum > 0 ? `<div class="budget-progress" role="progressbar" aria-label="自动重试 Token 预算" aria-valuemin="0" aria-valuemax="${maximum}" aria-valuenow="${boundedProgressValue}"><span style="width:${progress}%"></span></div>` : '<p class="budget-zero">自动重试 Token 额度为 0；重试将进入人工预算确认。</p>'}</div>` : ""}
     ${usage.instances.length ? `<div class="usage-table" role="region" aria-label="实例 Token 汇总" tabindex="0"><table><thead><tr><th scope="col">实例</th><th scope="col">完整性</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">总计</th><th scope="col">费用</th></tr></thead><tbody>${usage.instances.map((item) => `<tr><th scope="row">${escapeHtml(item.instance_id)}</th><td>${usageCompletenessBadge(item.completeness)}</td><td>${formatNumber(item.tokens.input_tokens)}</td><td>${formatNumber(item.tokens.output_tokens)}</td><td>${formatNumber(item.tokens.total_tokens)}</td><td>${item.cost.completeness === "UNKNOWN" ? "未知" : formatMicros(item.cost.known_micros)}</td></tr>`).join("")}</tbody></table></div>` : ""}
-    ${usage.events.length ? `<details class="usage-events"><summary>查看最近调用（${usage.events.length}）</summary><div>${usage.events.slice(-20).reverse().map((event) => `<article><span>${escapeHtml(event.model)}</span><strong>${escapeHtml(formatUsageQuantity(event))}</strong><small>${escapeHtml(event.provider_request_id ?? event.request_id)} · ${formatDate(event.occurred_at)}</small></article>`).join("")}</div></details>` : ""}
+    ${usage.events.length ? `<details class="usage-events"><summary>查看最近调用（${usage.events.length}）</summary><div>${usage.events.slice(-20).reverse().map((event) => `<article><span>智能创作调用</span><strong>${escapeHtml(formatUsageQuantity(event))}</strong><small>${formatDate(event.occurred_at)}</small></article>`).join("")}</div></details>` : ""}
   </section>`;
 }
 
@@ -780,61 +700,6 @@ function formatUsageQuantity(event: UsageSummary["events"][number]): string {
   }
   return `${formatNumber(event.total_tokens)} Token`;
 }
-
-function wireSettingsActions(): void {
-  wireNavigation();
-  root.querySelector<HTMLFormElement>("[data-global-config]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    await submitJsonForm(form, async (value) => {
-      await api.updateGlobalConfig({
-        config: value,
-        operation_id: operationId("global_config"),
-        envelope: commandEnvelope("human", "human_operator", Number(form.dataset.revision)),
-      });
-    }, "config");
-  });
-  root.querySelector<HTMLFormElement>("[data-key-pool]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    await submitJsonForm(form, async (value) => {
-      if (!Array.isArray(value) || value.length === 0) throw new Error("请填写至少一个完整凭据对。");
-      await api.updateKeyPool({
-        pairs: value,
-        envelope: commandEnvelope("human", "human_operator", 0),
-      });
-      const textarea = form.elements.namedItem("pairs") as HTMLTextAreaElement;
-      textarea.value = "";
-    }, "pairs");
-  });
-}
-
-async function submitJsonForm(
-  form: HTMLFormElement,
-  submit: (value: unknown) => Promise<void>,
-  field: string,
-): Promise<void> {
-  const button = form.querySelector<HTMLButtonElement>("button[type='submit']");
-  const feedback = form.querySelector<HTMLElement>(".form-feedback");
-  if (!button || button.disabled) return;
-  setButtonBusy(button, "正在安全保存");
-  if (feedback) feedback.textContent = "正在校验并提交…";
-  try {
-    const value = JSON.parse(String(new FormData(form).get(field) ?? "")) as unknown;
-    await submit(value);
-    if (feedback) feedback.textContent = "保存成功，正在刷新受控视图。";
-    if (currentRoute().name === "settings") await renderSettings(renderVersion);
-  } catch (error) {
-    if (feedback) {
-      feedback.classList.add("form-feedback--error");
-      feedback.textContent = error instanceof Error ? error.message : "保存失败，请检查输入。";
-    }
-    button.disabled = false;
-    button.removeAttribute("aria-busy");
-    button.textContent = "重试保存";
-  }
-}
-
 
 export function mountLegacyApp(element: HTMLDivElement): () => void {
   root = element;

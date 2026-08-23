@@ -75,6 +75,39 @@ describe("ApiClient", () => {
     }));
   });
 
+  test("keeps deployment details out of designer-facing API errors", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      error: {
+        code: "MODEL_PROVIDER_UNAVAILABLE",
+        message: "Provider endpoint and API Key are not configured in runtime.yaml.",
+        details: { request_id: "request_safe" },
+      },
+    }, 503));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new ApiClient().masterSession("task_1")).rejects.toMatchObject({
+      message: "智能创作服务暂时不可用，请稍后重试；当前任务内容已保留。如持续失败，请联系支持人员。",
+      status: 503,
+      code: "MODEL_PROVIDER_UNAVAILABLE",
+      details: { request_id: "request_safe" },
+    });
+  });
+
+  test("normalizes infrastructure error codes even when their message is generic", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      error: {
+        code: "ADAPTER_UNAVAILABLE",
+        message: "The requested workspace is unavailable.",
+      },
+    }, 503));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new ApiClient().instance("instance_1")).rejects.toMatchObject({
+      message: "智能创作服务暂时不可用，请稍后重试；当前任务内容已保留。如持续失败，请联系支持人员。",
+      code: "ADAPTER_UNAVAILABLE",
+    });
+  });
+
   test("falls back to the HTTP status when an intermediary returns non-JSON", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response("upstream failed", {
       status: 502,
