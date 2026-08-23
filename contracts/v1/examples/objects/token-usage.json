@@ -6,7 +6,6 @@
   "agent_type": "image",
   "request_id": "provider_req_01",
   "model": "image-model",
-  "credential_pair_ref": "cred_01",
   "input_tokens": 1200,
   "output_tokens": 300,
   "cached_input_tokens": 100,

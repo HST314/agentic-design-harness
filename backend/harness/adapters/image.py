@@ -247,7 +247,6 @@ class ImageAgentAdapter(ImageObservationMixin):
             ),
             public_environment={
                 "IMAGE_AGENT_FRONT_PROJECTS_ROOT": str(instance_root / "work"),
-                "IMAGE_AGENT_MODEL_LIBRARY": str(artifact_root / "configs" / "model_library.yaml"),
                 "IMAGE_AGENT_MANAGED_MODE": "1",
                 "IMAGE_AGENT_MANAGED_PROJECT_ID": instance_id,
                 "IMAGE_AGENT_CONTROL_FILE": str(control_path),
@@ -507,25 +506,6 @@ class ImageAgentAdapter(ImageObservationMixin):
             accepted=True,
             operation_id=operation_id,
             details={"job_id": job["job_id"], "job_status": job["status"]},
-        )
-
-    def apply_config(
-        self,
-        instance_id: str,
-        config: dict[str, Any],
-        revision: int,
-        operation_id: str,
-    ) -> AdapterCommandResult:
-        validate_identifier(operation_id, "operation_id")
-        validate_identifier(instance_id, "instance_id")
-        return AdapterCommandResult(
-            accepted=False,
-            operation_id=operation_id,
-            details={
-                "config_revision": revision,
-                "restart_required": False,
-                "reason": "TASK_CONFIG_IS_IMMUTABLE",
-            },
         )
 
     def collect_delivery_bundles(self, instance_id: str) -> list[DeliveryBundleCandidate]:
@@ -825,7 +805,6 @@ class ImageAgentAdapter(ImageObservationMixin):
                 previous=previous,
                 task_id=task_id,
                 instance_id=instance_id,
-                credential_pair_ref=instance.get("credential_pair_ref"),
             )
             events.extend(mapped)
             if len(events) > 10_000:

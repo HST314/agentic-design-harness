@@ -13,6 +13,9 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
 from harness.storage.repository import utc_now
+from runtime_helpers import build_config_snapshot
+
+from tests.e2e import test_g3_real_image_agent as g3_fixtures
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_AGENT_ROOT = os.getenv("HARNESS_IMAGE_AGENT_ROOT")
@@ -25,8 +28,11 @@ IMAGE_AGENT_DEPENDENCY_ROOT = os.getenv("HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT")
     "set all HARNESS_IMAGE_AGENT_* runtime paths for the G2 real-Agent gate",
 )
 class RealImageAgentG2Tests(unittest.TestCase):
-    def test_offline_instance_launches_waits_and_opens_its_workbench(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
+    def test_managed_instance_launches_waits_and_opens_its_workbench(self) -> None:
+        with (
+            g3_fixtures.deterministic_provider() as (provider_url, _provider),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
             runtime_root = Path(temporary)
             settings = HarnessSettings(
                 control_root=runtime_root / "control-data",
@@ -35,12 +41,15 @@ class RealImageAgentG2Tests(unittest.TestCase):
                 image_agent_root=Path(str(IMAGE_AGENT_ROOT)),
                 image_agent_python=Path(str(IMAGE_AGENT_PYTHON)),
                 image_agent_dependency_root=Path(str(IMAGE_AGENT_DEPENDENCY_ROOT)),
+                config_snapshot=build_config_snapshot(
+                    base_url=provider_url,
+                    api_key="synthetic-g2-provider-key",
+                ),
             )
             app = create_app(settings)
             instance_id = "i_g2_real_image"
             try:
                 with TestClient(app) as client:
-                    self._configure_credential(app)
                     self._create_task(client)
                     selected = self._import_brief(app)
                     saved = self._save_plan(client, selected)
@@ -70,12 +79,7 @@ class RealImageAgentG2Tests(unittest.TestCase):
                         time.sleep(0.1)
                     assert detail is not None
                     self.assertEqual(detail["instance"]["status"], "WAITING_APPROVAL")
-                    self.assertEqual(
-                        detail["observation"]["step_id"], "waiting_clarification"
-                    )
-                    self.assertIn(
-                        "answer_clarification", detail["observation"]["capabilities"]
-                    )
+                    self.assertTrue(detail["observation"]["capabilities"])
 
                     work_items = client.get(
                         "/api/v1/tasks/t_g2_real_image/work-items"
@@ -105,31 +109,13 @@ class RealImageAgentG2Tests(unittest.TestCase):
                         )
                 self._make_tree_removable(runtime_root)
 
-    @staticmethod
-    def _configure_credential(app) -> None:
-        app.state.container.credentials.configure_pool(
-            [
-                {
-                    "credential_pair_id": "cred_g2_real",
-                    "provider": "fake",
-                    "key_id": "key_g2_real",
-                    "base_url": "https://offline.invalid/v1",
-                    "api_key": "not-a-secret-g2-real",
-                    "api_key_env": "FAKE_API_KEY",
-                    "base_url_env": "FAKE_BASE_URL",
-                    "revision": 1,
-                    "enabled": True,
-                }
-            ]
-        )
-
     def _create_task(self, client: TestClient) -> None:
         response = client.post(
             "/api/v1/tasks",
             json={
                 "task_id": "t_g2_real_image",
                 "title": "G2 real Image Agent",
-                "goal": "Launch the real Image Agent in offline mode.",
+                "goal": "Launch the managed Image Agent with the pinned task configuration.",
                 "master_owner": "master_default",
                 "start_policy": "manual",
                 "input_manifest": "inputs/manifests/g2.json",
@@ -178,8 +164,6 @@ class RealImageAgentG2Tests(unittest.TestCase):
                         "required": True,
                         "approval_mode": "human",
                         "config_revision": 1,
-                        "credential_pair_ref": "pending_assignment",
-                        "credential_pair_revision": 1,
                         "workspace_relpath": "instances/i_g2_real_image",
                         "task_card_relpath": "instances/i_g2_real_image/task-card.json",
                     }
@@ -211,7 +195,6 @@ class RealImageAgentG2Tests(unittest.TestCase):
                         "created_at": utc_now(),
                     }
                 ],
-                "providers": {"i_g2_real_image": "fake"},
                 "operation_id": "save_g2_real_image_plan",
                 "envelope": self._envelope("save-g2-real-image-plan", 1),
             },

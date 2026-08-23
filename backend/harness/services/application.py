@@ -23,8 +23,6 @@ from .application_delivery import ApplicationDeliveryMixin
 from .application_planning import ApplicationPlanningMixin
 from .approvals import ApprovalInboxService
 from .assets import AssetService
-from .configuration import ConfigurationService
-from .credentials import CredentialPoolService
 from .supervisor import ProcessSupervisor
 
 CrashHook = Callable[[str], None]
@@ -39,21 +37,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         commands: TaskCommandService,
         assets: AssetService,
         approvals: ApprovalInboxService,
-        credentials: CredentialPoolService,
         supervisor: ProcessSupervisor,
         adapters: AdapterRegistry,
-        configuration: ConfigurationService | None = None,
-        delivery_bundle_write_targets: tuple[bool, bool] = (False, True),
     ) -> None:
         self.store = store
         self.commands = commands
         self.assets = assets
         self.approvals = approvals
-        self.credentials = credentials
         self.supervisor = supervisor
         self.adapters = adapters
-        self.configuration = configuration
-        self.delivery_bundle_write_targets = delivery_bundle_write_targets
         self.intent_root = store.layout.control_root / "application-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -64,7 +56,6 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         stages: list[StageSnapshot],
         instances: list[AgentInstanceSnapshot],
         task_cards: list[TaskCard],
-        providers: dict[str, str],
         operation_id: str,
         envelope: CommandEnvelope,
         crash_hook: CrashHook | None = None,
@@ -76,7 +67,6 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             "stages": deepcopy(stages),
             "instances": deepcopy(instances),
             "task_cards": deepcopy(task_cards),
-            "providers": dict(sorted(providers.items())),
             "envelope": envelope.model_dump(mode="json"),
         }
         request_sha256 = digest_json(request)
@@ -107,11 +97,6 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     "operation_id": operation_id,
                     "request_sha256": request_sha256,
                     "request": request,
-                    "creation_instances": {
-                        item["instance_id"]: self._creation_summary(task_id, item, prepared_at)
-                        for item in request["instances"]
-                        if item["instance_id"] in providers
-                    },
                     "state": "PREPARED",
                     "prepared_at": prepared_at,
                     "result": None,
@@ -592,8 +577,6 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 "operation_id": started.operation_id,
                 "details": {"mode": "started", **deepcopy(started.details)},
             }
-        if self.configuration is not None:
-            self.configuration.mark_restarted(task_id, instance_id)
         result = {
             "instance": self._instance(task_id, instance_id),
             "launch": self._launch_summary(launch),
@@ -774,10 +757,6 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 task_card=deepcopy(card),
                 task_root=task_root,
                 config_ref=task_root / "instances" / instance_id / "runtime" / "runtime.yaml",
-                credential_ref=(
-                    instance["credential_pair_ref"],
-                    instance["credential_pair_revision"],
-                ),
             )
         )
 

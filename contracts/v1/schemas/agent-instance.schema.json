@@ -15,8 +15,6 @@
     "status",
     "approval_mode",
     "config_revision",
-    "credential_pair_ref",
-    "credential_pair_revision",
     "workspace_relpath",
     "task_card_relpath",
     "ui_url",

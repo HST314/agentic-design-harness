@@ -72,8 +72,6 @@ class AgentInstanceSnapshot(TypedDict):
     status: AgentInstanceStatus
     approval_mode: Literal["human", "master"]
     config_revision: int
-    credential_pair_ref: str
-    credential_pair_revision: int
     workspace_relpath: str
     task_card_relpath: str
     ui_url: str | None
@@ -184,7 +182,6 @@ class UsageEvent(TypedDict):
     model: str
     call_type: str
     usage_basis: Literal["tokens", "image_units", "mixed"]
-    credential_pair_ref: str | None
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int

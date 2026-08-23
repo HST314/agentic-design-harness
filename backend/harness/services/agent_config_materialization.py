@@ -216,6 +216,9 @@ class ImageAgentConfigMaterializer:
             "response_format": image_agent["response_format"],
             "watermark": image_agent["watermark"],
             "offline_mode": False,
+            # Harness owns the external approval boundary. The child must stop
+            # after a passing inspection instead of attempting final delivery.
+            "self_check": {"release": "manual"},
         }
         groups = {
             name: {item["id"]: item for item in task_snapshot["model_list"][name]}

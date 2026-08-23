@@ -244,8 +244,6 @@ def instance(
         "required": required,
         "approval_mode": "human",
         "config_revision": 1,
-        "credential_pair_ref": "cred_test_01",
-        "credential_pair_revision": 1,
         "workspace_relpath": f"instances/{instance_id}",
         "task_card_relpath": f"instances/{instance_id}/task-card.json",
     }

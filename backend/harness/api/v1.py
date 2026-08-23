@@ -66,7 +66,6 @@ class SavePlanRequest(StrictRequest):
     stages: list[dict[str, Any]]
     instances: list[dict[str, Any]]
     task_cards: list[dict[str, Any]]
-    providers: dict[str, str]
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     envelope: CommandEnvelope
 
@@ -187,34 +186,6 @@ class PublishDeliveryRequest(StrictRequest):
     source_relative_path: str = Field(min_length=1, max_length=1024)
     role: str = Field(min_length=1, max_length=128)
     description: str = Field(default="", max_length=4000)
-    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
-    envelope: CommandEnvelope
-
-
-class ConfigWriteRequest(StrictRequest):
-    config: dict[str, Any]
-    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
-    envelope: CommandEnvelope
-
-
-class InstanceConfigWriteRequest(StrictRequest):
-    patch: dict[str, Any]
-    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
-    envelope: CommandEnvelope
-
-
-class CredentialPoolWriteRequest(StrictRequest):
-    pairs: list[dict[str, Any]] = Field(min_length=1, max_length=100)
-    envelope: CommandEnvelope
-
-
-class SettingsPreflightRequest(StrictRequest):
-    expected_config_revision: int = Field(ge=1)
-
-
-class ReassignCredentialRequest(StrictRequest):
-    credential_pair_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
-    credential_pair_revision: int = Field(ge=1)
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     envelope: CommandEnvelope
 
@@ -550,7 +521,6 @@ def build_v1_router(container: Container) -> APIRouter:
             stages=cast(list[StageSnapshot], body.stages),
             instances=cast(list[AgentInstanceSnapshot], body.instances),
             task_cards=cast(list[TaskCard], body.task_cards),
-            providers=body.providers,
             operation_id=body.operation_id,
             envelope=body.envelope,
         )
@@ -993,91 +963,6 @@ def build_v1_router(container: Container) -> APIRouter:
             envelope=body.envelope,
         )
         return {"schema_version": "1.0", **result}
-
-    @router.get("/config/global", tags=["configuration"])
-    async def get_global_config() -> dict[str, Any]:
-        config = await run_in_threadpool(container.configuration.get_global)
-        return {"schema_version": "1.0", "config": config}
-
-    @router.put("/config/global", tags=["configuration"])
-    async def update_global_config(body: ConfigWriteRequest) -> dict[str, Any]:
-        _require_human(body.envelope, "Only a human may revise global configuration.")
-        config = await run_in_threadpool(
-            container.configuration.save_global,
-            body.config,
-            expected_revision=body.envelope.expected_revision,
-            idempotency_key=body.operation_id,
-            actor=Actor(body.envelope.actor_type, body.envelope.actor_id),
-        )
-        return {"schema_version": "1.0", "config": config}
-
-    @router.get("/instances/{instance_id}/config", tags=["configuration"])
-    async def get_instance_config(instance_id: str) -> dict[str, Any]:
-        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
-        config = await run_in_threadpool(
-            container.configuration.get_instance, task_id, instance_id
-        )
-        return {"schema_version": "1.0", "config": config}
-
-    @router.put("/instances/{instance_id}/config", tags=["configuration"])
-    async def update_instance_config(
-        instance_id: str, body: InstanceConfigWriteRequest
-    ) -> dict[str, Any]:
-        if body.envelope.actor_type not in {"human", "master"}:
-            raise HarnessError(
-                "VALIDATION_ERROR", "Only a human or Master may revise instance configuration."
-            )
-        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
-        config = await run_in_threadpool(
-            container.configuration.update_instance,
-            task_id,
-            instance_id,
-            body.patch,
-            expected_revision=body.envelope.expected_revision,
-            idempotency_key=body.operation_id,
-            actor=Actor(body.envelope.actor_type, body.envelope.actor_id),
-        )
-        return {"schema_version": "1.0", "config": config}
-
-    @router.get("/key-pool", tags=["configuration"])
-    async def get_key_pool() -> dict[str, Any]:
-        items = await run_in_threadpool(container.credentials.list_redacted)
-        return {"schema_version": "1.0", "items": items}
-
-    @router.put("/key-pool", tags=["configuration"])
-    async def update_key_pool(body: CredentialPoolWriteRequest) -> dict[str, Any]:
-        _require_human(body.envelope, "Only a human may revise the credential pool.")
-        result = await run_in_threadpool(
-            container.credentials.configure_pool, body.pairs
-        )
-        return {"schema_version": "1.0", **result}
-
-    @router.post("/config/diagnostics/preflight", tags=["configuration"])
-    async def preflight_settings(body: SettingsPreflightRequest) -> dict[str, Any]:
-        return await run_in_threadpool(
-            container.settings_diagnostics.preflight,
-            body.expected_config_revision,
-        )
-
-    @router.post(
-        "/instances/{instance_id}/reassign-credential-pair",
-        tags=["configuration"],
-    )
-    async def reassign_credential_pair(
-        instance_id: str, body: ReassignCredentialRequest
-    ) -> dict[str, Any]:
-        _require_human(body.envelope, "Only a human may reassign a credential pair.")
-        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
-        result = await run_in_threadpool(
-            container.credentials.reassign_instance,
-            task_id,
-            instance_id,
-            credential_pair_id=body.credential_pair_id,
-            credential_pair_revision=body.credential_pair_revision,
-            idempotency_key=body.operation_id,
-            actor=Actor(body.envelope.actor_type, body.envelope.actor_id),
-        )
-        return {"schema_version": "1.0", "assignment": result}
 
     @router.get("/tasks/{task_id}/usage", tags=["usage"])
     async def get_task_usage(

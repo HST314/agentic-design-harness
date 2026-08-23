@@ -545,8 +545,6 @@ test("instance lifecycle controls submit guarded start, restart, cancel and arch
           required: true,
           approval_mode: "human",
           config_revision: 1,
-          credential_pair_ref: "cred_ui",
-          credential_pair_revision: 1,
           ui_url: instanceStatus === "RUNNING" ? "http://127.0.0.1:18123/" : null,
           process: instanceStatus === "RUNNING"
             ? {
@@ -630,8 +628,6 @@ test("rejected delivery offers isolated revalidation without an Agent restart", 
           required: true,
           approval_mode: "human",
           config_revision: 1,
-          credential_pair_ref: "cred_ui",
-          credential_pair_revision: 1,
           ui_url: null,
           process: null,
           delivery_rejection: retried

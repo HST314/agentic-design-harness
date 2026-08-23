@@ -311,7 +311,7 @@ class ImageAdapterTests(unittest.TestCase):
                 "has_more": False,
             },
         ]
-        instance = {"credential_pair_ref": "cred_test_01"}
+        instance = {"instance_id": "i_image_adapter"}
         with (
             patch.object(self.adapter, "_task_id_for_instance", return_value="t_image_adapter"),
             patch.object(self.adapter, "_base_url", return_value="http://127.0.0.1:1"),
@@ -393,7 +393,7 @@ class ImageAdapterTests(unittest.TestCase):
                     patch.object(
                         self.store.instance,
                         "get",
-                        return_value={"credential_pair_ref": "cred_test_01"},
+                        return_value={"instance_id": "i_image_adapter"},
                     ),
                     patch.object(self.adapter, "_request", return_value=page),
                     self.assertRaisesRegex(HarnessError, "raw usage"),
@@ -407,7 +407,7 @@ class ImageAdapterTests(unittest.TestCase):
             patch.object(
                 self.store.instance,
                 "get",
-                return_value={"credential_pair_ref": "cred_test_01"},
+                return_value={"instance_id": "i_image_adapter"},
             ),
             patch.object(
                 self.adapter,
@@ -446,16 +446,6 @@ class ImageAdapterTests(unittest.TestCase):
         ):
             self.adapter._check_compatibility("http://127.0.0.1:1")
         self.assertEqual(rejected.exception.code, "VALIDATION_ERROR")
-
-    def test_apply_config_rejects_private_task_config_writeback(self) -> None:
-        with patch.object(self.adapter, "_request") as request:
-            result = self.adapter.apply_config(
-                "i_image_adapter", {"watermark": True}, 5, "config_apply_5"
-            )
-        self.assertFalse(result.accepted)
-        self.assertFalse(result.details["restart_required"])
-        self.assertEqual(result.details["reason"], "TASK_CONFIG_IS_IMMUTABLE")
-        request.assert_not_called()
 
     def test_stop_cancels_only_an_active_image_job(self) -> None:
         state = {"job_id": "job_123"}
@@ -745,7 +735,6 @@ class ImageAdapterTests(unittest.TestCase):
             task_card=card,
             task_root=self.store.layout.workspace_root / "tasks" / "t_image_adapter",
             config_ref=self.root / "runtime.yaml",
-            credential_ref=("cred_test_01", 1),
         )
 
 

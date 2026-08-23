@@ -96,63 +96,6 @@ function envelope(key: string, revision: number): Record<string, unknown> {
 }
 
 async function seedRealWorkflow(request: APIRequestContext, deadlineMs: number): Promise<void> {
-  const providerUrl = process.env.HARNESS_BROWSER_PROVIDER_URL;
-  if (!providerUrl) throw new Error("HARNESS_BROWSER_PROVIDER_URL is required");
-  const textModel = process.env.HARNESS_BROWSER_TEXT_MODEL ?? "browser-text";
-  const imageModel = process.env.HARNESS_BROWSER_IMAGE_MODEL ?? "browser-image";
-  const vlmModel = process.env.HARNESS_BROWSER_VLM_MODEL ?? "browser-vlm";
-
-  const current = await jsonRequest(request, "get", "/api/v1/config/global", undefined, deadlineMs);
-  const { revision, ...config } = current.config as Record<string, any>;
-  config.image_provider = "ark";
-  config.image_runtime_policy = {
-    ...config.image_runtime_policy,
-    offline_mode: false,
-    // The approved generic category contributes a blocking asset-rules unknown.
-    // That makes clarification a deterministic protocol requirement even when a
-    // real model decides the prose brief is otherwise complete.
-    category_constraint: { release: "auto" },
-    style_direction: { release: "off" },
-    skill_invocation: { release: "off" },
-    self_check: {
-      termination: "solo",
-      fixed_rounds: 1,
-      max_rounds: 1,
-      stop_early_on_pass: true,
-      release: "manual",
-    },
-  };
-  config.image_model_config = {
-    model_config_id: "browser_deterministic_provider",
-    state_bindings: [
-      ["intake_clarify", "reasoning_llm", textModel],
-      ["confirmation_build", "reasoning_llm", textModel],
-      ["initial_candidate_generation", "text_to_image_model", imageModel],
-      ["self_check_inspection", "vision_language_model", vlmModel],
-      ["self_check_rework", "text_to_image_model", imageModel],
-      ["human_prompt_rework", "text_to_image_model", imageModel],
-    ].map(([state, model_role, model]) => ({ state, model_role, provider: "ark", model })),
-  };
-  await jsonRequest(request, "put", "/api/v1/config/global", {
-    config,
-    operation_id: "configure_browser_real_stack",
-    envelope: envelope("configure-browser-real-stack", Number(revision)),
-  }, deadlineMs);
-  await jsonRequest(request, "put", "/api/v1/key-pool", {
-    pairs: [{
-      credential_pair_id: "cred_browser_real_stack",
-      provider: "ark",
-      key_id: "key_browser_real_stack",
-      base_url: providerUrl,
-      api_key: process.env.HARNESS_BROWSER_PROVIDER_API_KEY ?? "local-provider-value",
-      api_key_env: "ARK_API_KEY",
-      base_url_env: "ARK_BASE_URL",
-      revision: 1,
-      enabled: true,
-    }],
-    envelope: envelope("configure-browser-credential", 0),
-  }, deadlineMs);
-
   await jsonRequest(request, "post", "/api/v1/tasks", {
     task_id: taskId,
     title: "生产链路无 Mock 验收",
@@ -188,8 +131,6 @@ async function seedRealWorkflow(request: APIRequestContext, deadlineMs: number):
       required: true,
       approval_mode: "human",
       config_revision: 1,
-      credential_pair_ref: "pending_assignment",
-      credential_pair_revision: 1,
       workspace_relpath: `instances/${instanceId}`,
       task_card_relpath: `instances/${instanceId}/task-card.json`,
     }],
@@ -221,7 +162,6 @@ async function seedRealWorkflow(request: APIRequestContext, deadlineMs: number):
       },
       created_at: new Date().toISOString(),
     }],
-    providers: { [instanceId]: "ark" },
     operation_id: "save_browser_real_stack_plan",
     envelope: envelope("save-browser-real-stack-plan", 1),
   }, deadlineMs);

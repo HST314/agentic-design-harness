@@ -1289,12 +1289,12 @@ class BoundaryTests(unittest.TestCase):
                 )
                 card["input_assets"][0]["asset_id"] = marked_sensitive_value(
                     hex_value,
-                    source="secret_store",
-                    locator=f"hex-{len(hex_value)}-credential",
+                    source="environment",
+                    locator=f"HEX_{len(hex_value)}_SECRET",
                 )
                 with self.assertRaisesRegex(
                     SemanticContractError,
-                    "serialization rejected sensitive value from secret_store",
+                    "serialization rejected sensitive value from environment",
                 ):
                     serialize_public_task_card(card)
 
@@ -1397,7 +1397,6 @@ class BoundaryTests(unittest.TestCase):
             "model": "seedream",
             "call_type": "text_to_image_model",
             "usage_basis": "image_units",
-            "credential_pair_ref": "cred_contract",
             "input_tokens": 0,
             "output_tokens": 0,
             "cached_input_tokens": 0,

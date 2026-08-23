@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -26,16 +26,8 @@ class HarnessSettings(BaseModel):
     contracts_root: Path = Path("contracts/v1")
     image_agent_root: Path = Path("agents/image_agent_mvp")
     image_agent_lock_path: Path = Path("agents/image-agent.lock.json")
-    image_agent_path_mode: Literal["embedded_only", "external_only"] = "embedded_only"
-    delivery_bundle_migration_mode: Literal[
-        "legacy_only", "dual_write", "bundle_only"
-    ] = "bundle_only"
     image_agent_python: Path = Field(default_factory=lambda: Path(sys.executable))
     image_agent_dependency_root: Path = Path(".runtime/image-agent-deps")
-    image_agent_revision: str | None = Field(
-        default=None,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
-    )
     config_snapshot: ConfigSnapshot | None = Field(default=None, repr=False)
 
     @field_validator("log_level")
@@ -58,34 +50,12 @@ class HarnessSettings(BaseModel):
         ):
             value = getattr(self, name)
             updates[name] = value if value.is_absolute() else project_root / value
-        configured_root = self.image_agent_root
-        configured_root = (
-            configured_root
-            if configured_root.is_absolute()
-            else project_root / configured_root
+        updates["image_agent_root"] = (
+            self.image_agent_root
+            if self.image_agent_root.is_absolute()
+            else project_root / self.image_agent_root
         )
-        embedded_root = project_root / "agents" / "image_agent_mvp"
-        if self.image_agent_path_mode == "embedded_only":
-            selected_root = embedded_root
-        elif self.image_agent_root != Path("agents/image_agent_mvp"):
-            selected_root = configured_root
-        else:
-            raise ValueError(
-                "external_only requires an explicit image_agent_root; "
-                "automatic legacy-directory fallback was removed after P6 acceptance"
-            )
-        updates["image_agent_root"] = selected_root
         return self.model_copy(update=updates)
-
-    @property
-    def delivery_bundle_write_targets(self) -> tuple[bool, bool]:
-        """Return (legacy, bundle) targets for the staged data migration."""
-
-        return {
-            "legacy_only": (True, False),
-            "dual_write": (True, True),
-            "bundle_only": (False, True),
-        }[self.delivery_bundle_migration_mode]
 
 
 def settings_from_snapshot(project_root: Path, snapshot: ConfigSnapshot) -> HarnessSettings:

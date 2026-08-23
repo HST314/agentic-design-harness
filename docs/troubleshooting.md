@@ -16,6 +16,7 @@
 | 后端根地址返回 404 | `/` 没有页面路由 | 正常；打开 18180 Web 或 18080 `/docs` |
 | `writer lease` | 两个 Harness 共用 `control_root` | 只保留一个进程，或使用互不重叠的数据根目录 |
 | `MASTER_RUN_FAILED` | 配置快照、素材解析、模型结构化输出或 Provider 调用失败 | 检查事件中的稳定错误、素材 warning 和三文件配置后，使用同一消息幂等重试 |
+| `CONFIG_ERROR` | 根配置缺失、环境引用未解析或模型能力不匹配 | 运行 `scripts/dev.py config-check`，修正第一条错误后重启 |
 | `MANAGED_BY_HARNESS` | 直接向受管 Image Agent 创建工程 | 回到 Master/计划页创建并确认 TaskCard |
 | `REVISION_CONFLICT` | 页面或调用方持有旧 revision | 重新读取、重新审阅、使用新幂等键提交 |
 | `ASSET_CORRUPTED` | MIME、大小、SHA 或文件身份变化 | 停止发布，检查磁盘和来源，恢复可信备份或重新生成候选 |
@@ -86,12 +87,12 @@ health 成功但 ready 失败时，检查配置路径、契约目录、状态目
 - 重复点击确认：幂等请求应返回同一 batch。若客户端使用了相同幂等键但不同决议，会返回冲突，应重新读取审批状态。
 - 已退回候选仍存在：这是预期审计语义；退回不删除候选或私有文件。
 
-## `/settings` 与 Ark
+## 根配置与 Provider
 
-- 预检 `BLOCKED`：按每项 recovery 文本补齐启用凭据、六状态路由和能力映射；真实 Image 实例运行前另行关闭离线模式。
-- 保存后看不到明文 Key：这是正确的脱敏行为；只显示 Key ID、尾号和 Base URL 主机提示。
-- 修改凭据被拒绝：递增 revision；已存在的 `(pair_id, revision)` 不可改变内容。
-- 付费 smoke 失败：系统不会自动重试。检查 Ark endpoint、配额和网络，保存新修订、重新预检，再由人工重新确认一次费用。
+- 配置检查失败：确认 `.env`、`provider.yaml`、`model_list.yaml`、`runtime.yaml` 都位于仓库根目录，修正报告的第一条错误。
+- 环境引用未解析：检查 `.env` 中变量名与 `${NAME}` 完全一致；不要把秘密直接写入 YAML。
+- 模型能力不匹配：核对模型所属分组、Provider ID 和 `runtime.yaml` 的模型引用。
+- Provider 调用失败：检查 endpoint、配额和网络；系统不会自动执行新的付费 smoke。需要外部真实验证时，由开发者按[配置指南](configuration.md)重新明确授权。
 
 ## 提交诊断材料
 

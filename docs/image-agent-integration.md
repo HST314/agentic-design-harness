@@ -38,26 +38,11 @@ Harness 收集候选时再次打开并复验两份文件。候选只出现在任
 
 发布采用 intent、暂存、全部验证和原子 commit。即使进程在 BundleManifest 准备后崩溃，恢复前也不会出现半公开资产；恢复完成后图片、Markdown 和清单一次性可见。
 
-## 路径与数据迁移
+## 固定路径与交付
 
-Image Agent 路径模式：
+Image Agent 只从 `agents/image_agent_mvp` 启动，并且必须通过 release lock、revision 和内容摘要校验。不存在相邻目录搜索、外部运行模式或路径兼容开关。
 
-| 模式 | 语义 |
-| --- | --- |
-| `embedded_only` | P6 后默认且唯一的新部署方式；只接受固定内嵌路径 |
-| `external_only` | 仅供紧急回滚；必须同时显式配置外部根目录，不会自动搜索相邻目录 |
-
-任何模式都必须通过相同 release lock、revision 和内容摘要校验，路径回滚不能绕过供应链身份。
-
-交付数据写入模式：
-
-| 模式 | Legacy 写入 | Bundle 写入 | 使用时机 |
-| --- | --- | --- | --- |
-| `legacy_only` | 是 | 否 | 仅供受控回滚窗口 |
-| `dual_write` | 是 | 是 | 对账期 |
-| `bundle_only` | 否 | 是 | P6 后默认写入方式 |
-
-P6 双平台矩阵通过后，默认值已由迁移态切换为 `embedded_only + bundle_only`，并删除自动外部目录回退。切换开关只改变新写入目标，不删除既有候选、AssetManifest 或 BundleManifest。降级版本不能识别的新事件时，应恢复升级前一致备份，而不是在原状态目录直接回滚代码。
+新交付只形成 Bundle 候选并原子发布图片、Markdown 与 BundleManifest。不存在旧格式写入、双写或写入目标开关；历史任务、事件、资产与已经发布的交付仍可读取。目标代码无法读取现有状态时，应恢复升级前一致备份，而不是修改运行配置绕过边界。
 
 ## 升级 Image Agent
 

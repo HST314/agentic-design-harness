@@ -152,7 +152,6 @@ class UsageService:
             "model": result.model,
             "call_type": result.call_type,
             "usage_basis": "tokens",
-            "credential_pair_ref": None,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
             "cached_input_tokens": usage.cached_input_tokens,
@@ -265,7 +264,6 @@ class UsageService:
                     "instance_id": master_id,
                     "agent_type": "master",
                     "status": "RUNNING",
-                    "credential_pair_ref": None,
                 },
             ]
         if instance_id is not None:
@@ -406,11 +404,6 @@ class UsageService:
             raise HarnessError(
                 "VALIDATION_ERROR", "The usage event Agent type does not match its instance."
             )
-        if event["credential_pair_ref"] != instance.get("credential_pair_ref"):
-            raise HarnessError(
-                "VALIDATION_ERROR",
-                "The usage event credential does not match the pinned instance pair.",
-            )
         if event["total_tokens"] != event["input_tokens"] + event["output_tokens"]:
             raise HarnessError(
                 "VALIDATION_ERROR", "Usage total_tokens must equal input plus output."
@@ -428,7 +421,6 @@ class UsageService:
             event["task_id"] != task_id
             or event["instance_id"] != instance_id
             or event["agent_type"] != "master"
-            or event["credential_pair_ref"] is not None
         ):
             raise HarnessError("VALIDATION_ERROR", "The Master usage owner is invalid.")
         if event["call_type"] not in {
@@ -453,7 +445,6 @@ class UsageService:
                     "task_id": task_id,
                     "instance_id": instance_id,
                     "agent_type": "master",
-                    "credential_pair_ref": None,
                     "status": "RUNNING",
                 }
         instance = self.store.instance.get(task_id, instance_id)

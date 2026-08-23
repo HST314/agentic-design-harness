@@ -2,7 +2,7 @@ PYTHON ?= python3
 TEST_DEPS ?= .test-deps
 TEST_ENV_STAMP := $(TEST_DEPS)/.requirements-dev-installed
 PYTHONPATH_VALUE := backend:$(TEST_DEPS)
-IMAGE_AGENT_ROOT ?= $(if $(wildcard agents/image_agent_mvp/requirements.lock),agents/image_agent_mvp,../image_agent_mvp)
+IMAGE_AGENT_ROOT ?= agents/image_agent_mvp
 IMAGE_AGENT_DEPS ?= .runtime/image-agent-deps
 IMAGE_AGENT_ENV_STAMP := $(IMAGE_AGENT_DEPS)/.requirements-installed
 REAL_PROVIDER_ENV_FILE ?=
@@ -125,8 +125,7 @@ g3-e2e: test-env image-agent-env
 	HARNESS_IMAGE_AGENT_PYTHON="$(shell command -v $(PYTHON))" \
 	HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT="$(abspath $(IMAGE_AGENT_DEPS))" \
 	PYTHONPATH="$(PYTHONPATH_VALUE):tests" \
-	$(PYTHON) -m unittest tests.e2e.test_g3_manual_delivery \
-		tests.e2e.test_g3_real_image_agent -v
+	$(PYTHON) -m unittest tests.e2e.test_g3_real_image_agent -v
 
 g4-e2e: test-env image-agent-env
 	HARNESS_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \

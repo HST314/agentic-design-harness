@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 import sys
 import tempfile
@@ -24,12 +23,10 @@ from harness.services.agent_config_materialization import ImageAgentConfigMateri
 from harness.services.application import HarnessApplicationService
 from harness.services.approvals import ApprovalInboxService
 from harness.services.assets import AssetService
-from harness.services.credentials import CredentialPoolService
 from harness.services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from harness.services.supervisor import ProcessSupervisor
 from harness.services.task_config import TaskConfigService
 from harness.storage.atomic import read_json
-from harness.storage.ndjson import recover_records
 from runtime_helpers import (
     build_config_snapshot,
     build_service,
@@ -39,9 +36,6 @@ from runtime_helpers import (
     ppt_plan,
 )
 
-CREDENTIAL_FIXTURE = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "p1" / "credential-pairs.json"
-)
 FAKE_AGENT = Path(__file__).resolve().parents[1] / "fixtures" / "fake_agent_process.py"
 
 
@@ -90,9 +84,6 @@ class FakeImageAdapter:
             {"reason": "scripted rejection"} if not self.advance_accepted else {},
         )
 
-    def apply_config(self, instance_id, config, revision, operation_id):
-        return AdapterCommandResult(True, operation_id)
-
     def collect_deliveries(self, instance_id):
         return self.deliveries
 
@@ -117,9 +108,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.store, self.commands = build_service(self.root)
-        self.credentials = CredentialPoolService(self.store)
-        pairs = json.loads(CREDENTIAL_FIXTURE.read_text(encoding="utf-8"))["pairs"]
-        self.credentials.configure_pool(pairs)
         self.assets = AssetService(self.store)
         self.approvals = ApprovalInboxService(self.store)
         self.task_config = TaskConfigService(self.store, build_config_snapshot())
@@ -132,11 +120,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             self.commands,
             self.assets,
             self.approvals,
-            self.credentials,
             self.supervisor,
             self.adapters,
-            # Most of this fixture is the retained legacy-read/write regression suite.
-            delivery_bundle_write_targets=(True, False),
         )
         self.read_only_artifacts: list[Path] = []
 
@@ -182,7 +167,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake", "i_image_2": "fake"},
             operation_id="save_application_plan",
             envelope=envelope("save-application-plan", created["revision"]),
         )
@@ -191,29 +175,21 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake", "i_image_2": "fake"},
             operation_id="save_application_plan",
             envelope=envelope("save-application-plan", created["revision"]),
         )
         self.assertEqual(replay, result)
-        self.assertEqual(
-            [item["credential_pair_ref"] for item in result["plan"]["instances"]],
-            ["cred_test_01", "cred_test_02"],
+        self.assertTrue(
+            all("credential_pair_ref" not in item for item in result["plan"]["instances"])
         )
         self.assertEqual(result["plan"]["task_cards"][0]["schema_version"], "1.1")
-        assignments = [
-            item
-            for item in recover_records(self.credentials.events_path)
-            if item["event_type"] == "CREDENTIAL_PAIR_ASSIGNED"
-        ]
-        self.assertEqual(len(assignments), 2)
 
-    def test_crash_after_assignment_recovers_without_orphaning_the_plan(self) -> None:
+    def test_crash_after_plan_commit_recovers_idempotently(self) -> None:
         created = create_task(self.commands, "t_recover_application")
         draft = image_plan("t_recover_application", 2)
 
         def crash(checkpoint: str) -> None:
-            if checkpoint == "after_instance_created:i_image_1":
+            if checkpoint == "after_plan_commit":
                 raise SimulatedCrash(checkpoint)
 
         with self.assertRaises(SimulatedCrash):
@@ -222,23 +198,18 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 stages=draft["stages"],
                 instances=draft["instances"],
                 task_cards=draft["task_cards"],
-                providers={"i_image_1": "fake", "i_image_2": "fake"},
                 operation_id="recover_application_plan",
                 envelope=envelope("recover-application-plan", created["revision"]),
                 crash_hook=crash,
             )
-        self.assertIsNone(self.store.plan.get("t_recover_application", "t_recover_application"))
+        self.assertIsNotNone(
+            self.store.plan.get("t_recover_application", "t_recover_application")
+        )
         recovered = self.application.recover()
         self.assertEqual(recovered[0]["status"], "RECOVERED")
         self.assertIsNotNone(self.store.plan.get("t_recover_application", "t_recover_application"))
-        assignments = [
-            item
-            for item in recover_records(self.credentials.events_path)
-            if item["event_type"] == "CREDENTIAL_PAIR_ASSIGNED"
-        ]
-        self.assertEqual(len(assignments), 2)
 
-    def test_invalid_plan_is_rejected_before_any_credential_assignment(self) -> None:
+    def test_invalid_plan_is_rejected_before_an_intent_is_written(self) -> None:
         created = create_task(self.commands, "t_invalid_application")
         draft = image_plan("t_invalid_application", 2)
         draft["stages"][0]["instance_ids"] = ["i_image_1"]
@@ -248,12 +219,10 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 stages=draft["stages"],
                 instances=draft["instances"],
                 task_cards=draft["task_cards"],
-                providers={"i_image_1": "fake", "i_image_2": "fake"},
                 operation_id="invalid_application_plan",
                 envelope=envelope("invalid-application-plan", created["revision"]),
             )
         self.assertEqual(invalid.exception.code, "VALIDATION_ERROR")
-        self.assertEqual(recover_records(self.credentials.events_path), [])
         self.assertFalse(self.application._intent_path("invalid_application_plan").exists())
 
     def test_stale_revision_is_rejected_before_intent_or_instance_creation(self) -> None:
@@ -271,18 +240,16 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 stages=draft["stages"],
                 instances=draft["instances"],
                 task_cards=draft["task_cards"],
-                providers={"i_image_1": "fake"},
                 operation_id="stale_application_plan",
                 envelope=envelope("stale-application-plan", created["revision"]),
             )
 
         self.assertEqual(stale.exception.code, "REVISION_CONFLICT")
-        self.assertEqual(recover_records(self.credentials.events_path), [])
         self.assertIsNone(self.store.instance.get("t_stale_application", "i_image_1"))
         self.assertFalse(self.application._intent_path("stale_application_plan").exists())
         self.assertEqual(self.application.recover(), [])
 
-    def test_revision_advance_after_intent_aborts_before_first_assignment(self) -> None:
+    def test_revision_advance_after_intent_aborts_without_writing_instances(self) -> None:
         created = create_task(self.commands, "t_intent_revision_advance")
         draft = image_plan("t_intent_revision_advance", 2)
 
@@ -296,7 +263,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 stages=draft["stages"],
                 instances=draft["instances"],
                 task_cards=draft["task_cards"],
-                providers={"i_image_1": "fake", "i_image_2": "fake"},
                 operation_id="intent_revision_advance",
                 envelope=envelope("intent-revision-advance", created["revision"]),
                 crash_hook=crash,
@@ -321,95 +287,11 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
         intent = read_json(self.application._intent_path("intent_revision_advance"))
         self.assertEqual(intent["state"], "ABORTED")
-        self.assertEqual(recover_records(self.credentials.events_path), [])
         self.assertIsNone(self.store.instance.get("t_intent_revision_advance", "i_image_1"))
         self.assertIsNone(self.store.instance.get("t_intent_revision_advance", "i_image_2"))
         self.assertEqual(self.application.recover(), [])
 
-    def test_revision_advance_after_partial_assignment_compensates_and_aborts(self) -> None:
-        created = create_task(self.commands, "t_partial_revision_advance")
-        draft = image_plan("t_partial_revision_advance", 2)
-
-        def crash(checkpoint: str) -> None:
-            if checkpoint == "after_instance_created:i_image_1":
-                raise SimulatedCrash(checkpoint)
-
-        with self.assertRaises(SimulatedCrash):
-            self.application.save_plan_and_create_instances(
-                "t_partial_revision_advance",
-                stages=draft["stages"],
-                instances=draft["instances"],
-                task_cards=draft["task_cards"],
-                providers={"i_image_1": "fake", "i_image_2": "fake"},
-                operation_id="partial_revision_advance",
-                envelope=envelope("partial-revision-advance", created["revision"]),
-                crash_hook=crash,
-            )
-        self.assertIsNotNone(self.store.instance.get("t_partial_revision_advance", "i_image_1"))
-        advanced = self.commands.register_input_manifest(
-            "t_partial_revision_advance",
-            "assets/revised-input.json",
-            envelope("advance-after-partial", created["revision"]),
-        )
-
-        recovered = self.application.recover()
-
-        self.assertEqual(
-            recovered,
-            [
-                {
-                    "operation_id": "partial_revision_advance",
-                    "status": "ABORTED",
-                    "error_code": "REVISION_CONFLICT",
-                }
-            ],
-        )
-        intent = read_json(self.application._intent_path("partial_revision_advance"))
-        self.assertEqual(intent["state"], "ABORTED")
-        events = recover_records(self.credentials.events_path)
-        self.assertEqual(
-            [item["event_type"] for item in events],
-            ["CREDENTIAL_PAIR_ASSIGNED", "CREDENTIAL_INSTANCE_CREATION_REVOKED"],
-        )
-        credential_state = read_json(self.credentials.state_path)
-        self.assertEqual(credential_state["assignments"], {})
-        for instance_id in ("i_image_1", "i_image_2"):
-            self.assertIsNone(self.store.instance.get("t_partial_revision_advance", instance_id))
-
-        # Credential recovery must retire the compensated snapshot again if the
-        # generic event-first store rebuild recreates it during a later restart.
-        self.store.recover()
-        self.credentials.recover()
-        self.assertIsNone(self.store.instance.get("t_partial_revision_advance", "i_image_1"))
-        self.assertEqual(self.application.recover(), [])
-
-        def crash_retry(checkpoint: str) -> None:
-            if checkpoint == "after_instance_created:i_image_1":
-                raise SimulatedCrash(checkpoint)
-
-        with self.assertRaises(SimulatedCrash):
-            self.application.save_plan_and_create_instances(
-                "t_partial_revision_advance",
-                stages=draft["stages"],
-                instances=draft["instances"],
-                task_cards=draft["task_cards"],
-                providers={"i_image_1": "fake", "i_image_2": "fake"},
-                operation_id="partial_revision_retry",
-                envelope=envelope("partial-revision-retry", advanced["revision"]),
-                crash_hook=crash_retry,
-            )
-        self.store.recover()
-        self.credentials.recover()
-        retry_recovery = self.application.recover()
-        self.assertEqual(retry_recovery[0]["status"], "RECOVERED")
-        retry_plan = self.store.plan.get("t_partial_revision_advance", "t_partial_revision_advance")
-        self.assertEqual(retry_plan["task"]["status"], "AWAITING_START_CONFIRMATION")
-        self.assertEqual(
-            len(retry_plan["instances"]),
-            2,
-        )
-
-    def test_unavailable_ppt_plan_saves_without_consuming_credentials(self) -> None:
+    def test_unavailable_ppt_plan_saves_without_deployment_configuration(self) -> None:
         created = create_task(self.commands, "t_ppt_application")
         draft = ppt_plan("t_ppt_application")
         result = self.application.save_plan_and_create_instances(
@@ -417,16 +299,11 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={},
             operation_id="save_ppt_application_plan",
             envelope=envelope("save-ppt-application-plan", created["revision"]),
         )
         self.assertEqual(result["plan"]["instances"][0]["status"], "UNAVAILABLE")
-        self.assertEqual(
-            result["plan"]["instances"][0]["credential_pair_ref"],
-            "ppt_adapter_unavailable",
-        )
-        self.assertEqual(recover_records(self.credentials.events_path), [])
+        self.assertNotIn("credential_pair_ref", result["plan"]["instances"][0])
 
     def test_start_intent_replays_adapter_start_after_process_crash_window(self) -> None:
         self._configure_runtime_artifact("application-fake-agent")
@@ -437,7 +314,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
             operation_id="prepare_start_application",
             envelope=envelope("prepare-start-application", created["revision"]),
         )
@@ -476,7 +352,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
             operation_id="prepare_confirm_recovery",
             envelope=envelope("prepare-confirm-recovery", created["revision"]),
         )
@@ -510,7 +385,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                     stages=draft["stages"],
                     instances=draft["instances"],
                     task_cards=draft["task_cards"],
-                    providers={"i_image_1": "fake", "i_image_2": "fake"},
                     operation_id=f"concurrent_application_{index}",
                     envelope=envelope(f"concurrent-application-{index}", created["revision"]),
                 )
@@ -521,12 +395,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             outcomes = list(executor.map(save, (1, 2)))
         self.assertEqual(sum(isinstance(item, dict) for item in outcomes), 1)
         self.assertEqual(sum(isinstance(item, HarnessError) for item in outcomes), 1)
-        assignments = [
-            item
-            for item in recover_records(self.credentials.events_path)
-            if item["event_type"] == "CREDENTIAL_PAIR_ASSIGNED"
-        ]
-        self.assertEqual(len(assignments), 2)
+        plan = self.store.plan.get("t_concurrent_application", "t_concurrent_application")
+        self.assertEqual(len(plan["instances"]), 2)
 
     def test_task_cancel_replays_every_child_and_commit_crash_window(self) -> None:
         checkpoints = [
@@ -630,7 +500,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
             operation_id="prepare_delivery_application",
             envelope=envelope("prepare-delivery-application", created["revision"]),
         )
@@ -735,7 +604,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
             operation_id="prepare_delivery_actor",
             envelope=envelope("prepare-delivery-actor", created["revision"]),
         )
@@ -776,7 +644,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
             operation_id="prepare_approval_application",
             envelope=envelope("prepare-approval-application", created["revision"]),
         )
@@ -924,72 +791,9 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             ["APPROVAL_REQUIRED"],
         )
 
-    def test_completed_observation_publishes_required_asset_before_success(self) -> None:
-        created = create_task(self.commands, "t_collect_application", "auto")
-        draft = image_plan("t_collect_application")
-        saved = self.application.save_plan_and_create_instances(
-            "t_collect_application",
-            stages=draft["stages"],
-            instances=draft["instances"],
-            task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
-            operation_id="prepare_collect_application",
-            envelope=envelope("prepare-collect-application", created["revision"]),
-        )
-        starting = self.commands.transition_instance(
-            "t_collect_application",
-            "i_image_1",
-            "STARTING",
-            envelope("collect-starting", saved["task_revision"], "adapter"),
-        )
-        self.commands.transition_instance(
-            "t_collect_application",
-            "i_image_1",
-            "RUNNING",
-            envelope("collect-running", starting["task_revision"], "adapter"),
-        )
-        content = b"\x89PNG\r\n\x1a\ncollected-delivery"
-        instance_root = self.assets.initialize_instance_workspace(
-            "t_collect_application", "i_image_1"
-        )
-        output = instance_root / "outputs" / "final.png"
-        output.write_bytes(content)
-        self.fake_adapter.deliveries = [
-            {
-                "source_relative_path": "instances/i_image_1/outputs/final.png",
-                "kind": "image",
-                "role": "final_artwork",
-                "description": "Collected final artwork",
-                "sha256": hashlib.sha256(content).hexdigest(),
-            }
-        ]
-        self.fake_adapter.observation = AdapterObservation(
-            "RUNNING",
-            step_id="completed",
-            details={"completed": True},
-        )
-
-        completed = self.application.observe_instance("t_collect_application", "i_image_1")
-        self.assertEqual(completed["instance"]["status"], "SUCCEEDED")
-        published = self.assets.list_assets("t_collect_application")
-        self.assertEqual(len(published), 1)
-        self.assertEqual(published[0]["manifest"]["producer_instance_id"], "i_image_1")
-        self.assertEqual(published[0]["manifest"]["role"], "final_artwork")
-        notifications = self.approvals.list_inbox(owner="human")
-        self.assertEqual(
-            [item["kind"] for item in notifications],
-            ["INSTANCE_SUCCEEDED", "TASK_SUCCEEDED"],
-        )
-        self.application.observe_instance("t_collect_application", "i_image_1")
-        self.assertEqual(len(self.assets.list_assets("t_collect_application")), 1)
-        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
-        self.assertEqual(self.application.recover(), [])
-        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
-
     def test_bundle_delivery_waits_for_human_and_publishes_two_assets_atomically(self) -> None:
         task_id = "t_bundle_delivery"
         self._running_image_task(task_id, 1)
-        self.application.delivery_bundle_write_targets = (True, True)
         image = b"\x89PNG\r\n\x1a\nbundle-final-image"
         note = b"# Branch design note\n\nImmutable delivery rationale.\n"
         alternate_image = b"\x89PNG\r\n\x1a\nalternate-branch-image"
@@ -1115,7 +919,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
     ) -> None:
         task_id = "t_bundle_crash_recovery"
         self._running_image_task(task_id, 1)
-        self.application.delivery_bundle_write_targets = (False, True)
         image = b"\x89PNG\r\n\x1a\ncrash-safe-image"
         note = b"# Crash-safe note\n"
         instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
@@ -1214,7 +1017,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
             operation_id="prepare_delivery_contract_cardinality",
             envelope=envelope("prepare-delivery-contract-cardinality", created["revision"]),
         )
@@ -1243,104 +1045,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             )
         self.assertEqual(unexpected.exception.code, "VALIDATION_ERROR")
 
-    def test_rejected_delivery_set_stays_private_and_retries_without_agent_restart(self) -> None:
-        task_id = "t_rejected_delivery_set"
-        created = create_task(self.commands, task_id, "auto")
-        draft = image_plan(task_id)
-        draft["task_cards"][0]["expected_deliveries"].append(
-            {
-                "kind": "image",
-                "role": "secondary_artwork",
-                "required": True,
-                "accepted_mime_types": ["image/png"],
-            }
-        )
-        saved = self.application.save_plan_and_create_instances(
-            task_id,
-            stages=draft["stages"],
-            instances=draft["instances"],
-            task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
-            operation_id="prepare_rejected_delivery_set",
-            envelope=envelope("prepare-rejected-delivery-set", created["revision"]),
-        )
-        starting = self.commands.transition_instance(
-            task_id,
-            "i_image_1",
-            "STARTING",
-            envelope("rejected-delivery-starting", saved["task_revision"], "adapter"),
-        )
-        self.commands.transition_instance(
-            task_id,
-            "i_image_1",
-            "RUNNING",
-            envelope("rejected-delivery-running", starting["task_revision"], "adapter"),
-        )
-        instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
-        primary_content = b"\x89PNG\r\n\x1a\nprimary"
-        secondary_content = b"\xff\xd8\xffsecondary-jpeg"
-        primary = instance_root / "outputs" / "primary.png"
-        secondary = instance_root / "outputs" / "secondary.jpg"
-        primary.write_bytes(primary_content)
-        secondary.write_bytes(secondary_content)
-        self.fake_adapter.deliveries = [
-            {
-                "source_relative_path": "instances/i_image_1/outputs/primary.png",
-                "kind": "image",
-                "role": "final_artwork",
-                "description": "Primary artwork",
-                "sha256": hashlib.sha256(primary_content).hexdigest(),
-            },
-            {
-                "source_relative_path": "instances/i_image_1/outputs/secondary.jpg",
-                "kind": "image",
-                "role": "secondary_artwork",
-                "description": "Secondary artwork",
-                "sha256": hashlib.sha256(secondary_content).hexdigest(),
-            },
-        ]
-        self.fake_adapter.observation = AdapterObservation(
-            "RUNNING",
-            step_id="completed",
-            details={"completed": True},
-        )
-
-        rejected = self.application.observe_instance(task_id, "i_image_1")
-
-        self.assertEqual(rejected["instance"]["status"], "FAILED")
-        self.assertEqual(rejected["instance"]["delivery_rejection"]["code"], "VALIDATION_ERROR")
-        self.assertEqual(self.assets.list_assets(task_id), [])
-        self.assertFalse(
-            any(
-                item.get("event_type") == "ASSET_PUBLISHED"
-                for item in recover_records(self.assets._event_path(task_id))
-            )
-        )
-        self.approvals.reconcile_terminal_notifications()
-        notification_kinds = [
-            item["kind"] for item in self.approvals.list_inbox(owner="human")
-        ]
-        self.assertIn("INSTANCE_DELIVERY_REJECTED", notification_kinds)
-        self.assertNotIn("INSTANCE_FAILED", notification_kinds)
-
-        replacement = b"\x89PNG\r\n\x1a\nsecondary-png"
-        secondary.write_bytes(replacement)
-        self.fake_adapter.deliveries[1].update(
-            {
-                "source_relative_path": "instances/i_image_1/outputs/secondary.jpg",
-                "sha256": hashlib.sha256(replacement).hexdigest(),
-            }
-        )
-        retry_revision = self.store.task.revision(task_id, task_id)
-        retried = self.application.retry_rejected_delivery(
-            task_id,
-            "i_image_1",
-            envelope=envelope("retry-rejected-delivery", retry_revision),
-        )
-
-        self.assertEqual(retried["result"]["instance"]["status"], "SUCCEEDED")
-        self.assertEqual(len(self.assets.list_assets(task_id)), 2)
-        self.assertEqual(self.fake_adapter.start_calls, [])
 
     def test_publication_batch_is_invisible_until_instance_success(self) -> None:
         task_id = "t_atomic_publication_visibility"
@@ -1390,7 +1094,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
             operation_id="prepare_concurrent_approval",
             envelope=envelope("prepare-concurrent-approval", created["revision"]),
         )
@@ -1446,7 +1149,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             stages=draft["stages"],
             instances=draft["instances"],
             task_cards=draft["task_cards"],
-            providers={"i_image_1": "fake"},
             operation_id=f"prepare_{task_id}",
             envelope=envelope(f"prepare-{task_id}", created["revision"]),
         )

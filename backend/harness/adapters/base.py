@@ -22,7 +22,6 @@ class PrepareRequest:
     task_card: TaskCard
     task_root: Path
     config_ref: Path
-    credential_ref: tuple[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,14 +70,6 @@ class AgentAdapter(Protocol):
         instance_id: str,
         action: str,
         payload: dict[str, Any],
-        operation_id: str,
-    ) -> AdapterCommandResult: ...
-
-    def apply_config(
-        self,
-        instance_id: str,
-        config: dict[str, Any],
-        revision: int,
         operation_id: str,
     ) -> AdapterCommandResult: ...
 

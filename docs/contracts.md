@@ -18,7 +18,7 @@
 
 ```text
 contracts/v1/schemas/    对象 JSON Schema
-contracts/v1/catalogs/   版本、状态、错误码与凭据检测策略
+contracts/v1/catalogs/   版本、状态、错误码与敏感数据检测策略
 contracts/v1/examples/   通过当前 Schema 与跨对象规则的业务示例
 frontend/src/api/generated-contracts.ts  从 Schema 生成的前端类型
 ```
@@ -32,7 +32,7 @@ python scripts/generate_frontend_contracts.py --check
 
 不要手工编辑生成的 TypeScript。`make check` 会验证生成结果没有漂移，单元/契约测试会编译全部 Schema、验证示例和状态目录，并检查跨对象不变量。
 
-`config/examples` 保存非敏感运行配置样例，不属于业务 JSON Schema；`scripts/check_docs.py` 会对 Ark Key Pair、六状态模型路由和文档中的 JSON 代码块做语义/语法校验。
+根配置不属于业务 JSON Schema，由 `python3 scripts/dev.py config-check` 使用生产配置模型校验；`scripts/check_docs.py` 只校验现行文档集合、链接、版本和代码块。
 
 ## 兼容策略
 
@@ -69,4 +69,4 @@ JSON Schema 负责单对象形状，服务与契约测试负责以下关系：
 5. 先发布兼容消费者，确认读旧写旧与读新能力，再切换生产者。
 6. 更新本指南与相关 API 文档；CI 生成验证报告 artifact。
 
-状态枚举、合法转换或聚合优先级的改变属于状态机语义变化。凭据检测策略的调整必须同时包含真实秘密正例和业务 ID/摘要误报反例，不能只靠字符串熵或长度猜测秘密。
+状态枚举、合法转换或聚合优先级的改变属于状态机语义变化。敏感数据检测策略的调整必须同时包含真实秘密正例和业务 ID/摘要误报反例，不能只靠字符串熵或长度猜测秘密。

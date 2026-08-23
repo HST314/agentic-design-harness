@@ -27,15 +27,11 @@
             "ADAPTER_UNAVAILABLE",
             "UI_LINK_REJECTED",
             "BUDGET_GATE_DENIED",
-            "CREDENTIAL_PAIR_UNAVAILABLE",
-            "CREDENTIAL_PAIR_INVALID",
             "PATH_OUTSIDE_TASK_ROOT",
             "ASSET_VALIDATION_FAILED",
             "ASSET_CORRUPTED",
             "PROCESS_START_FAILED",
-            "MASTER_UNAVAILABLE",
             "MASTER_RUN_FAILED",
-            "PROVIDER_DIAGNOSTIC_FAILED",
             "INTERNAL_ERROR"
           ]
         },
