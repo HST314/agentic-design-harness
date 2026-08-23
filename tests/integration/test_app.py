@@ -303,7 +303,8 @@ class ApplicationTests(unittest.TestCase):
                 )
 
                 instance_detail = client.get("/api/v1/instances/i_api_g2?refresh=false")
-                self.assertEqual(instance_detail.json()["credential"]["key_tail"], "i-g2")
+                self.assertNotIn("credential", instance_detail.json())
+                self.assertNotIn("config", instance_detail.json())
                 self.assertNotIn("not-a-secret-api-g2", instance_detail.text)
 
                 created_second = client.post(

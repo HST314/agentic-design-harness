@@ -26,6 +26,11 @@ class G4ApiTests(unittest.TestCase):
                 )
             )
             with TestClient(app) as client:
+                paid_smoke = client.post(
+                    "/api/v1/config/diagnostics/paid-smoke",
+                    json={},
+                )
+                self.assertEqual(paid_smoke.status_code, 404, paid_smoke.text)
                 container = app.state.container
                 create_task(container.commands, "t_g4_api")
                 container.commands.save_plan(

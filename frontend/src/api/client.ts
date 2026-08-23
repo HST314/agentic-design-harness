@@ -204,12 +204,6 @@ export interface InstanceDetailResponse {
   instance: AgentInstance;
   observation: AdapterObservation | null;
   pending_approval: Approval | null;
-  credential: CredentialSummary | null;
-  config: {
-    config_revision: number;
-    restart_required: boolean;
-    config: Record<string, unknown>;
-  };
 }
 
 export interface AuditEvent {
@@ -421,6 +415,32 @@ export interface BundleManifest {
   published_at: string;
 }
 
+const DEPLOYMENT_ERROR_PREFIXES = [
+  "CONFIG_",
+  "CREDENTIAL_",
+  "MODEL_PROVIDER_",
+] as const;
+
+const DEPLOYMENT_ERROR_CODES = new Set([
+  "ADAPTER_UNAVAILABLE",
+  "MASTER_RUN_FAILED",
+  "MASTER_UNAVAILABLE",
+  "PROCESS_START_FAILED",
+  "PROVIDER_DIAGNOSTIC_FAILED",
+  "UI_LINK_REJECTED",
+]);
+
+const DEPLOYMENT_ERROR_TERMS = /(?:api\s*key|credential|endpoint|mastergateway|model_list\.yaml|provider(?:\.yaml)?|runtime\.yaml|\.env|凭据|模型路由|配置(?:文件|快照|修订|错误|缺失))/i;
+
+export function designerErrorMessage(message: string, code?: string): string {
+  const deploymentCode = code !== undefined && (
+    DEPLOYMENT_ERROR_CODES.has(code)
+    || DEPLOYMENT_ERROR_PREFIXES.some((prefix) => code.startsWith(prefix))
+  );
+  if (!deploymentCode && !DEPLOYMENT_ERROR_TERMS.test(message)) return message;
+  return "智能创作服务暂时不可用，请稍后重试；当前任务内容已保留。如持续失败，请联系支持人员。";
+}
+
 export interface DeliveryReview {
   bundle_id: string;
   approval: Approval;
@@ -432,36 +452,6 @@ export interface DeliveryBundlesResponse {
   candidates: DeliveryBundleCandidate[];
   manifests: BundleManifest[];
   reviews: DeliveryReview[];
-}
-
-export interface SettingsPreflight {
-  schema_version: string;
-  status: "READY" | "BLOCKED";
-  config_revision: number;
-  provider: string;
-  model_config_id: string;
-  credential_pairs: CredentialSummary[];
-  checks: Array<{
-    check_id: string;
-    status: "PASS" | "BLOCKED";
-    message: string;
-    recovery: string | null;
-  }>;
-  paid_request_performed: false;
-  checked_at: string;
-}
-
-export interface PaidSmokeResult {
-  schema_version: string;
-  status: "PASSED";
-  config_revision: number;
-  provider: "ark";
-  model: string;
-  credential_pair: CredentialSummary;
-  generated_count: number;
-  duration_ms: number;
-  paid_request_performed: true;
-  completed_at: string;
 }
 
 export class ApiError extends Error {
@@ -648,17 +638,18 @@ export class ApiClient {
         signal.removeEventListener("abort", abort);
         const payload = xhr.response as
           | TaskIntakeMutationResponse
-          | { error?: { message?: string } }
+          | { error?: { message?: string; code?: string } }
           | null;
         if (xhr.status >= 200 && xhr.status < 300 && payload) {
           onProgress(100);
           resolve(payload as TaskIntakeMutationResponse);
           return;
         }
-        const message = payload && "error" in payload && payload.error?.message
-          ? payload.error.message
+        const error = payload && "error" in payload ? payload.error : undefined;
+        const message = error?.message
+          ? designerErrorMessage(error.message, error.code)
           : `上传失败（${xhr.status || "网络中断"}）。`;
-        reject(new ApiError(message, xhr.status));
+        reject(new ApiError(message, xhr.status, error?.code));
       });
       xhr.addEventListener("error", () => {
         signal.removeEventListener("abort", abort);
@@ -774,22 +765,6 @@ export class ApiClient {
 
   updateKeyPool(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.send("PUT", "/api/v1/key-pool", body);
-  }
-
-  preflightSettings(expectedConfigRevision: number): Promise<SettingsPreflight> {
-    return this.send("POST", "/api/v1/config/diagnostics/preflight", {
-      expected_config_revision: expectedConfigRevision,
-    });
-  }
-
-  runPaidSmoke(body: {
-    credential_pair_id: string;
-    credential_pair_revision: number;
-    cost_confirmation: true;
-    operation_id: string;
-    envelope: CommandEnvelope;
-  }): Promise<PaidSmokeResult> {
-    return this.send("POST", "/api/v1/config/diagnostics/paid-smoke", body);
   }
 
   resolveApproval(
@@ -912,6 +887,6 @@ export class ApiClient {
     } catch {
       // The status fallback remains useful when an intermediary returns a non-JSON body.
     }
-    return new ApiError(message, response.status, code, details);
+    return new ApiError(designerErrorMessage(message, code), response.status, code, details);
   }
 }

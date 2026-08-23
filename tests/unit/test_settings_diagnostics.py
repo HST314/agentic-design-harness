@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from urllib.error import URLError
 
-from harness.core.errors import HarnessError
 from harness.services.configuration import (
     IMAGE_STATE_ROLES,
     ConfigurationService,
@@ -16,7 +13,6 @@ from harness.services.configuration import (
 )
 from harness.services.credentials import CredentialPoolService
 from harness.services.settings_diagnostics import SettingsDiagnosticsService
-from harness.storage.repository import Actor
 from pydantic import ValidationError
 from runtime_helpers import build_store
 
@@ -72,80 +68,16 @@ class SettingsDiagnosticsTests(unittest.TestCase):
         self.store.close()
         self.temporary.cleanup()
 
-    def test_preflight_is_zero_cost_and_paid_smoke_is_redacted_and_idempotent(self) -> None:
-        calls: list[tuple[str, str, str]] = []
-
-        def provider_request(credential, model, size):
-            calls.append((credential.credential_pair_id, model, size))
-            return {"data": [{"url": "https://signed.example.invalid/result"}]}
-
+    def test_preflight_is_zero_cost_and_returns_only_redacted_credentials(self) -> None:
         diagnostics = SettingsDiagnosticsService(
             self.configuration,
             self.credentials,
-            self.store.layout.control_root,
-            provider_request,
         )
         preflight = diagnostics.preflight(1)
         self.assertEqual(preflight["status"], "READY")
         self.assertFalse(preflight["paid_request_performed"])
-        self.assertEqual(calls, [])
-
-        result = diagnostics.run_paid_smoke(
-            expected_config_revision=1,
-            credential_pair_id="ark_primary",
-            credential_pair_revision=1,
-            operation_id="smoke_once",
-            actor=Actor("human", "tester"),
-        )
-        replay = diagnostics.run_paid_smoke(
-            expected_config_revision=1,
-            credential_pair_id="ark_primary",
-            credential_pair_revision=1,
-            operation_id="smoke_once",
-            actor=Actor("human", "tester"),
-        )
-        self.assertEqual(result, replay)
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(result["paid_request_performed"])
-        self.assertGreaterEqual(result["duration_ms"], 0)
-        serialized = json.dumps(result)
-        self.assertNotIn(self.secret, serialized)
-        self.assertNotIn("signed.example", serialized)
-        self.assertNotIn("https://ark.example.invalid/api/v3", serialized)
-
-    def test_unknown_paid_outcome_is_never_automatically_replayed(self) -> None:
-        calls = 0
-
-        def provider_request(_credential, _model, _size):
-            nonlocal calls
-            calls += 1
-            raise URLError("connection closed after request")
-
-        diagnostics = SettingsDiagnosticsService(
-            self.configuration,
-            self.credentials,
-            self.store.layout.control_root,
-            provider_request,
-        )
-        with self.assertRaises(HarnessError) as failed:
-            diagnostics.run_paid_smoke(
-                expected_config_revision=1,
-                credential_pair_id="ark_primary",
-                credential_pair_revision=1,
-                operation_id="smoke_unknown",
-                actor=Actor("human", "tester"),
-            )
-        self.assertEqual(failed.exception.code, "PROVIDER_DIAGNOSTIC_FAILED")
-        with self.assertRaises(HarnessError) as replay:
-            diagnostics.run_paid_smoke(
-                expected_config_revision=1,
-                credential_pair_id="ark_primary",
-                credential_pair_revision=1,
-                operation_id="smoke_unknown",
-                actor=Actor("human", "tester"),
-            )
-        self.assertEqual(replay.exception.code, "INVALID_STATE_TRANSITION")
-        self.assertEqual(calls, 1)
+        self.assertEqual(preflight["credential_pairs"][0]["key_tail"], "cted")
+        self.assertNotIn("api_key", preflight["credential_pairs"][0])
 
     def test_model_routes_require_all_six_role_correct_states(self) -> None:
         with self.assertRaises(ValidationError):

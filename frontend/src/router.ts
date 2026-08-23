@@ -1,4 +1,4 @@
-export type RouteName = "tasks" | "inbox" | "settings";
+export type RouteName = "tasks" | "inbox";
 export type TaskSection = "resources" | "approvals" | "usage" | "events";
 export type Route =
   | { name: RouteName }
@@ -9,7 +9,6 @@ export type Route =
 const ROUTES: Record<RouteName, string> = {
   tasks: "/tasks",
   inbox: "/inbox",
-  settings: "/settings",
 };
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;

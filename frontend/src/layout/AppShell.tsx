@@ -287,7 +287,6 @@ export function AppShell(): React.JSX.Element {
           <nav className="workbench-utilities" aria-label="工作台工具">
             <Link to="/tasks"><Icon name="history" /><span className="workbench-label">已验收任务面板</span></Link>
             <Link to="/inbox"><Icon name="inbox" /><span className="workbench-label">收件箱</span></Link>
-            <Link to="/settings"><Icon name="settings" /><span className="workbench-label">设置</span></Link>
           </nav>
         </aside>
 

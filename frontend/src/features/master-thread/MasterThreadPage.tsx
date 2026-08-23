@@ -505,12 +505,12 @@ function ConfirmDialog({
     <dialog ref={ref} className="master-confirm-dialog" aria-labelledby="master-confirm-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}>
       <div className="workbench-drawer__header"><div><p className="workbench-eyebrow">最终确认</p><h2 id="master-confirm-title">启动计划 r{proposal.revision}</h2></div></div>
       <div className="master-confirm-dialog__body">
-        <p>确认后将绑定当前计划、全部任务卡和主任务的准确修订，分配凭据并启动满足门禁的实例。任一版本变化都会拒绝启动并要求重新审阅。</p>
+        <p>确认后将绑定当前计划、全部任务卡和主任务的准确修订，并启动满足业务门禁的实例。任一版本变化都会拒绝启动并要求重新审阅。</p>
         <dl><div><dt>主任务修订</dt><dd>r{taskRevision}</dd></div><div><dt>计划修订</dt><dd>r{proposal.revision}</dd></div><div><dt>任务卡</dt><dd>{proposal.execution_cards.length}</dd></div><div><dt>预计实例</dt><dd>{proposal.work_items.length}</dd></div></dl>
         <ul className="master-confirm-dialog__cards" aria-label="确认的任务卡修订">
           {proposal.execution_cards.map((card) => <li key={card.card_id}><span><code>{card.card_id}</code><small>实例 {card.instance_id}</small></span><strong>r{card.revision}</strong></li>)}
         </ul>
-        <p className="master-confirm-dialog__warning"><Icon name="status" />点击“确认并启动”表示你已知晓本次运行可能产生真实模型费用；启动仍受凭据、预算与 Adapter 服务端门禁约束。</p>
+        <p className="master-confirm-dialog__warning"><Icon name="status" />点击“确认并启动”表示你已知晓本次运行可能产生创作服务费用；启动仍受预算和服务可用性检查。</p>
         <div className="workbench-dialog-actions">
           <button type="button" className="workbench-secondary-button" disabled={pending} onClick={onCancel}>返回审阅</button>
           <button type="button" className="workbench-primary-button" disabled={pending} onClick={onConfirm}>{pending ? "正在启动…" : "确认并启动"}</button>
@@ -634,8 +634,8 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         <span className={`master-task-status master-task-status--${data.task.status.toLowerCase()}`}><span aria-hidden="true" />{taskStatusLabel[data.task.status] ?? data.task.status}</span>
       </header>
       <TaskTabs taskId={taskId} />
-      {!data.gateway_available || data.thread.last_error?.code === "MASTER_UNAVAILABLE" ? (
-        <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>Master 服务未配置</strong><p>{data.thread.last_error?.message ?? "需要配置真实 MasterGateway 后才能分析消息；系统不会生成占位回复或伪计划。"}</p></div></div>
+      {data.thread.last_error && !busy ? (
+        <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>本次智能分析未完成</strong><p>任务内容和对话记录已保留。请稍后重新发送；若持续失败，请联系支持人员。</p></div></div>
       ) : busy ? (
         <div className="master-alert" role="status"><Icon name="status" /><div><strong>已进入 Master 分析阶段</strong><p>消息与运行标识已保存；页面会每 3 秒读取一次版本化结果。</p></div></div>
       ) : null}

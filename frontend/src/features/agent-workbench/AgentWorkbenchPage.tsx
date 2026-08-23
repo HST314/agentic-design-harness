@@ -39,7 +39,7 @@ function WorkbenchFailure({
     <div className="agent-workbench-error" role="alert">
       <Icon name="status" />
       <div>
-        <p className="workbench-eyebrow">{link?.frame_policy ?? "WORKBENCH_UNAVAILABLE"}</p>
+        <p className="workbench-eyebrow">专业工作台</p>
         <h2>{heading}</h2>
         <p>{message}</p>
         <div className="agent-workbench-error__actions">
@@ -110,11 +110,11 @@ export function AgentWorkbenchPage(): React.JSX.Element {
     return (
       <section className="workbench-page agent-workbench" aria-labelledby="agent-workbench-title">
         <header className="agent-workbench__context">
-          <div><p className="workbench-eyebrow">{detail.data.task.title} / Stage {item.stage.position}</p><h1 id="agent-workbench-title">{item.title}</h1><p>PPT 能力尚未接入，系统不会打开伪工作台或把该工作项标记为成功。</p></div>
+          <div><p className="workbench-eyebrow">{detail.data.task.title} / 阶段 {item.stage.position}</p><h1 id="agent-workbench-title">{item.title}</h1><p>当前任务需要的 PPT 创作能力尚未开放，任务不会被误标为完成。</p></div>
           <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}>返回看板</Link>
         </header>
         <TaskTabs taskId={taskId} />
-        <div className="agent-workbench-boundary" role="note"><Icon name="status" /><div><h2>PPT 工作台不可用</h2><p>这是 RFC v0.3 的真实能力边界。当前页面不会请求或接受任何用户提供的工作台 URL。</p></div></div>
+        <div className="agent-workbench-boundary" role="note"><Icon name="status" /><div><h2>PPT 工作台暂不可用</h2><p>请返回看板调整计划，或选择当前已开放的创作能力。</p></div></div>
       </section>
     );
   }
@@ -123,18 +123,24 @@ export function AgentWorkbenchPage(): React.JSX.Element {
   const statusText = businessStatusLabel[item.business_status];
   const failureMessage = frameState === "failed"
     ? "工作台在 12 秒内未完成加载。可重新检查、返回看板，或使用已验证地址在新标签页中尝试。"
-    : link.data?.diagnostic ?? link.error?.message ?? "当前实例没有可用的工作台地址。";
+    : link.data?.link_status === "FRAME_BLOCKED"
+      ? "当前工作台无法在此页面安全打开。请在新标签页中尝试，或返回看板。"
+      : link.data?.link_status === "NO_UI_URL"
+        ? "工作台仍在准备中，请稍后重新检查。"
+        : link.data?.link_status === "ADAPTER_UNAVAILABLE"
+          ? "专业工作台暂时不可用，请稍后重新检查；当前任务进度已保留。"
+          : link.error?.message ?? "当前专业工作台暂时不可用，请稍后重新检查。";
 
   return (
     <section className="workbench-page agent-workbench" aria-labelledby="agent-workbench-title">
       <header className="agent-workbench__context">
         <div>
-          <p className="workbench-eyebrow">{detail.data.task.title} / Stage {item.stage.position}</p>
+          <p className="workbench-eyebrow">{detail.data.task.title} / 阶段 {item.stage.position}</p>
           <h1 id="agent-workbench-title">{item.title}</h1>
           <p>Image Agent 专业会话与审批保留在下方原生工作台中，Harness 只维护任务上下文和安全入口。</p>
         </div>
         <div className="agent-workbench__actions" ref={toolbarRef} tabIndex={-1}>
-          <span className={`task-status task-status--${item.business_status.toLowerCase()}`}><span aria-hidden="true" />{statusText} · {item.raw_status}</span>
+          <span className={`task-status task-status--${item.business_status.toLowerCase()}`}><span aria-hidden="true" />{statusText}</span>
           <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}><Icon name="board" />返回看板</Link>
           {link.data?.ui_url ? (
             <a className="workbench-secondary-button" href={link.data.ui_url} target="_blank" rel="noopener noreferrer"><Icon name="external-link" />新标签页</a>
@@ -145,8 +151,7 @@ export function AgentWorkbenchPage(): React.JSX.Element {
 
       <div className="agent-workbench__security" role="status" aria-live="polite">
         <Icon name="status" />
-        <span>{readyLink ? "实例归属、Adapter 来源与 frame 策略已检查" : link.isPending ? "正在检查实例归属、来源与 frame 策略…" : "工作台安全检查未通过"}</span>
-        {readyLink ? <code>{readyLink.frame_policy}</code> : null}
+        <span>{readyLink ? "专业工作台连接已验证" : link.isPending ? "正在准备专业工作台…" : "专业工作台暂时不可用"}</span>
       </div>
 
       {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 Image Agent 工作台地址…</div> : null}
@@ -160,7 +165,7 @@ export function AgentWorkbenchPage(): React.JSX.Element {
         <div className="agent-workbench-frame">
           <div className="agent-workbench-frame__entry">
             <button className="workbench-secondary-button" type="button" onClick={() => iframeRef.current?.focus()}>跳到 Image Agent 工作台</button>
-            <span>iframe 使用跨源 sandbox；不读取子页面 DOM，也不建立未版本化消息通道。</span>
+            <span>专业工作台将在安全隔离区域内打开。</span>
           </div>
           {frameState === "loading" ? <div className="agent-workbench-frame__overlay" role="status">Image Agent 工作台正在加载…</div> : null}
           <iframe
