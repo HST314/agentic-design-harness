@@ -43,10 +43,16 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     if os.environ.get("FAKE_LONG_LOG") == "1":
-        secret = os.environ.get("FAKE_API_KEY", "").encode()
+        secret = os.environ.get("ARK_API_KEY", os.environ.get("FAKE_API_KEY", "")).encode()
         os.write(1, b"x" * (1024 * 1024 - 5) + secret + b"\n")
-    print(f"credential={os.environ.get('FAKE_API_KEY')}", flush=True)
-    print(f"endpoint={os.environ.get('FAKE_BASE_URL')}", flush=True)
+    print(
+        f"credential={os.environ.get('ARK_API_KEY', os.environ.get('FAKE_API_KEY'))}",
+        flush=True,
+    )
+    print(
+        f"endpoint={os.environ.get('ARK_BASE_URL', os.environ.get('FAKE_BASE_URL'))}",
+        flush=True,
+    )
     port = int(os.environ["HARNESS_INSTANCE_PORT"])
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.serve_forever(poll_interval=0.05)

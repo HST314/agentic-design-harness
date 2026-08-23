@@ -247,10 +247,7 @@ class SupervisorLifecycleMixin:
         self._monitor_thread = None
 
     def _stop_launch(self, record: dict[str, Any], reason: str) -> dict[str, Any]:
-        config = self.configuration.create_instance_snapshot(
-            record["task_id"], record["instance_id"]
-        )
-        grace = float(config["config"]["supervisor"]["shutdown_grace_seconds"])
+        grace = float(record["shutdown_grace_seconds"])
         if record.get("pid") and (
             self._record_is_alive(record) or self._record_child_is_alive(record)
         ):

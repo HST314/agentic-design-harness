@@ -24,6 +24,10 @@ def build_config_snapshot(
     visual_analysis: str = "auto",
     max_files_per_task: int = 20,
     max_pdf_pages: int = 100,
+    supervisor_port_start: int = 18100,
+    supervisor_port_end: int = 18199,
+    supervisor_startup_timeout: int = 30,
+    supervisor_shutdown_grace: int = 5,
 ) -> ConfigSnapshot:
     return ConfigSnapshot.model_validate(
         {
@@ -105,10 +109,10 @@ def build_config_snapshot(
                     },
                 },
                 "supervisor": {
-                    "port_range_start": 18100,
-                    "port_range_end": 18199,
-                    "startup_timeout_seconds": 30,
-                    "shutdown_grace_seconds": 5,
+                    "port_range_start": supervisor_port_start,
+                    "port_range_end": supervisor_port_end,
+                    "startup_timeout_seconds": supervisor_startup_timeout,
+                    "shutdown_grace_seconds": supervisor_shutdown_grace,
                 },
             },
         }

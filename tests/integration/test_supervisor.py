@@ -18,14 +18,15 @@ from urllib.request import urlopen
 
 import harness.services.process_runtime as process_runtime
 from harness.core.errors import HarnessError, SimulatedCrash
-from harness.services.configuration import ConfigurationService, GlobalConfigBody
+from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.credentials import CredentialPoolService
 from harness.services.process_control import force_kill_process_tree
 from harness.services.process_runtime import AgentRuntimeArtifact
 from harness.services.supervisor import ProcessSpec, ProcessSupervisor, process_start_identity
+from harness.services.task_config import TaskConfigService
 from harness.storage.atomic import atomic_write_json, read_json
 from harness.storage.repository import Actor
-from runtime_helpers import build_service, create_task, envelope, image_plan
+from runtime_helpers import build_config_snapshot, build_service, create_task, envelope, image_plan
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
 CREDENTIAL_FIXTURE = FIXTURE_ROOT / "p1" / "credential-pairs.json"
@@ -96,25 +97,20 @@ class ProcessSupervisorTests(unittest.TestCase):
             task_cards=draft["task_cards"],
             envelope=envelope("save-process-plan", created["revision"]),
         )
-        body = GlobalConfigBody.model_validate(
-            {
-                **GlobalConfigBody().model_dump(mode="json"),
-                "supervisor": {
-                    "port_range_start": 19100,
-                    "port_range_end": 19130,
-                    "startup_timeout_seconds": 2,
-                    "health_interval_seconds": 0.05,
-                    "shutdown_grace_seconds": 0.5,
-                },
-            }
+        snapshot = build_config_snapshot(
+            api_key="phase-c-supervisor-secret",
+            base_url="https://phase-c-provider.invalid/v1",
+            supervisor_port_start=19100,
+            supervisor_port_end=19130,
+            supervisor_startup_timeout=2,
+            supervisor_shutdown_grace=1,
         )
-        self.configuration = ConfigurationService(self.store)
-        self.configuration.initialize(body)
+        self.task_config = TaskConfigService(self.store, snapshot)
+        self.image_config = ImageAgentConfigMaterializer(self.store, self.task_config)
         self.supervisor = ProcessSupervisor(
             self.store,
             self.commands,
-            self.credentials,
-            self.configuration,
+            self.image_config,
         )
         self.artifact_root = self.root / "fake-runtime-artifact"
         self.artifact_root.mkdir()
@@ -265,7 +261,7 @@ class ProcessSupervisorTests(unittest.TestCase):
         claims = read_json(self.supervisor.port_allocator.path)["claims"]
         self.assertEqual(claims, {})
 
-    def test_logs_are_redacted_and_launch_secret_file_is_removed(self) -> None:
+    def test_logs_are_redacted_and_launch_spec_file_is_removed(self) -> None:
         spec = ProcessSpec(
             command=self.spec.command,
             runtime_artifact=self.runtime_artifact,
@@ -279,8 +275,8 @@ class ProcessSupervisorTests(unittest.TestCase):
             summary = self.supervisor.log_summary("t_process", "i_image_1")
         rendered = json.dumps(summary)
         self.assertIn("[REDACTED]", rendered)
-        self.assertNotIn("not-a-secret-p1-01", rendered)
-        self.assertNotIn("https://provider-1.invalid/v1", rendered)
+        self.assertNotIn("phase-c-supervisor-secret", rendered)
+        self.assertNotIn("https://phase-c-provider.invalid/v1", rendered)
         instance_root = (
             self.store.layout.workspace_root
             / "tasks"
@@ -288,9 +284,9 @@ class ProcessSupervisorTests(unittest.TestCase):
             / "instances"
             / "i_image_1"
         )
-        self.assertFalse((instance_root / "runtime" / ".launch_1.launch-secret.json").exists())
+        self.assertFalse((instance_root / "runtime" / ".launch_1.launch-spec.json").exists())
         self.assertNotIn(
-            b"not-a-secret-p1-01",
+            b"phase-c-supervisor-secret",
             (instance_root / "logs" / "stdout.log").read_bytes(),
         )
         self.assertEqual(launch["state"], "RUNNING")
@@ -324,14 +320,13 @@ class ProcessSupervisorTests(unittest.TestCase):
         self.assertEqual({item["state"] for item in launches}, {"RUNNING"})
         self.assertEqual(len({item["port"] for item in launches}), 3)
 
-    def test_harness_reconcile_keeps_same_process_and_restart_keeps_credentials(self) -> None:
+    def test_harness_reconcile_and_restart_keep_task_configuration(self) -> None:
         launch = self._start(1)
-        original = self.credentials.resolve_for_instance("t_process", "i_image_1")
+        original = self.task_config.get_public("t_process")
         second_supervisor = ProcessSupervisor(
             self.store,
             self.commands,
-            self.credentials,
-            self.configuration,
+            self.image_config,
         )
         reconciled = second_supervisor.reconcile()
         self.assertEqual(reconciled[0]["status"], "RECOVERED")
@@ -353,17 +348,6 @@ class ProcessSupervisorTests(unittest.TestCase):
             )
         self.assertEqual(reused_launch.exception.code, "IDEMPOTENCY_CONFLICT")
 
-        revision = self.configuration._read_instance_config(
-            "t_process", "i_image_1"
-        )["config_revision"]
-        self.configuration.update_instance(
-            "t_process",
-            "i_image_1",
-            {"image_runtime_policy": {"watermark": True}},
-            expected_revision=revision,
-            idempotency_key="runtime-config-restart",
-            actor=Actor("human", "tester"),
-        )
         restarted = second_supervisor.restart_instance(
             "t_process",
             "i_image_1",
@@ -372,13 +356,8 @@ class ProcessSupervisorTests(unittest.TestCase):
             attempt_id="attempt_restart_1",
         )
         self.assertNotEqual(restarted["pid"], launch["pid"])
-        current = self.credentials.resolve_for_instance("t_process", "i_image_1")
-        self.assertEqual(
-            (current.credential_pair_id, current.base_url, current.revision),
-            (original.credential_pair_id, original.base_url, original.revision),
-        )
-        config = self.configuration._read_instance_config("t_process", "i_image_1")
-        self.assertFalse(config["restart_required"])
+        current = self.task_config.get_public("t_process")
+        self.assertEqual(current, original)
         second_supervisor.cancel_instance("t_process", "i_image_1")
         second_supervisor.close()
 
@@ -420,8 +399,7 @@ class ProcessSupervisorTests(unittest.TestCase):
         recovered_supervisor = ProcessSupervisor(
             self.store,
             self.commands,
-            self.credentials,
-            self.configuration,
+            self.image_config,
         )
         deadline = time.monotonic() + 2
         results = recovered_supervisor.reconcile()
