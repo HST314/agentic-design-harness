@@ -427,8 +427,11 @@ class MasterThreadService:
                     "start_result": None,
                     "result": None,
                 }
-                self._validate_confirmation_gate(
-                    intent, task_expected_revision=task_expected_revision
+                # Persist PREPARED before the source truth gate so a terminal
+                # citation rejection is recoverable and auditable as ABORTED.
+                self._validate_confirmation_preconditions(
+                    intent,
+                    task_expected_revision=task_expected_revision,
                 )
                 atomic_write_json(intent_path, intent)
             return self._resume_confirm(intent_path)
@@ -555,6 +558,18 @@ class MasterThreadService:
             raise
 
     def _validate_confirmation_gate(
+        self,
+        intent: dict[str, Any],
+        *,
+        task_expected_revision: object,
+    ) -> dict[str, Any]:
+        proposal = self._validate_confirmation_preconditions(
+            intent, task_expected_revision=task_expected_revision
+        )
+        self.plan_proposals.validate_sources(proposal["task_id"], proposal)
+        return proposal
+
+    def _validate_confirmation_preconditions(
         self,
         intent: dict[str, Any],
         *,
