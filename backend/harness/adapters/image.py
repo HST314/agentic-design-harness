@@ -376,7 +376,6 @@ class ImageAgentAdapter(ImageObservationMixin):
                     {
                         "project_id": instance_id,
                         "task_card": card,
-                        "offline": False,
                         "defer_run": True,
                     },
                     expected_statuses=(201,),

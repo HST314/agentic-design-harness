@@ -24,6 +24,7 @@ from .master_orchestrator import (
     MasterPlanner,
     MasterRunObservation,
 )
+from .task_config import TaskConfigService
 
 
 class MasterThreadService:
@@ -38,6 +39,7 @@ class MasterThreadService:
         assets: AssetService,
         adapters: AdapterRegistry,
         orchestrator: MasterPlanner,
+        task_config: TaskConfigService,
     ) -> None:
         self.store = store
         self.contracts = contracts
@@ -46,6 +48,7 @@ class MasterThreadService:
         self.assets = assets
         self.adapters = adapters
         self.orchestrator = orchestrator
+        self.task_config = task_config
         self.intent_root = store.layout.control_root / "master-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -317,6 +320,9 @@ class MasterThreadService:
                 next_proposal,
                 task_id=task_id,
                 expected_revision=proposal_revision + 1,
+                source_citations_required=self.task_config.source_citations_required(
+                    task_id
+                ),
             )
 
             actor = Actor(envelope.actor_type, envelope.actor_id)
@@ -785,6 +791,7 @@ class MasterThreadService:
             proposal,
             task_id=task_id,
             expected_revision=expected_revision,
+            source_citations_required=self.task_config.source_citations_required(task_id),
         )
         actor = Actor("master", "master_orchestrator")
         existing = self.store.plan_proposal.get(task_id, proposal["proposal_id"])

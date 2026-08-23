@@ -186,7 +186,14 @@ class MasterOrchestrator:
                 raise MasterOrchestratorFailure(
                     "MASTER_RUN_FAILED", "Master did not return structured output."
                 )
-            normalized = self._validate_output(task_id, output, snapshot.runtime.master)
+            normalized = self._validate_output(
+                task_id,
+                output,
+                snapshot.runtime.master,
+                source_citations_required=(
+                    snapshot.runtime.document_processing.require_source_citations
+                ),
+            )
             run.update(
                 {
                     "status": normalized["status"],
@@ -269,7 +276,12 @@ class MasterOrchestrator:
         return messages
 
     def _validate_output(
-        self, task_id: str, output: dict[str, Any], master_config: Any
+        self,
+        task_id: str,
+        output: dict[str, Any],
+        master_config: Any,
+        *,
+        source_citations_required: bool,
     ) -> dict[str, Any]:
         if set(output) != {"status", "message", "task_title", "proposal"}:
             self._invalid_output("Master returned unexpected structured fields.")
@@ -312,6 +324,7 @@ class MasterOrchestrator:
                 cast(dict[str, Any], proposal),
                 task_id=task_id,
                 expected_revision=expected,
+                source_citations_required=source_citations_required,
             )
         return {
             "status": status,

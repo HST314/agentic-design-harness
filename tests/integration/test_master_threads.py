@@ -13,6 +13,7 @@ from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
 from harness.services.master_orchestrator import MasterRunObservation
 from harness.storage.atomic import atomic_write_json, read_json
+from runtime_helpers import build_config_snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -87,7 +88,13 @@ class RecordingOrchestrator:
                     "instance_id": instance_id,
                     "agent_type": "image",
                     "objective": f"生成主视觉方向 {revision}。",
-                    "instructions": ["遵守品牌安全区。"],
+                    "instructions": [
+                        "遵守品牌安全区。",
+                        *[
+                            f"引用 {asset['asset_id']}/block/text_b1。"
+                            for asset in message["asset_refs"]
+                        ],
+                    ],
                     "input_assets": deepcopy(message["asset_refs"]),
                     "expected_deliveries": [
                         {
@@ -223,7 +230,7 @@ class MasterThreadApiTests(unittest.TestCase):
                     "expected_proposal_revision": 1,
                     "expected_card_revision": 1,
                     "objective": "生成更克制的自然光主视觉。",
-                    "instructions": ["遵守品牌安全区。", "整体降低饱和度。"],
+                    "instructions": [*card["instructions"], "整体降低饱和度。"],
                     "input_assets": card["input_assets"],
                     "expected_deliveries": card["expected_deliveries"],
                     "parameters": {
@@ -513,14 +520,25 @@ class MasterThreadApiTests(unittest.TestCase):
 
     def test_direct_test_settings_without_deployment_snapshot_fail_truthfully(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            app = self._app(Path(temporary))
+            root = Path(temporary)
+            app = create_app(
+                HarnessSettings(
+                    control_root=root / "control-data",
+                    workspace_root=root / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                )
+            )
             with TestClient(app) as client:
-                task_id = self._create_submit(client, "manual")
-                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
-                self.assertTrue(session["gateway_available"])
-                self.assertEqual(session["thread"]["last_error"]["code"], "MASTER_RUN_FAILED")
-                self.assertIsNone(session["latest_proposal"])
-                self.assertEqual([item["role"] for item in session["messages"]], ["user", "system"])
+                created = client.post(
+                    "/api/v1/task-intakes",
+                    json={
+                        "prompt": "为秋季发布会制作主视觉。",
+                        "start_policy": "manual",
+                        "envelope": self._envelope("create-without-config", 0),
+                    },
+                )
+                self.assertEqual(created.status_code, 422, created.text)
+                self.assertEqual(created.json()["error"]["code"], "VALIDATION_ERROR")
 
     def test_startup_recovery_resumes_a_partial_master_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -603,6 +621,7 @@ class MasterThreadApiTests(unittest.TestCase):
                 control_root=root / "control-data",
                 workspace_root=root / "workspace",
                 contracts_root=ROOT / "contracts" / "v1",
+                config_snapshot=build_config_snapshot(),
             )
         )
 

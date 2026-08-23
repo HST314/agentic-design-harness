@@ -132,7 +132,7 @@ def build_container(
         supervisor,
         adapters,
     )
-    task_intakes = TaskIntakeService(store, commands, assets)
+    task_intakes = TaskIntakeService(store, commands, assets, task_config)
     master_orchestrator = MasterOrchestrator(
         store,
         contracts,
@@ -149,6 +149,7 @@ def build_container(
         assets,
         adapters,
         master_orchestrator,
+        task_config,
     )
     work_items = WorkItemProjectionService(
         store,
