@@ -9,8 +9,13 @@ from typing import Any
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
-from harness.services.model_clients import ModelResult, ModelUsage, ToolCall
-from harness.storage.repository import utc_now
+from harness.services.model_clients import (
+    ModelClientFailure,
+    ModelResult,
+    ModelUsage,
+    ToolCall,
+)
+from harness.storage.atomic import read_json
 from runtime_helpers import PROJECT_ROOT, build_config_snapshot
 
 
@@ -33,60 +38,20 @@ class PlanningTextClient:
                     ),
                 ),
             )
-        task_id = self.factory.task_id
         asset_id = self.factory.asset_id
-        now = utc_now()
-        proposal = {
-            "schema_version": "1.0",
-            "proposal_id": "proposal_internal_master_1",
-            "task_id": task_id,
-            "revision": 1,
-            "status": "PENDING_CONFIRMATION",
+        plan_draft = {
             "stages": [
                 {
-                    "stage_id": "stage_internal_image_1",
                     "type": "image",
-                    "position": 1,
-                    "depends_on": [],
-                    "required": True,
-                }
-            ],
-            "work_items": [
-                {
-                    "schema_version": "1.0",
-                    "work_item_id": "work_internal_image_1",
-                    "task_id": task_id,
-                    "stage_id": "stage_internal_image_1",
                     "title": "Create cited key visual",
-                    "agent_type": "image",
                     "required": True,
-                    "depends_on": [],
-                    "current_instance_id": "instance_internal_image_1",
-                    "instance_ids": ["instance_internal_image_1"],
-                    "task_card_ids": ["card_internal_image_1"],
-                }
-            ],
-            "execution_cards": [
-                {
-                    "schema_version": "1.1",
-                    "card_id": "card_internal_image_1",
-                    "revision": 1,
-                    "task_id": task_id,
-                    "stage_id": "stage_internal_image_1",
-                    "instance_id": "instance_internal_image_1",
-                    "agent_type": "image",
                     "objective": "Create the campaign key visual.",
                     "instructions": (
                         [f"Use {asset_id}/{self.factory.source_citation} as the brief source."]
                         if self.factory.source_citation is not None
                         else ["Use the uploaded brief as the source."]
                     ),
-                    "input_assets": [
-                        {
-                            "asset_id": asset_id,
-                            "manifest_relpath": f"inputs/manifests/{asset_id}.json",
-                        }
-                    ],
+                    "input_asset_ids": [asset_id],
                     "expected_deliveries": [
                         {
                             "kind": "image",
@@ -95,13 +60,15 @@ class PlanningTextClient:
                             "accepted_mime_types": ["image/png"],
                         }
                     ],
-                    "parameters": {"variants": 2, "usage_context": "Launch"},
-                    "created_at": now,
+                    "parameters": {
+                        "aspect_ratio": None,
+                        "variants": 2,
+                        "usage_context": "Launch",
+                        "category_id": None,
+                        "category_version": None,
+                    },
                 }
             ],
-            "created_at": now,
-            "updated_at": now,
-            "confirmed_at": None,
         }
         return self._result(
             number,
@@ -109,7 +76,7 @@ class PlanningTextClient:
                 "status": "PLAN_READY",
                 "message": "The cited plan is ready for review.",
                 "task_title": "Cited launch visual",
-                "proposal": proposal,
+                "plan_draft": plan_draft,
             },
             tool_calls=(),
         )
@@ -135,7 +102,6 @@ class PlanningTextClient:
 
 class FakeModelFactory:
     def __init__(self) -> None:
-        self.task_id = ""
         self.asset_id = ""
         self.source_citation: str | None = "block/text_b1"
         self.calls: list[dict[str, Any]] = []
@@ -147,7 +113,218 @@ class FakeModelFactory:
         raise AssertionError("Markdown understanding must not call VLM")
 
 
+class ScriptedTextClient:
+    def __init__(self, factory: ScriptedModelFactory) -> None:
+        self.factory = factory
+
+    def complete_structured(self, **kwargs: Any) -> ModelResult:
+        self.factory.calls.append(deepcopy(kwargs))
+        index = len(self.factory.calls) - 1
+        scripted = self.factory.responses[min(index, len(self.factory.responses) - 1)]
+        if isinstance(scripted, ModelClientFailure):
+            raise scripted
+        return ModelResult(
+            request_id=f"scripted_request_{index + 1}",
+            provider_request_id=f"scripted_provider_{index + 1}",
+            provider="ark",
+            model="text-model",
+            call_type="reasoning_llm",
+            output=deepcopy(scripted.get("output")),
+            tool_calls=scripted.get("tool_calls", ()),
+            usage=ModelUsage(10, 5, 0, 0, 15, {"prompt_tokens": 10}),
+        )
+
+
+class ScriptedModelFactory:
+    def __init__(
+        self,
+        responses: list[dict[str, Any] | ModelClientFailure],
+    ) -> None:
+        self.responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    def text(self, snapshot, model_id, *, timeout_seconds):
+        return ScriptedTextClient(self)
+
+    def vision(self, snapshot, model_id, *, timeout_seconds):
+        raise AssertionError("Markdown understanding must not call VLM")
+
+
+def image_plan_response(
+    *,
+    input_asset_ids: list[str] | None = None,
+    instructions: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "PLAN_READY",
+        "message": "The plan is ready for review.",
+        "task_title": "Culture wall key visual",
+        "plan_draft": {
+            "stages": [
+                {
+                    "type": "image",
+                    "title": "Create the culture wall key visual",
+                    "required": True,
+                    "objective": "Create a culture wall key visual from the written brief.",
+                    "instructions": instructions or ["Use the written requirements."],
+                    "input_asset_ids": input_asset_ids or [],
+                    "expected_deliveries": [
+                        {
+                            "kind": "image",
+                            "role": "key_visual",
+                            "required": True,
+                            "accepted_mime_types": ["image/png"],
+                        }
+                    ],
+                    "parameters": {
+                        "aspect_ratio": None,
+                        "variants": 2,
+                        "usage_context": "Culture wall",
+                        "category_id": None,
+                        "category_version": None,
+                    },
+                }
+            ]
+        },
+    }
+
+
 class MasterOrchestratorIntegrationTests(unittest.TestCase):
+    def test_zero_asset_text_task_materializes_plan_without_exposing_asset_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            factory = ScriptedModelFactory([{"output": image_plan_response()}])
+            app = create_app(self._settings(root), model_clients=factory)
+            with TestClient(app) as client:
+                body = self._create_task(client, "create-zero-asset")
+                self._submit_task(client, body, "submit-zero-asset")
+                session = client.get(
+                    f"/api/v1/tasks/{body['task']['task_id']}/master/messages"
+                ).json()
+
+            self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
+            proposal = session["latest_proposal"]
+            self.assertEqual(proposal["task_id"], body["task"]["task_id"])
+            self.assertEqual(proposal["revision"], 1)
+            self.assertEqual(proposal["status"], "PENDING_CONFIRMATION")
+            self.assertEqual(proposal["execution_cards"][0]["input_assets"], [])
+            self.assertEqual(proposal["created_at"], proposal["updated_at"])
+            self.assertTrue(proposal["proposal_id"].startswith("proposal_"))
+            self.assertEqual(factory.calls[0]["tools"], [])
+            self._assert_strict_model_schema(factory.calls[0]["response_schema"])
+            self.assertIn(
+                "This task has no assets",
+                factory.calls[0]["messages"][0]["content"],
+            )
+
+    def test_invalid_plan_draft_is_repaired_once_before_materialization(self) -> None:
+        invalid = image_plan_response()
+        invalid["plan_draft"]["stages"][0]["parameters"]["unsupported_mode"] = "x"
+        factory = ScriptedModelFactory([{"output": invalid}, {"output": image_plan_response()}])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(self._settings(root), model_clients=factory)
+            with TestClient(app) as client:
+                body = self._create_task(client, "create-repaired-draft")
+                self._submit_task(client, body, "submit-repaired-draft")
+                session = client.get(
+                    f"/api/v1/tasks/{body['task']['task_id']}/master/messages"
+                ).json()
+
+            self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
+            self.assertEqual(len(factory.calls), 2)
+            self.assertEqual(factory.calls[1]["tools"], [])
+            repair_prompt = factory.calls[1]["messages"][-1]["content"]
+            self.assertIn("Safe validation diagnostic", repair_prompt)
+            self.assertIn("output_sha256", repair_prompt)
+
+    def test_invalid_plan_draft_exhaustion_persists_only_safe_diagnostic(self) -> None:
+        invalid = image_plan_response()
+        invalid["plan_draft"]["stages"][0]["input_asset_ids"] = ["asset_fabricated"]
+        factory = ScriptedModelFactory([{"output": invalid}])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(self._settings(root), model_clients=factory)
+            with TestClient(app) as client:
+                body = self._create_task(client, "create-invalid-draft")
+                task_id = body["task"]["task_id"]
+                self._submit_task(client, body, "submit-invalid-draft")
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+
+            self.assertEqual(session["thread"]["active_run"]["status"], "FAILED")
+            self.assertEqual(session["thread"]["last_error"]["code"], "MASTER_OUTPUT_INVALID")
+            self.assertNotIn("素材", session["thread"]["last_error"]["message"])
+            self.assertEqual(len(factory.calls), 3)
+            run_id = session["thread"]["active_run"]["run_id"]
+            run = read_json(
+                root / "control-data" / "tasks" / task_id / "master" / "runs" / f"{run_id}.json"
+            )
+            self.assertEqual(
+                set(run["diagnostic"]),
+                {
+                    "phase",
+                    "cause_code",
+                    "schema",
+                    "path",
+                    "reason",
+                    "output_sha256",
+                },
+            )
+            self.assertEqual(run["diagnostic"]["cause_code"], "MASTER_OUTPUT_INVALID")
+            self.assertEqual(len(run["diagnostic"]["output_sha256"]), 64)
+            self.assertNotIn("output", run)
+
+    def test_asset_tool_validation_failure_has_a_separate_error_domain(self) -> None:
+        factory = ScriptedModelFactory(
+            [
+                {
+                    "output": None,
+                    "tool_calls": (ToolCall("call_unknown", "unknown_asset_tool", {}),),
+                }
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(self._settings(root), model_clients=factory)
+            with TestClient(app) as client:
+                body = self._create_task(client, "create-tool-failure")
+                task_id = body["task"]["task_id"]
+                uploaded = self._upload_brief(client, task_id)
+                self._submit_task(
+                    client,
+                    body,
+                    "submit-tool-failure",
+                    intake_revision=uploaded["intake_revision"],
+                )
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+
+            self.assertEqual(session["thread"]["active_run"]["status"], "FAILED")
+            self.assertEqual(session["thread"]["last_error"]["code"], "MASTER_ASSET_TOOL_FAILED")
+            self.assertIn("素材", session["thread"]["last_error"]["message"])
+
+    def test_model_provider_failure_keeps_provider_error_code(self) -> None:
+        factory = ScriptedModelFactory(
+            [
+                ModelClientFailure(
+                    "MODEL_PROVIDER_UNAVAILABLE",
+                    "Model provider is temporarily unavailable.",
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(self._settings(root), model_clients=factory)
+            with TestClient(app) as client:
+                body = self._create_task(client, "create-provider-failure")
+                task_id = body["task"]["task_id"]
+                self._submit_task(client, body, "submit-provider-failure")
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+
+            self.assertEqual(
+                session["thread"]["last_error"]["code"],
+                "MODEL_PROVIDER_UNAVAILABLE",
+            )
+
     def test_master_rejects_missing_or_fabricated_source_citations(self) -> None:
         for citation in (None, "block/does_not_exist"):
             with self.subTest(citation=citation), tempfile.TemporaryDirectory() as temporary:
@@ -175,7 +352,6 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                     self.assertEqual(created.status_code, 200, created.text)
                     body = created.json()
                     task_id = body["task"]["task_id"]
-                    factory.task_id = task_id
                     uploaded = client.post(
                         f"/api/v1/task-intakes/{task_id}/assets",
                         files={
@@ -209,12 +385,8 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                     self.assertEqual(submitted.status_code, 200, submitted.text)
                     session = client.get(f"/api/v1/tasks/{task_id}/master/messages")
                     self.assertEqual(session.status_code, 200, session.text)
-                    self.assertEqual(
-                        session.json()["thread"]["active_run"]["status"], "FAILED"
-                    )
-                    self.assertEqual(
-                        app.state.container.store.plan_proposal.list(task_id), []
-                    )
+                    self.assertEqual(session.json()["thread"]["active_run"]["status"], "FAILED")
+                    self.assertEqual(app.state.container.store.plan_proposal.list(task_id), [])
 
     def test_internal_master_uses_asset_tool_persists_plan_and_audits_usage_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -241,7 +413,6 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                 self.assertEqual(created.status_code, 200, created.text)
                 body = created.json()
                 task_id = body["task"]["task_id"]
-                factory.task_id = task_id
                 uploaded = client.post(
                     f"/api/v1/task-intakes/{task_id}/assets",
                     files={
@@ -272,17 +443,13 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(submitted.status_code, 200, submitted.text)
-                session = client.get(
-                    f"/api/v1/tasks/{task_id}/master/messages"
-                ).json()
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
                 self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
                 self.assertEqual(session["latest_proposal"]["revision"], 1)
                 self.assertEqual(session["task"]["title"], "Cited launch visual")
                 self.assertEqual(len(factory.calls), 2)
                 tool_messages = [
-                    item
-                    for item in factory.calls[1]["messages"]
-                    if item["role"] == "tool"
+                    item for item in factory.calls[1]["messages"] if item["role"] == "tool"
                 ]
                 self.assertEqual(len(tool_messages), 1)
                 self.assertIn("text_b1", tool_messages[0]["content"])
@@ -295,13 +462,9 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                 message = app.state.container.store.master_message.get(
                     task_id, session["thread"]["active_run"]["message_id"]
                 )
-                app.state.container.master_threads.orchestrator.submit_message(
-                    task_id, message
-                )
+                app.state.container.master_threads.orchestrator.submit_message(task_id, message)
                 self.assertEqual(len(factory.calls), 2)
-                self.assertEqual(
-                    len(app.state.container.store.usage.list(task_id)), 2
-                )
+                self.assertEqual(len(app.state.container.store.usage.list(task_id)), 2)
 
     @staticmethod
     def _envelope(key: str, expected_revision: int) -> dict[str, Any]:
@@ -311,6 +474,81 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
             "actor_id": "human_operator",
             "expected_revision": expected_revision,
         }
+
+    @staticmethod
+    def _settings(root: Path) -> HarnessSettings:
+        return HarnessSettings(
+            control_root=root / "control-data",
+            workspace_root=root / "workspace",
+            contracts_root=PROJECT_ROOT / "contracts" / "v1",
+            image_agent_lock_path=PROJECT_ROOT / "agents" / "image-agent.lock.json",
+            image_agent_root=PROJECT_ROOT / "agents" / "image_agent_mvp",
+            config_snapshot=build_config_snapshot(),
+        )
+
+    def _create_task(self, client: TestClient, key: str) -> dict[str, Any]:
+        created = client.post(
+            "/api/v1/task-intakes",
+            json={
+                "prompt": "Create a culture wall key visual.",
+                "start_policy": "manual",
+                "envelope": self._envelope(key, 0),
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        return created.json()
+
+    def _upload_brief(self, client: TestClient, task_id: str) -> dict[str, Any]:
+        uploaded = client.post(
+            f"/api/v1/task-intakes/{task_id}/assets",
+            files={
+                "file": (
+                    "brief.md",
+                    b"# Brief\n\nUse blue and preserve generous logo clearance.",
+                    "text/markdown",
+                )
+            },
+            data={
+                "declared_mime_type": "text/markdown",
+                "description": "brand brief",
+                "idempotency_key": f"upload-{task_id}",
+                "actor_id": "human_operator",
+                "expected_revision": "1",
+            },
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        return uploaded.json()
+
+    def _submit_task(
+        self,
+        client: TestClient,
+        body: dict[str, Any],
+        key: str,
+        *,
+        intake_revision: int | None = None,
+    ) -> None:
+        submitted = client.post(
+            f"/api/v1/task-intakes/{body['task']['task_id']}/submit",
+            json={
+                "task_expected_revision": body["task_revision"],
+                "envelope": self._envelope(
+                    key,
+                    body["intake_revision"] if intake_revision is None else intake_revision,
+                ),
+            },
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+
+    def _assert_strict_model_schema(self, value: Any) -> None:
+        if isinstance(value, dict):
+            properties = value.get("properties")
+            if value.get("type") == "object" and isinstance(properties, dict):
+                self.assertEqual(set(value.get("required", [])), set(properties))
+            for child in value.values():
+                self._assert_strict_model_schema(child)
+        elif isinstance(value, list):
+            for child in value:
+                self._assert_strict_model_schema(child)
 
 
 if __name__ == "__main__":

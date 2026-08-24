@@ -92,6 +92,24 @@
       "meaning": "The in-process Master could not complete a valid planning run."
     },
     {
+      "code": "MASTER_OUTPUT_INVALID",
+      "http_status": 502,
+      "retryable": true,
+      "meaning": "The Master model output remained invalid after bounded repair."
+    },
+    {
+      "code": "MASTER_ASSET_CATALOG_FAILED",
+      "http_status": 502,
+      "retryable": true,
+      "meaning": "The Master could not load the task asset catalog."
+    },
+    {
+      "code": "MASTER_ASSET_TOOL_FAILED",
+      "http_status": 502,
+      "retryable": true,
+      "meaning": "A bounded Master asset tool request failed."
+    },
+    {
       "code": "INTERNAL_ERROR",
       "http_status": 500,
       "retryable": false,

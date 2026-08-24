@@ -773,7 +773,7 @@ class MasterThreadService:
                 )
             if observation.status == "FAILED":
                 raise MasterOrchestratorFailure(
-                    "MASTER_RUN_FAILED",
+                    observation.error_code or "MASTER_RUN_FAILED",
                     (observation.message or "Master 计划运行失败, 请补充要求后重试。").strip(),
                 )
             return self._store_orchestrated_plan(task_id, thread, active, observation)
