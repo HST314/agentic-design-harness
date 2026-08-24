@@ -23,10 +23,10 @@ class ImageRuntimeAttestationTests(unittest.TestCase):
             dependencies.mkdir()
             harness_lock = harness / "requirements-runtime.txt"
             image_lock = source / "requirements.lock"
-            harness_lock.write_text("harness==1\n", encoding="utf-8")
-            image_lock.write_text("image==1\n", encoding="utf-8")
-            (source / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
-            (dependencies / "package.py").write_text("VALUE = 1\n", encoding="utf-8")
+            harness_lock.write_bytes(b"harness==1\n")
+            image_lock.write_bytes(b"image==1\n")
+            (source / "main.py").write_bytes(b"VALUE = 1\n")
+            (dependencies / "package.py").write_bytes(b"VALUE = 1\n")
             files = (
                 LockedDependencyFile(
                     "harness",
