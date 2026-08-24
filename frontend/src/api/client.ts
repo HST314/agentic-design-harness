@@ -20,7 +20,8 @@ export interface HealthResponse {
 }
 
 export interface ReadyResponse {
-  status: "ready" | "not_ready";
+  status: "ready" | "degraded" | "not_ready";
+  disabled_adapters?: string[];
 }
 
 export interface TaskSummary {

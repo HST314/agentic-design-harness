@@ -86,7 +86,7 @@ def validate_lock_shape(lock: dict[str, Any]) -> None:
     }
     if set(lock) != expected:
         raise ValueError("Image Agent release lock fields are not canonical")
-    if lock["schema_version"] != "1.0" or lock["agent"] != "image_agent_mvp":
+    if lock["schema_version"] != "1.1" or lock["agent"] != "image_agent_mvp":
         raise ValueError("Image Agent release lock identity is unsupported")
     if not isinstance(lock["revision"], str) or REVISION_PATTERN.fullmatch(
         lock["revision"]
@@ -100,25 +100,14 @@ def validate_lock_shape(lock: dict[str, Any]) -> None:
     if not isinstance(dependencies, dict) or set(dependencies) != {
         "files",
         "lock_set_sha256",
-        "runtime_tree_sha256",
-        "runtime_tree_sha256_by_platform",
     }:
         raise ValueError("Image Agent dependency lock fields are not canonical")
-    for field in ("lock_set_sha256", "runtime_tree_sha256"):
-        value = dependencies[field]
-        if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
-            raise ValueError(f"Image Agent {field} is invalid")
-    platform_digests = dependencies["runtime_tree_sha256_by_platform"]
-    if not isinstance(platform_digests, dict) or set(platform_digests) != {
-        "linux-x86_64",
-        "windows-amd64",
-    }:
-        raise ValueError("Image Agent runtime platform digests are not canonical")
-    for platform_key, value in platform_digests.items():
-        if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
-            raise ValueError(f"Image Agent runtime digest for {platform_key} is invalid")
-    if platform_digests["linux-x86_64"] != dependencies["runtime_tree_sha256"]:
-        raise ValueError("Image Agent legacy runtime digest differs from Linux")
+    lock_set_sha256 = dependencies["lock_set_sha256"]
+    if (
+        not isinstance(lock_set_sha256, str)
+        or SHA256_PATTERN.fullmatch(lock_set_sha256) is None
+    ):
+        raise ValueError("Image Agent lock_set_sha256 is invalid")
     files = dependencies["files"]
     if not isinstance(files, list) or not files:
         raise ValueError("Image Agent dependency lock is empty")

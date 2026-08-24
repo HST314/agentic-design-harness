@@ -115,16 +115,11 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.package_version = self.release_lock.package_version
         self.host = host
         self.request_timeout_seconds = request_timeout_seconds
+        self.available = True
+        self.availability_error: HarnessError | None = None
         self.runtime_attestation: RuntimeAttestation | None = None
         self.runtime_artifact_root: Path | None = None
-        self.runtime_builder = ImageRuntimeBuilder(
-            source_root,
-            dependency_root,
-            revision=self.revision,
-            package_version=self.package_version,
-            source_content_sha256=self.release_lock.source_content_sha256,
-            dependency_content_sha256=self.release_lock.runtime_dependency_tree_sha256,
-        )
+        self.runtime_builder: ImageRuntimeBuilder | None = None
 
     def prepare_runtime_artifact(
         self, *, harness_root: Path, cache_root: Path
@@ -142,6 +137,7 @@ class ImageAgentAdapter(ImageObservationMixin):
                 source_root=self.source_root,
                 dependency_root=self.dependency_root,
                 harness_root=harness_root,
+                interpreter=self.interpreter,
             )
             builder = ImageRuntimeBuilder(
                 self.source_root.resolve(strict=True),
@@ -152,6 +148,8 @@ class ImageAgentAdapter(ImageObservationMixin):
                 dependency_content_sha256=attestation.dependency_sha256,
                 identity_sha256=attestation.identity_sha256,
                 platform=attestation.platform,
+                python_implementation=attestation.python_implementation,
+                python_cache_tag=attestation.python_cache_tag,
             )
             artifact_root = builder.prepare(cache_root)
             self._validate_runtime_source(artifact_root)
@@ -171,7 +169,18 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.runtime_builder = builder
         self.runtime_artifact_root = artifact_root
         self.runtime_attestation = attestation
+        self.availability_error = None
+        self.available = True
         return attestation
+
+    def disable(self, error: HarnessError) -> None:
+        """Disable Image operations while keeping the control plane operational."""
+
+        self.available = False
+        self.availability_error = error
+        self.runtime_attestation = None
+        self.runtime_artifact_root = None
+        self.runtime_builder = None
 
     def validate_task_card(self, card: TaskCard) -> ValidationResult:
         try:
@@ -196,6 +205,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         return ValidationResult(valid=not errors, errors=tuple(errors))
 
     def prepare(self, request: PrepareRequest) -> ProcessSpec:
+        self._require_available(request.instance.get("instance_id"))
         validation = self.validate_task_card(request.task_card)
         if not validation.valid:
             raise HarnessError(
@@ -412,6 +422,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         return mapped
 
     def start(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        self._require_available(instance_id)
         task_id = self._task_id_for_instance(instance_id)
         state = self._state(task_id, instance_id)
         base_url = self._base_url(task_id, instance_id)
@@ -475,6 +486,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         )
 
     def stop(self, instance_id: str, reason: str, operation_id: str) -> AdapterCommandResult:
+        self._require_available(instance_id)
         validate_identifier(operation_id, "operation_id")
         if not reason or len(reason) > 256 or "\x00" in reason:
             raise HarnessError("VALIDATION_ERROR", "The stop reason is invalid.")
@@ -511,6 +523,11 @@ class ImageAgentAdapter(ImageObservationMixin):
         )
 
     def get_status(self, instance_id: str) -> AdapterObservation:
+        if not self.available:
+            return AdapterObservation(
+                status="UNAVAILABLE",
+                details={"instance_id": instance_id, **self._availability_details()},
+            )
         task_id = self._task_id_for_instance(instance_id)
         state = self._state(task_id, instance_id)
         base_url = self._base_url(task_id, instance_id)
@@ -546,6 +563,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         payload: dict[str, Any],
         operation_id: str,
     ) -> AdapterCommandResult:
+        self._require_available(instance_id)
         if action not in HARNESS_CAPABILITIES:
             raise HarnessError("VALIDATION_ERROR", "Unknown Image Agent capability.")
         task_id = self._task_id_for_instance(instance_id)
@@ -766,6 +784,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         return f"work_{identity}"
 
     def collect_deliveries(self, instance_id: str) -> list[DeliveryCandidate]:
+        self._require_available(instance_id)
         task_id = self._task_id_for_instance(instance_id)
         base_url = self._base_url(task_id, instance_id)
         view = self._request(base_url, "GET", f"/api/projects/{instance_id}")
@@ -852,6 +871,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         ]
 
     def collect_usage(self, instance_id: str, cursor: str | None) -> list[UsageEvent]:
+        self._require_available(instance_id)
         task_id = self._task_id_for_instance(instance_id)
         previous = usage_cursor(cursor)
         instance = self.store.instance.get(task_id, instance_id)
@@ -881,6 +901,8 @@ class ImageAgentAdapter(ImageObservationMixin):
                 return events
 
     def get_ui_url(self, instance_id: str) -> str | None:
+        if not self.available:
+            return None
         task_id = self._task_id_for_instance(instance_id)
         instance = self.store.instance.get(task_id, instance_id)
         return None if instance is None else instance.get("ui_url")
@@ -890,6 +912,8 @@ class ImageAgentAdapter(ImageObservationMixin):
     ) -> ValidationResult:
         """Allow only the exact local origin allocated to this process instance."""
 
+        if not self.available:
+            return ValidationResult(False, (self._availability_message(),))
         errors: list[str] = []
         process = instance.get("process")
         try:
@@ -912,6 +936,12 @@ class ImageAgentAdapter(ImageObservationMixin):
         return ValidationResult(not errors, tuple(errors))
 
     def recover(self, instance_snapshot: AgentInstanceSnapshot) -> AdapterRecoveryResult:
+        if not self.available:
+            return AdapterRecoveryResult(
+                recovered=True,
+                status="UNAVAILABLE",
+                details=self._availability_details(),
+            )
         instance_id = str(instance_snapshot["instance_id"])
         task_id = str(instance_snapshot["task_id"])
         if not self._state_path(task_id, instance_id).exists():
@@ -940,6 +970,28 @@ class ImageAgentAdapter(ImageObservationMixin):
             },
         )
 
+    def _availability_message(self) -> str:
+        if self.availability_error is None:
+            return "The Image Agent runtime is unavailable."
+        return self.availability_error.message
+
+    def _availability_details(self) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "agent_type": self.agent_type,
+            "reason": self._availability_message(),
+            "action": "Run scripts/dev.py setup --force, then scripts/dev.py doctor.",
+        }
+        if self.availability_error is not None:
+            details["error_code"] = self.availability_error.code
+        return details
+
+    def _require_available(self, instance_id: object) -> None:
+        if not self.available:
+            raise HarnessError(
+                "ADAPTER_UNAVAILABLE",
+                self._availability_message(),
+                {"instance_id": instance_id, **self._availability_details()},
+            )
 
     def _validate_runtime_source(self, source_root: Path | None = None) -> None:
         selected_root = source_root or self.runtime_artifact_root or self.source_root

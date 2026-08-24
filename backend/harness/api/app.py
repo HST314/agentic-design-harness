@@ -69,18 +69,38 @@ class Container:
     agent_workbench: AgentWorkbenchService
     runtime_attestation: RuntimeAttestation | None = None
     runtime_artifact: Path | None = None
+    image_runtime_error: dict[str, str] | None = None
     recovery_completed: bool = False
 
     @property
-    def ready(self) -> bool:
+    def operational(self) -> bool:
         return bool(
             self.store.ready
-            and self.runtime_attestation is not None
-            and self.runtime_artifact is not None
             and self.recovery_completed
             and self.application.start_operation_runner_alive
             and self.master_threads.run_monitor_alive
         )
+
+    @property
+    def ready(self) -> bool:
+        image_adapter = self.adapters.get_optional("image")
+        image_ready = bool(
+            image_adapter is not None
+            and (
+                not image_adapter.available
+                or (
+                    self.runtime_attestation is not None
+                    and self.runtime_artifact is not None
+                )
+            )
+        )
+        return self.operational and image_ready
+
+    @property
+    def status(self) -> str:
+        if not self.ready:
+            return "not_ready"
+        return "degraded" if self.image_runtime_error is not None else "ready"
 
 
 class ContractValidationRequest(BaseModel):
@@ -216,6 +236,16 @@ def recover_adapters(container: Container) -> list[dict[str, Any]]:
             if instance["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
                 continue
             adapter = container.adapters.get(instance["agent_type"])
+            if not adapter.available:
+                recovered.append(
+                    {
+                        "task_id": task_id,
+                        "instance_id": instance["instance_id"],
+                        "recovered": True,
+                        "status": "UNAVAILABLE",
+                    }
+                )
+                continue
             result = adapter.recover(instance)
             recovered.append(
                 {
@@ -247,15 +277,33 @@ def create_app(
                 "IMAGE_RUNTIME_ATTESTATION_FAILED",
                 "The Image Agent adapter is not configured.",
             )
-        attestation = image_adapter.prepare_runtime_artifact(
-            harness_root=container.settings.image_agent_lock_path.resolve().parents[1],
-            cache_root=(
-                container.settings.image_agent_dependency_root.resolve().parent
-                / "image-runtime"
-            ),
-        )
-        container.runtime_attestation = attestation
-        container.runtime_artifact = image_adapter.runtime_artifact_root
+        try:
+            attestation = image_adapter.prepare_runtime_artifact(
+                harness_root=container.settings.image_agent_lock_path.resolve().parents[1],
+                cache_root=(
+                    container.settings.image_agent_dependency_root.resolve().parent
+                    / "image-runtime"
+                ),
+            )
+        except HarnessError as exc:
+            image_adapter.disable(exc)
+            container.image_runtime_error = {
+                "code": exc.code,
+                "message": exc.message,
+            }
+            logger.warning(
+                "image_adapter_disabled",
+                extra={
+                    "fields": {
+                        "error_code": exc.code,
+                        "message": exc.message,
+                    }
+                },
+            )
+        else:
+            container.runtime_attestation = attestation
+            container.runtime_artifact = image_adapter.runtime_artifact_root
+            container.image_runtime_error = None
         warnings = container.store.start()
         usage_recoveries = container.usage.recover()
         retry_budget_recoveries = container.retry_budgets.recover()
@@ -282,6 +330,7 @@ def create_app(
                     "master_recovery_count": len(master_recoveries),
                     "process_recovery_count": len(process_recoveries),
                     "adapter_recovery_count": len(adapter_recoveries),
+                    "control_plane_status": container.status,
                 }
             },
         )
@@ -375,9 +424,12 @@ def create_app(
     @app.get("/readyz", tags=["foundation"])
     async def readiness() -> JSONResponse:
         ready = container.ready
+        content: dict[str, Any] = {"status": container.status}
+        if container.status == "degraded":
+            content["disabled_adapters"] = ["image"]
         return JSONResponse(
             status_code=200 if ready else 503,
-            content={"status": "ready" if ready else "not_ready"},
+            content=content,
         )
 
     @app.post("/api/v1/contracts/{schema_name}/validate", tags=["foundation"])

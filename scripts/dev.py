@@ -26,29 +26,23 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
+BACKEND_ROOT = ROOT / "backend"
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from harness.runtime_identity import (  # noqa: E402
+    PythonInterpreterIdentity,
+    RuntimeIdentityError,
+    dependency_tree_sha256,
+    inspect_python_interpreter,
+)
+
 VENV_ROOT = ROOT / ".venv"
 IMAGE_STAMP_NAME = ".requirements-installed"
 FRONTEND_STAMP_NAME = ".harness-package-lock.sha256"
 DEFAULT_BACKEND_PORT = 18080
 DEFAULT_FRONTEND_PORT = 18180
 
-_IGNORED_TREE_NAMES = frozenset(
-    {
-        ".git",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".requirements-installed",
-        ".ruff_cache",
-        "__pycache__",
-        "build",
-        "dist",
-        "htmlcov",
-        "node_modules",
-        "playwright-report",
-        "test-results",
-    }
-)
-_IGNORED_TREE_SUFFIXES = (".egg-info", ".pyc", ".pyo")
 _VERSION = re.compile(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 
 
@@ -115,33 +109,10 @@ def input_digest(
 def content_tree_digest(root: Path) -> str:
     """Hash installed dependency content while ignoring location-specific metadata."""
 
-    manifest: list[dict[str, str | int]] = []
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        relative = path.relative_to(root)
-        if any(
-            part in _IGNORED_TREE_NAMES or part.endswith(_IGNORED_TREE_SUFFIXES)
-            for part in relative.parts
-        ):
-            continue
-        if relative.parts and relative.parts[0] in {"bin", "Scripts"}:
-            continue
-        if path.is_symlink():
-            _fail(f"Dependency installation contains an unsafe entry: {relative}")
-        if path.name == "RECORD" or path.is_dir():
-            continue
-        if not path.is_file():
-            _fail(f"Dependency installation contains an unsafe entry: {relative}")
-        manifest.append(
-            {
-                "path": relative.as_posix(),
-                "size_bytes": path.stat().st_size,
-                "sha256": sha256_file(path),
-            }
-        )
-    encoded = json.dumps(
-        manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    try:
+        return dependency_tree_sha256(root)
+    except RuntimeIdentityError as exc:
+        _fail(str(exc))
 
 
 def venv_python(venv_root: Path = VENV_ROOT, *, os_name: str | None = None) -> Path:
@@ -277,8 +248,43 @@ class DevelopmentLauncher:
         return self.runtime_root / "image-agent-deps"
 
     @property
+    def image_python(self) -> Path:
+        return self.venv_python
+
+    @property
     def frontend_root(self) -> Path:
         return self.root / "frontend"
+
+    @staticmethod
+    def interpreter_identity(
+        command: Sequence[str | Path],
+    ) -> PythonInterpreterIdentity:
+        try:
+            return inspect_python_interpreter(command)
+        except RuntimeIdentityError as exc:
+            _fail(str(exc))
+
+    @staticmethod
+    def _same_interpreter_runtime(
+        first: PythonInterpreterIdentity, second: PythonInterpreterIdentity
+    ) -> bool:
+        return (
+            first.implementation,
+            first.cache_tag,
+            first.version,
+        ) == (
+            second.implementation,
+            second.cache_tag,
+            second.version,
+        )
+
+    @staticmethod
+    def _identity_matches_path(
+        identity: PythonInterpreterIdentity, path: Path
+    ) -> bool:
+        return os.path.normcase(os.path.abspath(identity.executable)) == os.path.normcase(
+            os.path.abspath(path)
+        )
 
     def pip_environment(self) -> dict[str, str]:
         cache = self.runtime_root / "pip-cache"
@@ -340,11 +346,16 @@ class DevelopmentLauncher:
             cwd=self.root,
         )
 
-    def backend_input_digest(self) -> str:
+    def backend_input_digest(
+        self, identity: PythonInterpreterIdentity | None = None
+    ) -> str:
+        selected = identity or self.interpreter_identity([self.venv_python])
         return input_digest(
             [self.root / "requirements-runtime.txt", self.root / "pyproject.toml"],
             identity=(
-                f"python={sys.implementation.cache_tag}",
+                f"python_implementation={selected.implementation}",
+                f"python_cache_tag={selected.cache_tag}",
+                f"python_version={selected.version}",
                 f"platform={sys.platform}",
                 f"machine={platform.machine().lower()}",
             ),
@@ -360,9 +371,15 @@ class DevelopmentLauncher:
         stamp = self.venv_root / ".harness-runtime.json"
         try:
             current = load_json(stamp)
+            identity = self.interpreter_identity([self.venv_python])
         except LauncherError:
             return False
-        if current.get("input_sha256") != self.backend_input_digest():
+        if (
+            not identity.is_virtual_environment
+            or not self._identity_matches_path(identity, self.venv_python)
+            or current.get("input_sha256") != self.backend_input_digest(identity)
+            or current.get("interpreter") != identity.as_dict()
+        ):
             return False
         return command_succeeds(
             [
@@ -375,10 +392,24 @@ class DevelopmentLauncher:
         )
 
     def ensure_virtual_environment(self) -> None:
-        if self.venv_python.is_file() and command_succeeds(
-            [self.venv_python, "-c", "import sys; assert sys.prefix != sys.base_prefix"]
-        ):
-            return
+        expected = self.interpreter_identity([self.python])
+        if self.venv_python.is_file():
+            try:
+                actual = self.interpreter_identity([self.venv_python])
+            except LauncherError:
+                actual = None
+            if (
+                actual is not None
+                and actual.is_virtual_environment
+                and self._identity_matches_path(actual, self.venv_python)
+                and self._same_interpreter_runtime(actual, expected)
+            ):
+                return
+            print(
+                "Existing Harness virtual environment has another interpreter identity; "
+                "rebuilding it.",
+                flush=True,
+            )
         backup: Path | None = None
         failed: Path | None = None
         if self.venv_root.exists():
@@ -400,14 +431,15 @@ class DevelopmentLauncher:
                     [self.python, "-m", "venv", "--without-pip", self.venv_root],
                     cwd=self.root,
                 )
-            if not self.venv_python.is_file() or not command_succeeds(
-                [
-                    self.venv_python,
-                    "-c",
-                    "import sys; assert sys.prefix != sys.base_prefix",
-                ]
-            ):
+            if not self.venv_python.is_file():
                 _fail("Python could not create a usable virtual environment.")
+            actual = self.interpreter_identity([self.venv_python])
+            if (
+                not actual.is_virtual_environment
+                or not self._identity_matches_path(actual, self.venv_python)
+                or not self._same_interpreter_runtime(actual, expected)
+            ):
+                _fail("Python created a virtual environment with another interpreter identity.")
         except BaseException:
             if self.venv_root.exists():
                 replacement = self.root / f".venv-invalid-{uuid.uuid4().hex}"
@@ -423,31 +455,39 @@ class DevelopmentLauncher:
         if failed is not None:
             shutil.rmtree(failed)
 
-    def pip_installer(self) -> tuple[list[str], Path | None]:
+    def pip_installer(
+        self,
+    ) -> tuple[list[str], Path | None, PythonInterpreterIdentity]:
         if command_succeeds([self.venv_python, "-m", "pip", "--version"]):
-            return [str(self.venv_python), "-m", "pip"], None
+            return (
+                [str(self.venv_python), "-m", "pip"],
+                None,
+                self.interpreter_identity([self.venv_python]),
+            )
         if not command_succeeds([self.python, "-m", "pip", "--version"]):
             _fail(
                 "pip is unavailable. Install the Python pip/venv components and rerun setup."
             )
+        installer_identity = self.interpreter_identity([self.python])
         if os.name == "nt":
             site_packages = self.venv_root / "Lib" / "site-packages"
         else:
+            major, minor, *_ = installer_identity.version.split(".")
             site_packages = (
                 self.venv_root
                 / "lib"
-                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / f"python{major}.{minor}"
                 / "site-packages"
             )
         site_packages.mkdir(parents=True, exist_ok=True)
-        return [str(self.python), "-m", "pip"], site_packages
+        return [str(self.python), "-m", "pip"], site_packages, installer_identity
 
     def install_backend(self, *, force: bool = False) -> None:
         self.ensure_virtual_environment()
         if not force and self.backend_is_current():
             print("[ok] Harness Python environment matches its lock.", flush=True)
             return
-        installer, external_target = self.pip_installer()
+        installer, external_target, installer_identity = self.pip_installer()
         target_arguments: list[str | Path] = (
             [] if external_target is None else ["--target", external_target]
         )
@@ -467,12 +507,14 @@ class DevelopmentLauncher:
         )
         if not self.backend_is_importable():
             _fail("Harness dependencies were installed but required imports still fail.")
+        runtime_identity = self.interpreter_identity([self.venv_python])
         write_json(
             self.venv_root / ".harness-runtime.json",
             {
-                "schema_version": "1.0",
-                "input_sha256": self.backend_input_digest(),
-                "python": sys.implementation.cache_tag,
+                "schema_version": "2.0",
+                "input_sha256": self.backend_input_digest(runtime_identity),
+                "interpreter": runtime_identity.as_dict(),
+                "installer": installer_identity.as_dict(),
                 "platform": sys.platform,
             },
         )
@@ -488,7 +530,16 @@ class DevelopmentLauncher:
             environment=self.backend_environment(),
         )
 
-    def image_input_digest(self) -> str:
+    def image_input_digest(
+        self,
+        runtime_identity: PythonInterpreterIdentity | None = None,
+        installer_identity: PythonInterpreterIdentity | None = None,
+    ) -> str:
+        runtime = runtime_identity or self.interpreter_identity([self.image_python])
+        if installer_identity is None:
+            _, _, installer = self.pip_installer()
+        else:
+            installer = installer_identity
         lock = load_json(self.lock_path)
         paths: list[Path] = [self.lock_path]
         dependencies = lock.get("dependencies")
@@ -507,51 +558,114 @@ class DevelopmentLauncher:
         return input_digest(
             paths,
             identity=(
-                f"python={sys.implementation.cache_tag}",
+                f"runtime_implementation={runtime.implementation}",
+                f"runtime_cache_tag={runtime.cache_tag}",
+                f"runtime_version={runtime.version}",
+                f"installer_implementation={installer.implementation}",
+                f"installer_cache_tag={installer.cache_tag}",
+                f"installer_version={installer.version}",
                 f"platform={sys.platform}",
                 f"machine={platform.machine().lower()}",
             ),
             root=self.root,
         )
 
-    def image_environment(self, dependency_root: Path | None = None) -> dict[str, str]:
-        return _pythonpath(
-            os.environ.copy(),
-            dependency_root or self.image_dependency_root,
-            self.image_agent_root,
-        )
-
-    def image_dependencies_are_importable(
-        self, dependency_root: Path | None = None
-    ) -> bool:
-        return command_succeeds(
-            [
-                self.venv_python,
-                "-c",
-                "import fastapi, httpx, openai, PIL, portalocker, pydantic, uvicorn, yaml",
-            ],
-            cwd=self.image_agent_root,
-            environment=self.image_environment(dependency_root),
-        )
-
-    def image_dependencies_are_current(self) -> bool:
+    def require_current_image_dependencies(
+        self,
+    ) -> tuple[PythonInterpreterIdentity, PythonInterpreterIdentity]:
         root = self.image_dependency_root
         stamp_path = root / IMAGE_STAMP_NAME
         if not root.is_dir() or not stamp_path.is_file():
-            return False
-        try:
-            stamp = load_json(stamp_path)
-            actual_digest = content_tree_digest(root)
-        except (LauncherError, OSError):
-            return False
-        return (
-            stamp.get("input_sha256") == self.image_input_digest()
-            and stamp.get("content_sha256") == actual_digest
-            and self.image_dependencies_are_importable()
+            _fail(
+                "Image Agent dependencies are not installed; run "
+                "scripts/dev.py setup --force."
+            )
+        stamp = load_json(stamp_path)
+        runtime_identity = self.interpreter_identity([self.image_python])
+        _, _, installer_identity = self.pip_installer()
+        actual_digest = content_tree_digest(root)
+        if not runtime_identity.is_virtual_environment or not self._identity_matches_path(
+            runtime_identity, self.image_python
+        ):
+            _fail(
+                "Image Agent would run with an unexpected Python interpreter; rebuild "
+                "the Harness environment with scripts/dev.py setup --force."
+            )
+        expected_input = self.image_input_digest(
+            runtime_identity, installer_identity
         )
+        if (
+            stamp.get("schema_version") != "2.0"
+            or stamp.get("input_sha256") != expected_input
+            or stamp.get("interpreter") != runtime_identity.as_dict()
+            or stamp.get("installer") != installer_identity.as_dict()
+        ):
+            _fail(
+                "Image Agent dependencies were installed by another interpreter or lock "
+                "set; run scripts/dev.py setup --force."
+            )
+        if stamp.get("content_sha256") != actual_digest:
+            _fail(
+                "Image Agent dependencies changed after setup; run "
+                "scripts/dev.py setup --force."
+            )
+        return runtime_identity, installer_identity
+
+    def image_dependencies_are_current(self) -> bool:
+        try:
+            self.require_current_image_dependencies()
+        except LauncherError:
+            return False
+        return True
+
+    def attest_image_runtime(self, dependency_root: Path | None = None) -> dict[str, Any]:
+        selected_dependencies = dependency_root or self.image_dependency_root
+        command = [
+            self.venv_python,
+            self.root / "scripts" / "attest_image_runtime.py",
+            "--lock",
+            self.lock_path,
+            "--source",
+            self.image_agent_root,
+            "--dependencies",
+            selected_dependencies,
+            "--harness-root",
+            self.root,
+            "--interpreter",
+            self.image_python,
+        ]
+        completed = subprocess.run(
+            [str(item) for item in command],
+            cwd=self.root,
+            env=self.backend_environment(),
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            rendered = completed.stderr.strip() or completed.stdout.strip()
+            try:
+                failure = json.loads(rendered)
+            except json.JSONDecodeError:
+                failure = None
+            if isinstance(failure, dict):
+                message = failure.get("message")
+                details = failure.get("details")
+                action = details.get("action") if isinstance(details, dict) else None
+                if isinstance(message, str) and message:
+                    suffix = f" {action}" if isinstance(action, str) and action else ""
+                    _fail(f"Image Agent environment is unusable: {message}{suffix}")
+            _fail(f"Image Agent environment validation failed: {rendered}")
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            _fail("Image Agent runtime attestation returned invalid output.")
+        if not isinstance(result, dict):
+            _fail("Image Agent runtime attestation returned invalid output.")
+        return result
 
     def install_image_dependencies(self, *, force: bool = False) -> None:
         if not force and self.image_dependencies_are_current():
+            self.attest_image_runtime()
             print("[ok] Image Agent isolated dependencies match their locks.", flush=True)
             return
         self.runtime_root.mkdir(parents=True, exist_ok=True)
@@ -560,7 +674,7 @@ class DevelopmentLauncher:
         )
         backup: Path | None = None
         try:
-            installer, _ = self.pip_installer()
+            installer, _, installer_identity = self.pip_installer()
             run_command(
                 [
                     *installer,
@@ -577,16 +691,21 @@ class DevelopmentLauncher:
                 cwd=self.root,
                 environment=self.pip_environment(),
             )
-            if not self.image_dependencies_are_importable(temporary):
-                _fail("Image Agent dependencies installed, but required imports fail.")
-            content_sha256 = content_tree_digest(temporary)
+            attestation = self.attest_image_runtime(temporary)
+            content_sha256 = attestation.get("dependency_sha256")
+            if not isinstance(content_sha256, str):
+                _fail("Image Agent environment validation returned no dependency identity.")
+            runtime_identity = self.interpreter_identity([self.image_python])
             write_json(
                 temporary / IMAGE_STAMP_NAME,
                 {
-                    "schema_version": "1.0",
-                    "input_sha256": self.image_input_digest(),
+                    "schema_version": "2.0",
+                    "input_sha256": self.image_input_digest(
+                        runtime_identity, installer_identity
+                    ),
                     "content_sha256": content_sha256,
-                    "python": sys.implementation.cache_tag,
+                    "interpreter": runtime_identity.as_dict(),
+                    "installer": installer_identity.as_dict(),
                     "platform": sys.platform,
                 },
             )
@@ -725,7 +844,7 @@ class DevelopmentLauncher:
             f"s=load_settings(Path({str(self.root)!r})); "
             "assert s.contracts_root.is_dir(); assert s.image_agent_root.is_dir(); "
             "assert s.image_agent_lock_path.is_file(); "
-            "assert s.image_agent_dependency_root.is_dir()"
+            "assert s.image_agent_python.is_file()"
         )
         if not command_succeeds(
             [self.venv_python, "-c", code],
@@ -763,6 +882,7 @@ class DevelopmentLauncher:
         backend_port: int = DEFAULT_BACKEND_PORT,
         frontend_port: int = DEFAULT_FRONTEND_PORT,
         configuration_checked: bool = False,
+        allow_image_degraded: bool = False,
     ) -> None:
         if not configuration_checked:
             self.config_check()
@@ -771,9 +891,30 @@ class DevelopmentLauncher:
         if not self.backend_is_current():
             _fail("Harness Python environment is missing or stale; run scripts/dev.py setup.")
         print("[ok] Harness Python environment", flush=True)
-        if not self.image_dependencies_are_current():
-            _fail("Image Agent dependencies are missing or stale; run scripts/dev.py setup.")
-        print("[ok] Image Agent isolated dependency environment", flush=True)
+        image_degraded = False
+        try:
+            runtime_identity, installer_identity = (
+                self.require_current_image_dependencies()
+            )
+            attestation = self.attest_image_runtime()
+        except LauncherError as exc:
+            if not allow_image_degraded:
+                raise
+            image_degraded = True
+            print(
+                "[degraded] Image Adapter will be disabled: " + str(exc),
+                flush=True,
+            )
+        else:
+            print(
+                "[ok] Image Agent isolated dependency environment "
+                f"(runtime {runtime_identity.implementation}/"
+                f"{runtime_identity.cache_tag}; pip "
+                f"{installer_identity.implementation}/{installer_identity.cache_tag}; "
+                f"packages {attestation['package_name']} "
+                f"{attestation['package_version']})",
+                flush=True,
+            )
         if not self.frontend_is_current():
             _fail("Frontend node_modules is missing or stale; run scripts/dev.py setup.")
         print("[ok] Frontend package-lock installation", flush=True)
@@ -788,7 +929,12 @@ class DevelopmentLauncher:
                 f"[ok] Ports {backend_port} and {frontend_port} are available",
                 flush=True,
             )
-        print("[ok] Doctor completed without errors.", flush=True)
+        print(
+            "[degraded] Doctor completed; control-plane startup remains available."
+            if image_degraded
+            else "[ok] Doctor completed without errors.",
+            flush=True,
+        )
 
     def start(
         self,
@@ -804,6 +950,7 @@ class DevelopmentLauncher:
             backend_port=backend_port,
             frontend_port=frontend_port,
             configuration_checked=True,
+            allow_image_degraded=True,
         )
         backend_environment = self.backend_environment()
         frontend_environment = self.npm_environment()

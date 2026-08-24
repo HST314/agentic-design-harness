@@ -1,18 +1,29 @@
-"""Fail-closed deployment identity checks for the embedded Image Agent runtime."""
+"""Lightweight identity and import checks for the embedded Image Agent runtime."""
 
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import NoReturn
 
 from ..core.errors import HarnessError
+from ..runtime_identity import (
+    RuntimeIdentityError,
+    inspect_python_interpreter,
+    inspect_runtime_packages,
+    runtime_platform_identity,
+)
 from ..storage.atomic import digest_json
 from ..storage.repository import utc_now
-from .image_lock import ImageAgentReleaseLock, runtime_platform_key
+from .image_lock import ImageAgentReleaseLock
 from .image_runtime import content_tree_sha256, dependency_tree_sha256
+
+_PROJECT_NAME = re.compile(r'^name\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
+_PROJECT_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +38,11 @@ class RuntimeAttestation:
     dependency_sha256: str
     dependency_lock_set_sha256: str
     platform: str
+    package_name: str
+    python_implementation: str
+    python_cache_tag: str
+    python_version: str
+    python_executable: str
     identity_sha256: str
     verified_at: str
 
@@ -40,9 +56,11 @@ def attest_image_runtime(
     source_root: Path,
     dependency_root: Path,
     harness_root: Path,
+    interpreter: Path,
 ) -> RuntimeAttestation:
-    """Verify every runtime-relevant byte before the control plane becomes ready."""
+    """Verify release inputs and record the legal local dependency identity."""
 
+    platform = runtime_platform_identity()
     source = _safe_directory(source_root, "source")
     dependencies = _safe_directory(dependency_root, "dependency")
     harness = _safe_directory(harness_root, "Harness")
@@ -50,6 +68,10 @@ def attest_image_runtime(
         source_sha256 = content_tree_sha256(source)
         dependency_sha256 = dependency_tree_sha256(dependencies)
         lock_set_sha256 = _dependency_lock_set_sha256(release_lock, harness, source)
+        package_name, package_version = _source_package_identity(source)
+        expected_distributions = _locked_distribution_versions(
+            release_lock, harness, source
+        )
     except HarnessError as exc:
         if exc.code == "IMAGE_RUNTIME_ATTESTATION_FAILED":
             raise
@@ -58,30 +80,80 @@ def attest_image_runtime(
             "The Image Agent deployment cannot be attested safely.",
             {"cause_code": exc.code},
         ) from None
-    expected = {
+    expected_identity = {
         "source_sha256": release_lock.source_content_sha256,
-        "dependency_sha256": release_lock.runtime_dependency_tree_sha256,
         "dependency_lock_set_sha256": release_lock.dependency_lock_set_sha256,
+        "package_name": "image-agent-mvp",
+        "package_version": release_lock.package_version,
     }
-    actual = {
+    actual_identity = {
         "source_sha256": source_sha256,
-        "dependency_sha256": dependency_sha256,
         "dependency_lock_set_sha256": lock_set_sha256,
+        "package_name": package_name,
+        "package_version": package_version,
     }
     mismatches = {
-        name: {"expected_sha256": expected[name], "actual_sha256": value}
-        for name, value in actual.items()
-        if value != expected[name]
+        name: {"expected": expected_identity[name], "actual": value}
+        for name, value in actual_identity.items()
+        if value != expected_identity[name]
     }
     if mismatches:
         raise HarnessError(
             "IMAGE_RUNTIME_ATTESTATION_FAILED",
-            "The Image Agent deployment does not match its release lock.",
-            {"mismatches": mismatches},
+            "The Image Agent source identity does not match its release inputs.",
+            {"platform": platform, "mismatches": mismatches},
         )
-    platform = runtime_platform_key()
+    try:
+        interpreter_identity = inspect_python_interpreter([interpreter])
+        package_identity = inspect_runtime_packages(
+            interpreter,
+            source_root=source,
+            dependency_root=dependencies,
+        )
+    except RuntimeIdentityError as exc:
+        raise HarnessError(
+            "IMAGE_RUNTIME_ATTESTATION_FAILED",
+            str(exc),
+            {
+                "platform": platform,
+                "interpreter": str(interpreter),
+                "action": "Run scripts/dev.py setup --force, then scripts/dev.py doctor.",
+            },
+        ) from None
+    if not _same_executable(
+        interpreter_identity.executable, package_identity.python_executable
+    ):
+        raise HarnessError(
+            "IMAGE_RUNTIME_ATTESTATION_FAILED",
+            "The Image Agent import probe ran with an unexpected interpreter.",
+            {
+                "platform": platform,
+                "interpreter": interpreter_identity.as_dict(),
+                "import_probe_executable": package_identity.python_executable,
+                "action": "Run scripts/dev.py setup --force, then scripts/dev.py doctor.",
+            },
+        )
+    mismatches = {}
+    for distribution, expected_version in expected_distributions.items():
+        actual_version = package_identity.distributions.get(distribution)
+        if actual_version != expected_version:
+            mismatches[f"distribution:{distribution}"] = {
+                "expected": expected_version,
+                "actual": actual_version,
+            }
+    if mismatches:
+        raise HarnessError(
+            "IMAGE_RUNTIME_ATTESTATION_FAILED",
+            "The Image Agent package identity does not match its release inputs.",
+            {
+                "platform": platform,
+                "python_cache_tag": interpreter_identity.cache_tag,
+                "mismatches": mismatches,
+                "action": "Run scripts/dev.py setup --force, then scripts/dev.py doctor.",
+            },
+        )
     identity = {
-        "builder_schema": "3.0",
+        "builder_schema": "3.1",
         "revision": release_lock.revision,
         "package_version": release_lock.package_version,
         "contract_version": release_lock.contract_version,
@@ -89,12 +161,73 @@ def attest_image_runtime(
         "dependency_sha256": dependency_sha256,
         "dependency_lock_set_sha256": lock_set_sha256,
         "platform": platform,
+        "package_name": package_name,
+        "python_implementation": interpreter_identity.implementation,
+        "python_cache_tag": interpreter_identity.cache_tag,
     }
     return RuntimeAttestation(
         **identity,
+        python_version=interpreter_identity.version,
+        python_executable=interpreter_identity.executable,
         identity_sha256=digest_json(identity),
         verified_at=utc_now(),
     )
+
+
+def _same_executable(first: str, second: str) -> bool:
+    return os.path.normcase(os.path.abspath(first)) == os.path.normcase(
+        os.path.abspath(second)
+    )
+
+
+def _source_package_identity(source_root: Path) -> tuple[str, str]:
+    try:
+        content = (source_root / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        _attestation_failed("The Image Agent package metadata cannot be inspected.")
+    name = _PROJECT_NAME.search(content)
+    version = _PROJECT_VERSION.search(content)
+    if name is None or version is None:
+        _attestation_failed("The Image Agent package metadata is invalid.")
+    return name.group(1), version.group(1)
+
+
+def _locked_distribution_versions(
+    release_lock: ImageAgentReleaseLock,
+    harness_root: Path,
+    source_root: Path,
+) -> dict[str, str]:
+    required = {
+        "fastapi",
+        "httpx",
+        "openai",
+        "pillow",
+        "portalocker",
+        "pydantic",
+        "pyyaml",
+        "uvicorn",
+    }
+    versions: dict[str, str] = {}
+    pattern = re.compile(r"^([A-Za-z0-9_.-]+)==([^;\s]+)")
+    for item in release_lock.dependency_files:
+        base = harness_root if item.scope == "harness" else source_root
+        try:
+            lines = (base / item.path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            _attestation_failed("An Image Agent dependency lock file cannot be inspected.")
+        for line in lines:
+            matched = pattern.match(line.strip())
+            if matched is None:
+                continue
+            name = re.sub(r"[-_.]+", "-", matched.group(1)).lower()
+            if name in required:
+                versions[name] = matched.group(2)
+    missing = sorted(required - set(versions))
+    if missing:
+        _attestation_failed(
+            "The Image Agent dependency locks omit required package versions."
+        )
+    return versions
 
 
 def _safe_directory(path: Path, label: str) -> Path:

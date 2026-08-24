@@ -97,7 +97,7 @@ Windows 将每行开头的 `python3` 替换为 `py -3`。`setup --force` 可重�
 | --- | --- |
 | <http://127.0.0.1:18180/> | React 工作台 |
 | <http://127.0.0.1:18080/healthz> | 后端进程存活 |
-| <http://127.0.0.1:18080/readyz> | 后端可接受业务请求，状态为 `ready` |
+| <http://127.0.0.1:18080/readyz> | 后端可接受业务请求；`ready` 表示 Image 可用，`degraded` 表示仅 Image 被禁用 |
 | <http://127.0.0.1:18080/docs> | OpenAPI 文档 |
 
-根配置检查通过且服务健康启动后，部署即完成。接下来从[创建第一个任务](docs/user-guide.md)开始；启动失败按[故障排查](docs/troubleshooting.md)处理。
+根配置检查通过且服务健康启动后，控制面部署即完成；需要 Image 任务时还应确认 `/readyz` 为 `ready`。接下来从[创建第一个任务](docs/user-guide.md)开始；`degraded` 或启动失败按[故障排查](docs/troubleshooting.md)处理。

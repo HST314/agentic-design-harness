@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from harness.runtime_identity import PythonInterpreterIdentity
+
 from scripts.dev import (
     DevelopmentLauncher,
     LauncherError,
@@ -125,14 +127,77 @@ class DevelopmentLauncherTests(unittest.TestCase):
                 launcher.venv_python.parent.mkdir(parents=True)
                 launcher.venv_python.write_text("placeholder", encoding="utf-8")
 
+            def interpreter_identity(command):
+                executable = str(Path(command[0]).absolute())
+                return PythonInterpreterIdentity(
+                    implementation="cpython",
+                    cache_tag="cpython-313",
+                    version="3.13.7",
+                    executable=executable,
+                    is_virtual_environment=Path(command[0]) == launcher.venv_python,
+                )
+
             with (
                 patch("scripts.dev.run_command", side_effect=create_environment),
                 patch("scripts.dev.command_succeeds", return_value=True),
+                patch.object(
+                    DevelopmentLauncher,
+                    "interpreter_identity",
+                    side_effect=interpreter_identity,
+                ),
             ):
                 launcher.ensure_virtual_environment()
 
             self.assertTrue(launcher.venv_python.is_file())
             self.assertEqual(list(root.glob(".venv-failed-*")), [])
+
+    def test_image_input_digest_binds_the_runtime_and_actual_pip_interpreters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = root / "agents" / "image-agent.lock.json"
+            lock.parent.mkdir()
+            lock.write_text(
+                json.dumps(
+                    {
+                        "embedded_path": "agents/image_agent_mvp",
+                        "dependencies": {"files": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runtime = PythonInterpreterIdentity(
+                "cpython", "cpython-313", "3.13.7", "/runtime/python", True
+            )
+            first_installer = PythonInterpreterIdentity(
+                "cpython", "cpython-313", "3.13.7", "/pip/python", True
+            )
+            second_installer = PythonInterpreterIdentity(
+                "cpython", "cpython-314", "3.14.0", "/other/python", False
+            )
+            launcher = DevelopmentLauncher(root=root)
+
+            self.assertNotEqual(
+                launcher.image_input_digest(runtime, first_installer),
+                launcher.image_input_digest(runtime, second_installer),
+            )
+
+    def test_doctor_can_continue_with_an_actionable_image_degradation(self) -> None:
+        launcher = DevelopmentLauncher(root=Path("workspace"))
+        with (
+            patch.object(DevelopmentLauncher, "config_check"),
+            patch.object(DevelopmentLauncher, "check_tools"),
+            patch.object(DevelopmentLauncher, "verify_image_lock"),
+            patch.object(DevelopmentLauncher, "backend_is_current", return_value=True),
+            patch.object(
+                DevelopmentLauncher,
+                "require_current_image_dependencies",
+                side_effect=LauncherError("run scripts/dev.py setup --force"),
+            ),
+            patch.object(DevelopmentLauncher, "frontend_is_current", return_value=True),
+            patch.object(DevelopmentLauncher, "_check_configuration"),
+            patch.object(DevelopmentLauncher, "_check_writable_runtime"),
+        ):
+            launcher.doctor(check_ports=False, allow_image_degraded=True)
 
     def test_busy_port_is_reported_before_process_start(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:

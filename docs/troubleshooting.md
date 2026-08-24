@@ -18,7 +18,7 @@
 | `MASTER_RUN_FAILED` | 配置快照、素材解析、模型结构化输出或 Provider 调用失败 | 检查事件中的稳定错误、素材 warning 和三文件配置后，使用同一消息幂等重试 |
 | `CONFIG_ERROR` | 根配置缺失、环境引用未解析或模型能力不匹配 | 运行 `scripts/dev.py config-check`，修正第一条错误后重启 |
 | `MANAGED_BY_HARNESS` | 直接向受管 Image Agent 创建工程 | 回到 Master/计划页创建并确认 TaskCard |
-| `IMAGE_RUNTIME_ATTESTATION_FAILED` | Image 源码、依赖、lock 或只读缓存与发布身份不一致 | 停止切流；恢复匹配同一提交的锁定依赖并重新运行 setup，禁止手改摘要或绕过验签 |
+| `IMAGE_RUNTIME_ATTESTATION_FAILED` | Image 源码/lock 不匹配，或实际解释器、包版本、导入路径不可用 | 控制面会保持 `degraded`；运行 `scripts/dev.py setup --force` 后再运行 `doctor`，禁止手改摘要或绕过校验 |
 | `CONTROL_PLANE_NOT_READY` | ready 前请求了实例启动，或启动后台执行器未运行 | 等待 `/readyz`；若持续失败，检查启动验签、恢复日志和进程管理器 |
 | `REVISION_CONFLICT` | 页面或调用方持有旧 revision | 重新读取、重新审阅、使用新幂等键提交 |
 | `ASSET_CORRUPTED` | MIME、大小、SHA 或文件身份变化 | 停止发布，检查磁盘和来源，恢复可信备份或重新生成候选 |

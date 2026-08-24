@@ -179,7 +179,7 @@ function DetailsDrawer({
       </div>
       {drawer === "status" ? (
         <div className="workbench-drawer__body">
-          <div className="workbench-status-card"><Icon name="status" /><div><strong>{readiness.data?.status === "ready" ? "控制面连接正常" : "正在等待控制面"}</strong><p>状态来自 `/readyz`，工作台每 10 秒重新校验。</p></div></div>
+          <div className="workbench-status-card"><Icon name="status" /><div><strong>{readiness.data?.status === "ready" ? "控制面连接正常" : readiness.data?.status === "degraded" ? "控制面已降级运行" : "正在等待控制面"}</strong><p>{readiness.data?.status === "degraded" ? "Image Adapter 当前不可用；其他控制面能力保持可用。" : "状态来自 `/readyz`，工作台每 10 秒重新校验。"}</p></div></div>
           <dl className="workbench-definition-list"><div><dt>当前上下文</dt><dd>{taskId ?? "新任务"}</dd></div><div><dt>刷新策略</dt><dd>窗口聚焦时重新校验</dd></div></dl>
         </div>
       ) : drawer === "work-item" && taskId && target ? (
@@ -303,7 +303,7 @@ export function AppShell(): React.JSX.Element {
                 aria-live="polite"
               >
                 <span aria-hidden="true" />
-                {readiness.data?.status === "ready" ? "服务就绪" : readiness.isError ? "服务不可用" : "检查服务"}
+                {readiness.data?.status === "ready" ? "服务就绪" : readiness.data?.status === "degraded" ? "服务降级 · Image 不可用" : readiness.isError ? "服务不可用" : "检查服务"}
               </span>
               <button
                 className="workbench-icon-button"
