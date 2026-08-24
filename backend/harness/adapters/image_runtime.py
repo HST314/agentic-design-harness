@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import stat
@@ -11,6 +10,15 @@ from collections.abc import Collection
 from pathlib import Path
 
 from ..core.errors import HarnessError
+from ..runtime_identity import (
+    RuntimeIdentityError,
+)
+from ..runtime_identity import (
+    content_tree_sha256 as shared_content_tree_sha256,
+)
+from ..runtime_identity import (
+    dependency_tree_sha256 as shared_dependency_tree_sha256,
+)
 from ..storage.atomic import atomic_write_json, digest_json, fsync_directory, read_json
 from ..storage.locks import FileLock
 
@@ -35,8 +43,6 @@ _IGNORED_NAMES = frozenset(
     }
 )
 _IGNORED_SUFFIXES = (".egg-info", ".pyc", ".pyo")
-_DEPENDENCY_IGNORED_ROOT_NAMES = frozenset({"bin"})
-_DEPENDENCY_IGNORED_NAMES = frozenset({"RECORD"})
 _SHA256_LENGTH = 64
 _SERVER_SOURCE = """\
 from __future__ import annotations
@@ -78,6 +84,8 @@ class ImageRuntimeBuilder:
         dependency_content_sha256: str,
         identity_sha256: str | None = None,
         platform: str = "unknown",
+        python_implementation: str = "unknown",
+        python_cache_tag: str = "unknown",
     ) -> None:
         self.source_root = source_root
         self.dependency_root = dependency_root
@@ -87,15 +95,19 @@ class ImageRuntimeBuilder:
         self.dependency_content_sha256 = dependency_content_sha256
         self.identity_sha256 = identity_sha256 or digest_json(
             {
-                "builder_schema": "3.0",
+                "builder_schema": "3.1",
                 "revision": revision,
                 "package_version": package_version,
                 "source_content_sha256": source_content_sha256,
                 "dependency_content_sha256": dependency_content_sha256,
                 "platform": platform,
+                "python_implementation": python_implementation,
+                "python_cache_tag": python_cache_tag,
             }
         )
         self.platform = platform
+        self.python_implementation = python_implementation
+        self.python_cache_tag = python_cache_tag
 
     def prepare(self, runtime_root: Path) -> Path:
         self._validate_attestation()
@@ -287,13 +299,15 @@ class ImageRuntimeBuilder:
 
     def _marker(self) -> dict[str, str]:
         return {
-            "schema_version": "3.0",
+            "schema_version": "3.1",
             "identity_sha256": self.identity_sha256,
             "platform": self.platform,
             "source_revision": self.revision,
             "package_version": self.package_version,
             "source_content_sha256": self.source_content_sha256,
             "dependency_content_sha256": self.dependency_content_sha256,
+            "python_implementation": self.python_implementation,
+            "python_cache_tag": self.python_cache_tag,
             "entrypoint": IMAGE_ENTRYPOINT,
         }
 
@@ -307,100 +321,29 @@ def content_tree_sha256(
 ) -> str:
     """Hash every runtime-relevant regular file by relative path and content."""
 
-    manifest: list[dict[str, str | int]] = []
-    _append_content_manifest(
-        root,
-        Path(),
-        manifest,
-        frozenset(ignored_names),
-        frozenset(ignored_root_names),
-        normalize_text_eol,
-    )
-    return digest_json(manifest)
+    try:
+        return shared_content_tree_sha256(
+            root,
+            ignored_names=ignored_names,
+            ignored_root_names=ignored_root_names,
+            normalize_text_eol=normalize_text_eol,
+        )
+    except RuntimeIdentityError as exc:
+        raise HarnessError(
+            "PROCESS_START_FAILED",
+            "The Image Agent content tree cannot be inspected.",
+            {"reason": str(exc)},
+        ) from None
 
 
 def dependency_tree_sha256(root: Path) -> str:
     """Hash importable dependency content, excluding install-location metadata."""
 
-    return content_tree_sha256(
-        root,
-        ignored_names=_DEPENDENCY_IGNORED_NAMES,
-        ignored_root_names=_DEPENDENCY_IGNORED_ROOT_NAMES,
-        normalize_text_eol=False,
-    )
-
-
-def _portable_file_bytes(path: Path) -> bytes:
-    """Normalize only Git's cross-platform EOL transform for UTF-8 text."""
-
-    content = path.read_bytes()
-    if b"\0" in content:
-        return content
     try:
-        content.decode("utf-8")
-    except UnicodeDecodeError:
-        return content
-    return content.replace(b"\r\n", b"\n")
-
-
-def _append_content_manifest(
-    root: Path,
-    relative: Path,
-    manifest: list[dict[str, str | int]],
-    ignored_names: frozenset[str],
-    ignored_root_names: frozenset[str],
-    normalize_text_eol: bool,
-) -> None:
-    current = root / relative
-    try:
-        entries = sorted(os.scandir(current), key=lambda item: item.name)
-    except OSError:
+        return shared_dependency_tree_sha256(root)
+    except RuntimeIdentityError as exc:
         raise HarnessError(
-            "PROCESS_START_FAILED", "The Image Agent content tree cannot be inspected."
+            "PROCESS_START_FAILED",
+            "The Image Agent dependency tree cannot be inspected.",
+            {"reason": str(exc)},
         ) from None
-    for entry in entries:
-        ignored_at_root = not relative.parts and entry.name in ignored_root_names
-        if (
-            entry.name in ignored_names
-            or ignored_at_root
-            or ImageRuntimeBuilder._ignored(entry.name, relative)
-        ):
-            continue
-        path = Path(entry.path)
-        item_relative = relative / entry.name
-        if entry.is_symlink():
-            raise HarnessError(
-                "PROCESS_START_FAILED", "The Image Agent source contains a symbolic link."
-            )
-        if entry.is_dir(follow_symlinks=False):
-            _append_content_manifest(
-                root,
-                item_relative,
-                manifest,
-                ignored_names,
-                ignored_root_names,
-                normalize_text_eol,
-            )
-            continue
-        try:
-            item_stat = entry.stat(follow_symlinks=False)
-            if not stat.S_ISREG(item_stat.st_mode):
-                raise HarnessError(
-                    "PROCESS_START_FAILED",
-                    "The Image Agent source contains a special file.",
-                )
-            content = (
-                _portable_file_bytes(path) if normalize_text_eol else path.read_bytes()
-            )
-        except OSError:
-            raise HarnessError(
-                "PROCESS_START_FAILED",
-                "The Image Agent content tree cannot be inspected.",
-            ) from None
-        manifest.append(
-            {
-                "path": item_relative.as_posix(),
-                "size_bytes": len(content),
-                "sha256": hashlib.sha256(content).hexdigest(),
-            }
-        )
