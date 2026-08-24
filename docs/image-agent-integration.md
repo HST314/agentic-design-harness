@@ -7,11 +7,11 @@ Image Agent 的源码与 Harness 位于同一工作树，但运行边界保持�
 `scripts/dev.py setup` 完成以下工作：
 
 1. 初始化固定 submodule 并核对 `.gitmodules`、gitlink 与 lock revision。
-2. 校验 Image Agent 源码摘要、依赖清单摘要和隔离依赖内容摘要。
-3. 为 Harness 创建 `.venv`，为 Image Agent 准备独立依赖目录。
+2. 校验 Image Agent 源码摘要和依赖清单摘要，并记录实际安装解释器与依赖内容身份。
+3. 为 Harness 创建 `.venv`，用实际执行 pip 的解释器为 Image Agent 准备独立依赖目录。
 4. 按 `frontend/package-lock.json` 准备前端依赖。
 
-实例启动时，Harness 从锁定源码生成只读运行时副本，再以独立解释器、端口、工作目录和凭据环境启动子进程。Harness 不 import Image Agent 内部 Python 包；所有调用通过 loopback HTTP Adapter，所有文件通过任务受控目录和摘要验证传递。一个 Agent 的依赖冲突或崩溃不会污染控制面进程。
+实例启动时，Harness 核对 Image 包名/版本、关键依赖版本、可导入性和导入路径，从锁定源码与本机合法依赖生成内容寻址的只读运行时副本，再以独立端口、工作目录和凭据环境启动子进程。Harness 控制面不直接调用 Image Agent 内部业务接口；所有运行调用通过 loopback HTTP Adapter，所有文件通过任务受控目录和摘要验证传递。Image 环境不可用时，控制面以 `degraded` 状态完成恢复，仅将 Image Adapter 标记为不可用。
 
 ## 受管模式
 
@@ -52,7 +52,7 @@ Image Agent 只从 `agents/image_agent_mvp` 启动，并且必须通过 release 
 4. 执行 `python scripts/verify_image_agent_lock.py`、Image Agent 全量测试、`make check` 和适用的真实进程 E2E。
 5. 在同一变更说明中记录 Image Agent 提交与主仓提交，确保回滚点成对。
 
-版本或内容不一致必须失败关闭。若升级失败，回到上一组已验收的 submodule 指针与 lock，并恢复对应状态备份；不得复制文件覆盖 submodule 或手工改摘要“放行”。
+版本或内容不一致时，Image Adapter 必须失败关闭并给出 `setup --force` 与 `doctor` 诊断；控制面继续提供恢复、查询和其他可用能力。若升级失败，回到上一组已验收的 submodule 指针与 lock，并恢复对应状态备份；不得复制文件覆盖 submodule 或手工改摘要“放行”。
 
 ## 集成验证
 

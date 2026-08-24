@@ -18,11 +18,11 @@ python3 scripts/dev.py start
 | 探针 | 含义 | 自动化使用 |
 | --- | --- | --- |
 | `/healthz` | 后端进程存活 | 只用于判断进程是否响应 |
-| `/readyz` | Image Runtime 已验签并冻结、恢复已完成、持有唯一 writer lease、后台执行器存活 | 前端、业务调用和流量切换的唯一就绪依据 |
+| `/readyz` | 恢复已完成、持有唯一 writer lease、后台执行器存活；`ready` 表示 Image 可用，`degraded` 表示仅 Image 被禁用 | 前端、业务调用和流量切换的唯一就绪依据 |
 
 后端根路径 `/` 返回 404 是正常行为。进程管理器应发送正常终止信号，等待 Harness 停止监管线程、回收 Agent 进程树并释放 writer lease；不要以强制结束作为日常关闭方式。
 
-启动时会在 writer lease 和业务写入之前核对 Image Agent 源码、依赖树、依赖锁集合、版本与平台身份，并按内容身份生成全局只读制品。任何漂移都以 `IMAGE_RUNTIME_ATTESTATION_FAILED` 拒绝 ready；不得通过跳过 lock、改写摘要或直接从可变源码启动来恢复。
+启动时会在 writer lease 和业务写入之前核对 Image Agent revision、源码与依赖锁集合，并使用实际运行解释器验证包名/版本、可导入性和导入路径；实际依赖内容摘要用于缓存身份、变化检测和只读制品校验。Image 环境校验失败时记录 `IMAGE_RUNTIME_ATTESTATION_FAILED`，控制面继续恢复并以 `degraded` 就绪，仅禁用 Image Adapter；不得通过跳过 lock、改写摘要或直接从可变源码启动 Image 任务。
 
 计划确认只提交持久化 Start Operation，不在 Master 请求锁内等待进程就绪。后台执行器按 `QUEUED → RUNNING → COMMITTED` 推进；逐实例阶段可从 `PREPARING`、`PROCESS_STARTING`、`AGENT_STARTING` 到 `RUNNING`。重启会迁移旧 `PREPARED` 意图并从已持久化副作用边界恢复，不重复发送已接受的启动命令。
 

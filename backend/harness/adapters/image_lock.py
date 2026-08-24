@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import platform
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +15,6 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _VERSION = re.compile(r"^[1-9][0-9]*\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?$")
 _DEPENDENCY_SCOPES = frozenset({"harness", "image_agent"})
-_RUNTIME_PLATFORMS = frozenset({"linux-x86_64", "windows-amd64"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +35,6 @@ class ImageAgentReleaseLock:
     source_content_sha256: str
     dependency_files: tuple[LockedDependencyFile, ...]
     dependency_lock_set_sha256: str
-    runtime_dependency_tree_sha256: str
 
 
 def load_image_agent_lock(path: Path) -> ImageAgentReleaseLock:
@@ -64,7 +61,7 @@ def load_image_agent_lock(path: Path) -> ImageAgentReleaseLock:
         "lock",
         path,
     )
-    if root["schema_version"] != "1.0" or root["agent"] != "image_agent_mvp":
+    if root["schema_version"] != "1.1" or root["agent"] != "image_agent_mvp":
         _invalid_lock("The Image Agent release lock identity is unsupported.", path)
     repository = _string(root["repository"], "repository", path)
     parsed = urlsplit(repository)
@@ -91,35 +88,10 @@ def load_image_agent_lock(path: Path) -> ImageAgentReleaseLock:
     dependencies = _object(root["dependencies"], "dependencies", path)
     _exact_keys(
         dependencies,
-        {
-            "files",
-            "lock_set_sha256",
-            "runtime_tree_sha256",
-            "runtime_tree_sha256_by_platform",
-        },
+        {"files", "lock_set_sha256"},
         "dependencies",
         path,
     )
-    platform_digests = _object(
-        dependencies["runtime_tree_sha256_by_platform"],
-        "runtime_tree_sha256_by_platform",
-        path,
-    )
-    _exact_keys(
-        platform_digests,
-        set(_RUNTIME_PLATFORMS),
-        "runtime_tree_sha256_by_platform",
-        path,
-    )
-    validated_platform_digests = {
-        key: _matching(value, _SHA256, f"runtime digest for {key}", path)
-        for key, value in platform_digests.items()
-    }
-    legacy_runtime_digest = _matching(
-        dependencies["runtime_tree_sha256"], _SHA256, "runtime_tree_sha256", path
-    )
-    if validated_platform_digests["linux-x86_64"] != legacy_runtime_digest:
-        _invalid_lock("The legacy Image Agent runtime digest must match Linux.", path)
     files_value = dependencies["files"]
     if not isinstance(files_value, list) or not files_value:
         _invalid_lock("The Image Agent dependency file lock is empty.", path)
@@ -153,7 +125,7 @@ def load_image_agent_lock(path: Path) -> ImageAgentReleaseLock:
     ):
         _invalid_lock("The Image Agent dependency file lock is not canonical.", path)
     return ImageAgentReleaseLock(
-        schema_version="1.0",
+        schema_version="1.1",
         repository=repository,
         revision=revision,
         package_version=package_version,
@@ -164,33 +136,11 @@ def load_image_agent_lock(path: Path) -> ImageAgentReleaseLock:
         dependency_lock_set_sha256=_matching(
             dependencies["lock_set_sha256"], _SHA256, "lock_set_sha256", path
         ),
-        runtime_dependency_tree_sha256=validated_platform_digests[
-            runtime_platform_key(path=path)
-        ],
     )
 
 
 def default_image_agent_lock_path() -> Path:
     return Path(__file__).resolve().parents[3] / "agents" / "image-agent.lock.json"
-
-
-def runtime_platform_key(
-    *,
-    system: str | None = None,
-    machine: str | None = None,
-    path: Path | None = None,
-) -> str:
-    """Return the supported, canonical runtime dependency platform key."""
-
-    selected_system = (platform.system() if system is None else system).lower()
-    selected_machine = (platform.machine() if machine is None else machine).lower()
-    if selected_system == "linux" and selected_machine in {"amd64", "x86_64"}:
-        return "linux-x86_64"
-    if selected_system == "windows" and selected_machine in {"amd64", "x86_64"}:
-        return "windows-amd64"
-    _invalid_lock(
-        "The Image Agent runtime platform is not represented by the release lock.", path
-    )
 
 
 def _object(value: Any, label: str, path: Path | None = None) -> dict[str, Any]:

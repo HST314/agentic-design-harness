@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "agent": "image_agent_mvp",
   "repository": "https://github.com/HST314/image_agent_mvp.git",
   "revision": "384c45fa1e9e8bdd7e6f361e59bb96744f3f27cc",
@@ -30,11 +30,6 @@
         "sha256": "764db3e4fa6c35601886d0c5bcc15d29d00957627fdcd8aa556802dfffb51ece"
       }
     ],
-    "lock_set_sha256": "2a13971603ba9bbb823e96eebad7cde00f5d3f589921f448d3a584b24727d1a8",
-    "runtime_tree_sha256": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
-    "runtime_tree_sha256_by_platform": {
-      "linux-x86_64": "1bb3aace0b0ade79ae43f32bbf65551acec8de0e090e75d8cd5173ab74b969bb",
-      "windows-amd64": "b683e0e9bc14d7fb53203dd7c264e4741cf415642a7a0e5ef177ddba6dda607e"
-    }
+    "lock_set_sha256": "2a13971603ba9bbb823e96eebad7cde00f5d3f589921f448d3a584b24727d1a8"
   }
 }

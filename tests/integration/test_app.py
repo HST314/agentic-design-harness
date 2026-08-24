@@ -9,7 +9,6 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
-from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
 from harness.storage.repository import utc_now
 
@@ -17,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ApplicationTests(unittest.TestCase):
-    def test_runtime_drift_fails_before_the_control_plane_becomes_ready(self) -> None:
+    def test_invalid_image_environment_degrades_only_the_image_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             drifted_dependencies = root / "drifted-dependencies"
@@ -31,15 +30,25 @@ class ApplicationTests(unittest.TestCase):
                 )
             )
 
-            with (
-                self.assertRaises(HarnessError) as rejected,
-                TestClient(app),
-            ):
-                self.fail("a drifted deployment must not enter the lifespan")
-
-            self.assertEqual(
-                rejected.exception.code, "IMAGE_RUNTIME_ATTESTATION_FAILED"
-            )
+            with TestClient(app) as client:
+                readiness = client.get("/readyz")
+                self.assertEqual(readiness.status_code, 200)
+                self.assertEqual(
+                    readiness.json(),
+                    {"status": "degraded", "disabled_adapters": ["image"]},
+                )
+                self.assertTrue(app.state.container.store.writer_lease.acquired)
+                self.assertEqual(
+                    client.get("/api/v1/adapters").json()["items"],
+                    [
+                        {"agent_type": "image", "available": False},
+                        {"agent_type": "ppt", "available": False},
+                    ],
+                )
+                validation = client.post(
+                    "/api/v1/contracts/main-task/validate", json={"payload": {}}
+                )
+                self.assertEqual(validation.status_code, 422)
             self.assertFalse(app.state.container.store.writer_lease.acquired)
 
     def test_lifecycle_health_readiness_and_contract_error(self) -> None:
