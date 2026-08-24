@@ -32,6 +32,9 @@
             "ASSET_CORRUPTED",
             "PROCESS_START_FAILED",
             "MASTER_RUN_FAILED",
+            "MASTER_OUTPUT_INVALID",
+            "MASTER_ASSET_CATALOG_FAILED",
+            "MASTER_ASSET_TOOL_FAILED",
             "INTERNAL_ERROR"
           ]
         },
