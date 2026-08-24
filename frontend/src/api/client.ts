@@ -155,11 +155,44 @@ export interface AgentWorkbenchLinkResponse {
   instance_id: string;
   agent_type: "image" | "ppt";
   instance_status: string;
+  task_revision: number;
   ui_url: string | null;
-  link_status: "READY" | "NO_UI_URL" | "ADAPTER_UNAVAILABLE" | "FRAME_BLOCKED";
+  link_status: "STARTING" | "START_FAILED" | "READY" | "NO_UI_URL" | "ADAPTER_UNAVAILABLE" | "FRAME_BLOCKED";
+  start_operation: StartOperation | null;
   embeddable: boolean;
   frame_policy: string;
   diagnostic: string;
+}
+
+export interface StartFailure {
+  code: string;
+  message: string;
+  details: Record<string, unknown>;
+  phase: string;
+  operation_id: string;
+  attempt: number;
+  retryable: boolean;
+  failed_at: string;
+}
+
+export interface StartOperation {
+  schema_version: "1.1";
+  operation_id: string;
+  task_id: string;
+  state: "QUEUED" | "RUNNING" | "COMMITTED" | "RETRYABLE_FAILED" | "ABORTED";
+  instance_progress: Record<string, {
+    state: string;
+    attempt: number;
+    launch_id: string | null;
+    side_effect_stage: string;
+    last_error: StartFailure | null;
+    updated_at: string;
+  }>;
+  last_error: StartFailure | null;
+  retry_allowed: boolean;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 export interface PageInfo {
@@ -588,6 +621,17 @@ export class ApiClient {
     return this.get(
       `/api/v1/instances/${encodeURIComponent(instanceId)}/ui-link?${query.toString()}`,
       signal,
+    );
+  }
+
+  retryStartOperation(
+    operationId: string,
+    envelope: CommandEnvelope,
+  ): Promise<StartOperation> {
+    return this.send(
+      "POST",
+      `/api/v1/start-operations/${encodeURIComponent(operationId)}/retry`,
+      { envelope },
     );
   }
 

@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   agentWorkbenchLinkQuery,
+  api,
   workItemDetailQuery,
 } from "../../api/queries";
 import type { AgentWorkbenchLinkResponse } from "../../api/client";
@@ -23,15 +24,23 @@ function WorkbenchFailure({
   link,
   message,
   onRetry,
+  retryLabel,
+  retryPending,
   taskId,
 }: {
   link?: AgentWorkbenchLinkResponse;
   message: string;
   onRetry: () => void;
+  retryLabel: string;
+  retryPending: boolean;
   taskId: string;
 }): React.JSX.Element {
   const heading = link?.link_status === "FRAME_BLOCKED"
     ? "Image Agent 无法安全内嵌"
+    : link?.link_status === "START_FAILED"
+      ? "Image Agent 启动未完成"
+      : link?.link_status === "STARTING"
+        ? "Image Agent 正在启动"
     : link?.link_status === "NO_UI_URL"
       ? "Image Agent 尚未提供工作台"
       : "Image Agent 工作台加载失败";
@@ -43,8 +52,8 @@ function WorkbenchFailure({
         <h2>{heading}</h2>
         <p>{message}</p>
         <div className="agent-workbench-error__actions">
-          <button className="workbench-secondary-button" type="button" onClick={onRetry}>
-            <Icon name="retry" />重新检查
+          <button className="workbench-secondary-button" type="button" disabled={retryPending} onClick={onRetry}>
+            <Icon name="retry" />{retryPending ? "正在恢复…" : retryLabel}
           </button>
           {link?.ui_url ? (
             <a
@@ -66,6 +75,7 @@ function WorkbenchFailure({
 }
 
 export function AgentWorkbenchPage(): React.JSX.Element {
+  const queryClient = useQueryClient();
   const { taskId = "", workItemId = "" } = useParams();
   const detail = useQuery(workItemDetailQuery(taskId, workItemId));
   const item = detail.data?.item;
@@ -79,6 +89,28 @@ export function AgentWorkbenchPage(): React.JSX.Element {
   const loadTimeoutRef = useRef<number | undefined>(undefined);
   const [frameKey, setFrameKey] = useState(0);
   const [frameState, setFrameState] = useState<FrameState>("loading");
+  const recoverStart = useMutation({
+    mutationFn: () => {
+      const operation = link.data?.start_operation;
+      const taskRevision = link.data?.task_revision;
+      if (!operation || taskRevision === undefined) {
+        throw new Error("当前没有可恢复的启动操作。");
+      }
+      const suffix = typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID().replaceAll("-", "")
+        : `${Date.now()}${Math.random().toString(16).slice(2)}`;
+      return api.retryStartOperation(operation.operation_id, {
+        idempotency_key: `retry_start_${suffix}`.slice(0, 128),
+        actor_type: "human",
+        actor_id: "human_operator",
+        expected_revision: taskRevision,
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: agentWorkbenchLinkQuery(taskId, workItemId, instanceId).queryKey });
+      void queryClient.invalidateQueries({ queryKey: workItemDetailQuery(taskId, workItemId).queryKey });
+    },
+  });
 
   useEffect(() => {
     if (!link.data?.embeddable || !link.data.ui_url) return undefined;
@@ -92,6 +124,10 @@ export function AgentWorkbenchPage(): React.JSX.Element {
     setFrameKey((value) => value + 1);
     void link.refetch();
   };
+  const retryAction = link.data?.link_status === "START_FAILED"
+    ? () => recoverStart.mutate()
+    : retry;
+  const retryLabel = link.data?.link_status === "START_FAILED" ? "恢复启动" : "重新检查链接";
 
   if (detail.isPending) {
     return <section className="workbench-page agent-workbench-state" role="status">正在读取 Image WorkItem…</section>;
@@ -127,6 +163,10 @@ export function AgentWorkbenchPage(): React.JSX.Element {
       ? "当前工作台无法在此页面安全打开。请在新标签页中尝试，或返回看板。"
       : link.data?.link_status === "NO_UI_URL"
         ? "工作台仍在准备中，请稍后重新检查。"
+        : link.data?.link_status === "STARTING"
+          ? "启动请求已保存，系统正在准备制品并启动 Image Agent。"
+          : link.data?.link_status === "START_FAILED"
+            ? link.data.start_operation?.last_error?.message ?? "Image Agent 启动失败，可安全恢复启动。"
         : link.data?.link_status === "ADAPTER_UNAVAILABLE"
           ? "专业工作台暂时不可用，请稍后重新检查；当前任务进度已保留。"
           : link.error?.message ?? "当前专业工作台暂时不可用，请稍后重新检查。";
@@ -151,15 +191,15 @@ export function AgentWorkbenchPage(): React.JSX.Element {
 
       <div className="agent-workbench__security" role="status" aria-live="polite">
         <Icon name="status" />
-        <span>{readyLink ? "专业工作台连接已验证" : link.isPending ? "正在准备专业工作台…" : "专业工作台暂时不可用"}</span>
+        <span>{readyLink ? "专业工作台连接已验证" : link.data?.link_status === "STARTING" ? "Image Agent 正在启动…" : link.isPending ? "正在准备专业工作台…" : "专业工作台暂时不可用"}</span>
       </div>
 
       {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 Image Agent 工作台地址…</div> : null}
       {link.isError || (link.data && !readyLink) ? (
-        <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retry} taskId={taskId} />
+        <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retryAction} retryLabel={retryLabel} retryPending={recoverStart.isPending} taskId={taskId} />
       ) : null}
       {readyLink && frameState === "failed" ? (
-        <WorkbenchFailure link={readyLink} message={failureMessage} onRetry={retry} taskId={taskId} />
+        <WorkbenchFailure link={readyLink} message={failureMessage} onRetry={retry} retryLabel="重新检查链接" retryPending={false} taskId={taskId} />
       ) : null}
       {readyLink && frameState !== "failed" ? (
         <div className="agent-workbench-frame">

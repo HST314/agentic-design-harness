@@ -18,6 +18,8 @@
 | `MASTER_RUN_FAILED` | 配置快照、素材解析、模型结构化输出或 Provider 调用失败 | 检查事件中的稳定错误、素材 warning 和三文件配置后，使用同一消息幂等重试 |
 | `CONFIG_ERROR` | 根配置缺失、环境引用未解析或模型能力不匹配 | 运行 `scripts/dev.py config-check`，修正第一条错误后重启 |
 | `MANAGED_BY_HARNESS` | 直接向受管 Image Agent 创建工程 | 回到 Master/计划页创建并确认 TaskCard |
+| `IMAGE_RUNTIME_ATTESTATION_FAILED` | Image 源码、依赖、lock 或只读缓存与发布身份不一致 | 停止切流；恢复匹配同一提交的锁定依赖并重新运行 setup，禁止手改摘要或绕过验签 |
+| `CONTROL_PLANE_NOT_READY` | ready 前请求了实例启动，或启动后台执行器未运行 | 等待 `/readyz`；若持续失败，检查启动验签、恢复日志和进程管理器 |
 | `REVISION_CONFLICT` | 页面或调用方持有旧 revision | 重新读取、重新审阅、使用新幂等键提交 |
 | `ASSET_CORRUPTED` | MIME、大小、SHA 或文件身份变化 | 停止发布，检查磁盘和来源，恢复可信备份或重新生成候选 |
 
@@ -77,6 +79,9 @@ health 成功但 ready 失败时，检查配置路径、契约目录、状态目
 
 - Master run 长时间 `SUBMITTING`：检查任务配置快照、素材 warning、Provider 错误与对应持久化 run；使用原 `message_id` 恢复，不要创建第二个永久线程。
 - 计划确认冲突：重新读取最新 proposal、task 和所有 card revisions；旧提案已 `SUPERSEDED` 时不可启动。
+- 计划确认后页面显示 `STARTING`：这是持久化异步启动的正常状态。可读取 `/api/v1/tasks/{task_id}/start-operations/latest` 或 `/api/v1/start-operations/{operation_id}` 查看逐实例进度，不要再次确认计划。
+- 页面显示 `START_FAILED`：错误已写入实例和 Start Operation。先按稳定错误码修复根因，再使用“恢复启动”或 `POST /api/v1/start-operations/{operation_id}/retry`；重试必须携带当前 task revision 和新的幂等键，且只允许 `RETRYABLE_FAILED`。
+- Master 同步提示锁等待：GET 是只读快照，不应等待启动准备。若仍出现锁超时，记录返回的准确锁名和 `waited_seconds`，检查是否有旧版本进程共用状态目录。
 - Image Agent 页面没有新建表单：这是受管模式的正确行为。任务必须从主系统创建。
 - UI link 被拒绝或 frame blocked：检查实例是否为当前 WorkItem、Agent 是否 ready，以及返回头 `X-Frame-Options`/CSP；不要把任意 URL 直接塞给 iframe。
 

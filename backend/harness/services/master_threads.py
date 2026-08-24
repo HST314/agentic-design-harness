@@ -24,6 +24,7 @@ from .master_orchestrator import (
     MasterRunObservation,
 )
 from .plan_proposals import PlanProposalValidationService
+from .start_operations import StartOperationRunner
 
 
 class MasterThreadService:
@@ -48,24 +49,48 @@ class MasterThreadService:
         self.plan_proposals = plan_proposals
         self.intent_root = store.layout.control_root / "master-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.run_monitor = StartOperationRunner(
+            self._run_pending_master,
+            interval_seconds=0.5,
+            thread_name="harness-master-runs",
+        )
 
-    def get_session(self, task_id: str, *, reconcile: bool = True) -> dict[str, Any]:
-        with self.commands.task_guard(task_id):
-            task = self._task(task_id)
-            thread = self._ensure_thread(task_id, task)
-            thread = self._ensure_intake_message(task_id, task, thread)
-            active_run = thread["active_run"]
-            if reconcile and active_run is not None and active_run["status"] in {
-                "SUBMITTING",
-                "RUNNING",
-            }:
-                thread = self._advance_active_run(task_id, thread)
-            return self._session(task_id)
+    @property
+    def run_monitor_alive(self) -> bool:
+        return self.run_monitor.alive
+
+    def start_monitoring(self) -> None:
+        self.run_monitor.start()
+        self.run_monitor.notify()
+
+    def close_monitoring(self) -> None:
+        self.run_monitor.close()
+
+    def get_session(self, task_id: str, *, reconcile: bool = False) -> dict[str, Any]:
+        """Return a persisted snapshot; browser polling never advances domain state."""
+
+        self._task(task_id)
+        if self.store.master_thread.get(task_id, task_id) is None:
+            with self.commands.task_guard(task_id):
+                task = self._task(task_id)
+                thread = self._ensure_thread(task_id, task)
+                self._ensure_intake_message(task_id, task, thread)
+        if reconcile:
+            self.run_monitor.notify()
+        return self._session(task_id)
 
     def ensure_intake_started(self, task_id: str) -> dict[str, Any]:
         """Bridge an already committed F1 intake to Master without weakening submit."""
 
-        return self.get_session(task_id, reconcile=True)
+        with self.commands.task_guard(task_id):
+            task = self._task(task_id)
+            thread = self._ensure_thread(task_id, task)
+            thread = self._ensure_intake_message(task_id, task, thread)
+            active = thread["active_run"]
+            if active is not None and active["status"] in {"SUBMITTING", "RUNNING"}:
+                self._advance_active_run(task_id, thread)
+        self.run_monitor.notify()
+        return self._session(task_id)
 
     def recover(self) -> list[dict[str, Any]]:
         """Resume confirmation intents and one polling step for active durable runs."""
@@ -131,7 +156,7 @@ class MasterThreadService:
                         "IDEMPOTENCY_CONFLICT",
                         "The message idempotency key was reused with different content.",
                     )
-                return self.get_session(task_id, reconcile=True)
+                return self._session(task_id)
             actual = self.store.master_thread.revision(task_id, task_id)
             if envelope.expected_revision != actual:
                 self._revision_conflict(
@@ -176,7 +201,21 @@ class MasterThreadService:
                 "queue_master_run",
             )
             self._advance_active_run(task_id, thread)
+            self.run_monitor.notify()
             return self._session(task_id)
+
+    def _run_pending_master(self) -> None:
+        tasks_root = self.store.layout.control_root / "tasks"
+        for thread_path in sorted(tasks_root.glob("*/master/thread.json")):
+            task_id = thread_path.parents[1].name
+            with self.commands.task_guard(task_id):
+                thread = self.store.master_thread.get(task_id, task_id)
+                if thread is None:
+                    continue
+                active = thread["active_run"]
+                if active is None or active["status"] not in {"SUBMITTING", "RUNNING"}:
+                    continue
+                self._advance_active_run(task_id, thread)
 
     def confirm_plan(
         self,

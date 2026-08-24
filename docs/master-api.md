@@ -67,7 +67,17 @@ PATCH /api/v1/tasks/{task_id}/plan-proposals/{proposal_revision}/task-cards/{car
 POST /api/v1/tasks/{task_id}/plan-proposals/{proposal_revision}/confirm
 ```
 
-请求携带 `task_expected_revision` 和每个 `card_id` 的 `expected_card_revisions`。task、proposal 或任一卡片变化都会拒绝启动并要求重新审阅。确认意图先持久化，再恢复性执行“保存计划与创建实例 → 启动可运行实例 → 标记提案已确认”。
+请求携带 `task_expected_revision` 和每个 `card_id` 的 `expected_card_revisions`。task、proposal 或任一卡片变化都会拒绝启动并要求重新审阅。确认请求先持久化 Start Operation 并返回，后台执行器再恢复性执行“保存计划与创建实例 → 启动可运行实例 → 标记提案已确认”；调用方不应把 HTTP 请求存活时间当作启动事务。
+
+查询与恢复启动：
+
+```text
+GET  /api/v1/tasks/{task_id}/start-operations/latest
+GET  /api/v1/start-operations/{operation_id}
+POST /api/v1/start-operations/{operation_id}/retry
+```
+
+前两个端点只读持久化进度。仅 `RETRYABLE_FAILED` 可重试；请求必须携带当前 `task_expected_revision`、新的幂等键和 human/master actor。重复相同请求返回同一 operation，不创建第二条启动链。
 
 旧的 `PUT /api/v1/tasks/{task_id}/plan` 与 `POST /api/v1/tasks/{task_id}/confirm-start` 仍供受信 API 集成使用，但正式 Web 流程以 PlanProposal 确认为准。
 

@@ -14,6 +14,7 @@ from ..adapters.types import AgentInstanceSnapshot
 from ..core.errors import HarnessError
 from ..storage.layout import validate_identifier
 from ..storage.store import FileStateStore
+from .application import HarnessApplicationService
 from .work_item_projections import WorkItemProjectionService
 
 
@@ -166,12 +167,14 @@ class AgentWorkbenchService:
         store: FileStateStore,
         adapters: AdapterRegistry,
         work_items: WorkItemProjectionService,
+        application: HarnessApplicationService,
         *,
         probe_timeout_seconds: float = 2.0,
     ) -> None:
         self.store = store
         self.adapters = adapters
         self.work_items = work_items
+        self.application = application
         self.probe_timeout_seconds = probe_timeout_seconds
 
     def get_link(
@@ -203,6 +206,19 @@ class AgentWorkbenchService:
                 "The requested instance does not belong to this task.",
             )
         adapter = self.adapters.get(instance["agent_type"])
+        operation = self.application.latest_start_operation(
+            task_id, instance_id=instance_id
+        )
+        start_failure = instance.get("start_failure")
+        if operation is not None and operation["state"] in {"QUEUED", "RUNNING"}:
+            initial_status = "STARTING"
+            diagnostic = "The Image Agent start operation is still running."
+        elif isinstance(start_failure, dict):
+            initial_status = "START_FAILED"
+            diagnostic = str(start_failure["message"])
+        else:
+            initial_status = "NO_UI_URL"
+            diagnostic = "The current instance has not published a workbench URL."
         response: dict[str, Any] = {
             "schema_version": "1.0",
             "task_id": task_id,
@@ -210,17 +226,19 @@ class AgentWorkbenchService:
             "instance_id": instance_id,
             "agent_type": instance["agent_type"],
             "instance_status": instance["status"],
+            "task_revision": self.store.task.revision(task_id, task_id),
             "ui_url": None,
-            "link_status": "ADAPTER_UNAVAILABLE" if not adapter.available else "NO_UI_URL",
+            "link_status": "ADAPTER_UNAVAILABLE" if not adapter.available else initial_status,
+            "start_operation": operation,
             "embeddable": False,
             "frame_policy": "NOT_CHECKED",
             "diagnostic": (
                 f"{instance['agent_type'].upper()} capability is not available."
                 if not adapter.available
-                else "The current instance has not published a workbench URL."
+                else diagnostic
             ),
         }
-        if not adapter.available:
+        if not adapter.available or initial_status in {"STARTING", "START_FAILED"}:
             return response
         ui_url = adapter.get_ui_url(instance_id)
         if ui_url is None:
