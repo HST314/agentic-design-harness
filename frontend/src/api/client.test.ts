@@ -75,6 +75,27 @@ describe("ApiClient", () => {
     }));
   });
 
+  test("renders adapter validation details as a designer-facing Chinese error", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "The Agent adapter rejected its task card.",
+        details: {
+          errors: ["Image TaskCard 1.1 requires parameters.usage_context."],
+        },
+      },
+    }, 422));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new ApiClient().masterSession("task_invalid")).rejects.toMatchObject({
+      message: "任务卡未通过智能体校验：图片任务卡缺少使用场景。",
+      code: "VALIDATION_ERROR",
+      details: {
+        errors: ["Image TaskCard 1.1 requires parameters.usage_context."],
+      },
+    });
+  });
+
   test("keeps deployment details out of designer-facing API errors", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       error: {

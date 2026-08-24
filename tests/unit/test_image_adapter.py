@@ -77,17 +77,7 @@ class ImageAdapterTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_task_card_maps_only_verified_assets_and_declared_fields(self) -> None:
-        imported = self.assets.import_bytes(
-            "t_image_adapter",
-            filename="brief.md",
-            content=b"# Approved campaign brief\n",
-            description="Approved campaign copy and visual constraints.",
-            source="user_upload",
-            idempotency_key="import-image-adapter-brief",
-        )
-        selected = self.assets.select_inputs(
-            "t_image_adapter", [imported["asset_id"]], manifest_id="image-adapter-inputs"
-        )
+        imported, selected = self._import_brief()
         card = self._card(selected["task_card_inputs"])
         mapped = self.adapter.map_task_card(self._request(card))
         manifest = self.assets.verify_asset("t_image_adapter", imported["asset_id"])
@@ -128,6 +118,63 @@ class ImageAdapterTests(unittest.TestCase):
         self.assertEqual(mapped["asset_inputs"][0]["verified"], True)
         self.assertNotIn("schema_version", mapped)
         self.assertNotIn("credential_pair_ref", digest_json(mapped))
+
+    def test_prompt_only_task_card_maps_to_a_stable_auditable_source(self) -> None:
+        card = self._card([])
+
+        validation = self.adapter.validate_task_card(card)
+        first = self.adapter.map_task_card(self._request(card))
+        replay = self.adapter.map_task_card(self._request(card))
+
+        self.assertTrue(validation.valid, validation.errors)
+        self.assertEqual(replay, first)
+        self.assertEqual(
+            first["source_refs"],
+            [
+                {
+                    "ref_id": card["card_id"],
+                    "ref_type": "task_card",
+                    "excerpt": card["objective"],
+                    "source_hash": digest_json(
+                        {
+                            "objective": card["objective"],
+                            "instructions": card["instructions"],
+                            "parameters": card["parameters"],
+                            "revision": card["revision"],
+                        }
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(first["asset_inputs"], [])
+
+    def test_asset_mapping_rejects_forged_manifest_paths_and_corrupt_bytes(self) -> None:
+        imported, selected = self._import_brief()
+        reference = selected["task_card_inputs"][0]
+        forged = {
+            **reference,
+            "manifest_relpath": f"resources/manifests/{imported['asset_id']}.json",
+        }
+
+        with self.assertRaises(HarnessError) as forged_error:
+            self.adapter.map_task_card(self._request(self._card([forged])))
+        self.assertEqual(forged_error.exception.code, "VALIDATION_ERROR")
+
+        manifest = self.assets.verify_asset("t_image_adapter", imported["asset_id"])
+        asset_path = (
+            self.store.layout.workspace_root
+            / "tasks"
+            / "t_image_adapter"
+            / manifest["relative_path"]
+        )
+        asset_path.chmod(0o640)
+        asset_path.write_bytes(b"corrupt asset bytes")
+
+        with self.assertRaises(HarnessError) as corrupt_error:
+            self.adapter.map_task_card(
+                self._request(self._card(selected["task_card_inputs"]))
+            )
+        self.assertEqual(corrupt_error.exception.code, "ASSET_CORRUPTED")
 
     def test_ui_url_allowlist_binds_host_port_and_running_process(self) -> None:
         instance = {
@@ -725,6 +772,20 @@ class ImageAdapterTests(unittest.TestCase):
             },
             "created_at": utc_now(),
         }
+
+    def _import_brief(self) -> tuple[dict, dict]:
+        imported = self.assets.import_bytes(
+            "t_image_adapter",
+            filename="brief.md",
+            content=b"# Approved campaign brief\n",
+            description="Approved campaign copy and visual constraints.",
+            source="user_upload",
+            idempotency_key="import-image-adapter-brief",
+        )
+        selected = self.assets.select_inputs(
+            "t_image_adapter", [imported["asset_id"]], manifest_id="image-adapter-inputs"
+        )
+        return imported, selected
 
     def _request(self, card: dict) -> PrepareRequest:
         return PrepareRequest(

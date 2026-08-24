@@ -184,6 +184,34 @@ test("requires an explicit final confirmation before starting the reviewed revis
   await expect(page.getByText("已确认", { exact: true })).toBeVisible();
 });
 
+test("shows concrete Chinese adapter validation details when confirmation fails", async ({ page }) => {
+  await page.route("**/api/v1/tasks/task_master_e2e/plan-proposals/*/confirm", async (route) => {
+    await route.fulfill({
+      status: 422,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "The Agent adapter rejected its task card.",
+          details: {
+            errors: ["Image TaskCard 1.1 requires parameters.usage_context."],
+          },
+        },
+      }),
+    });
+  });
+
+  await page.goto("/tasks/task_master_e2e/master");
+  await page.getByRole("button", { name: "确认并运行" }).click();
+  await page.getByRole("dialog", { name: "启动计划 r1" })
+    .getByRole("button", { name: "确认并启动" })
+    .click();
+
+  await expect(page.getByRole("alert")).toHaveText(
+    "任务卡未通过智能体校验：图片任务卡缺少使用场景。",
+  );
+});
+
 test("auto mode keeps human review and starts only after the final revision and cost confirmation", async ({ page }) => {
   let confirmationRequests = 0;
   page.on("request", (request) => {
