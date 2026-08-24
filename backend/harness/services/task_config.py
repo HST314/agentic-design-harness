@@ -17,6 +17,7 @@ from ..core.config_kernel import (
 from ..core.errors import HarnessError
 from ..storage.atomic import atomic_write_json, read_json
 from ..storage.layout import validate_identifier
+from ..storage.locks import FileLock
 from ..storage.repository import utc_now
 from ..storage.store import FileStateStore
 
@@ -43,30 +44,31 @@ class TaskConfigService:
         if require_task and self.store.task.get(task_id, task_id) is None:
             raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
         path = self._path(task_id)
-        if path.exists():
-            return self._load_document(path)
-        snapshot = self._require_process_snapshot()
-        body = {
-            "providers": {
-                name: {"base_url": provider.base_url}
-                for name, provider in snapshot.providers.providers.items()
-            },
-            "model_list": snapshot.model_list.model_dump(mode="json"),
-            "runtime": snapshot.runtime.model_dump(mode="json"),
-        }
-        config_hash = hashlib.sha256(
-            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        document = {
-            "schema_version": "1.0",
-            "task_id": task_id,
-            "source_config_revision": snapshot.revision,
-            "config_hash": config_hash,
-            **body,
-            "created_at": utc_now(),
-        }
-        atomic_write_json(path, document, mode=0o640)
-        return deepcopy(document)
+        with FileLock(self._lock_path(task_id), self.store.lock_timeout_seconds):
+            if path.exists():
+                return self._load_document(path)
+            snapshot = self._require_process_snapshot()
+            body = {
+                "providers": {
+                    name: {"base_url": provider.base_url}
+                    for name, provider in snapshot.providers.providers.items()
+                },
+                "model_list": snapshot.model_list.model_dump(mode="json"),
+                "runtime": snapshot.runtime.model_dump(mode="json"),
+            }
+            config_hash = hashlib.sha256(
+                json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            document = {
+                "schema_version": "1.0",
+                "task_id": task_id,
+                "source_config_revision": snapshot.revision,
+                "config_hash": config_hash,
+                **body,
+                "created_at": utc_now(),
+            }
+            atomic_write_json(path, document, mode=0o640)
+            return deepcopy(document)
 
     def resolve(self, task_id: str) -> ConfigSnapshot:
         document = self.pin(task_id)
@@ -122,6 +124,13 @@ class TaskConfigService:
             / task_id
             / "master"
             / "config-snapshot.json"
+        )
+
+    def _lock_path(self, task_id: str) -> Path:
+        return (
+            self.store.layout.control_root
+            / "locks"
+            / f"task-config-{task_id}.lock"
         )
 
     @staticmethod

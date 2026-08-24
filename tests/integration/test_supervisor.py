@@ -52,7 +52,9 @@ class ProcessSupervisorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.store, self.commands = build_service(self.root)
+        self.store, self.commands = build_service(
+            self.root, lock_timeout_seconds=5.0
+        )
         created = create_task(self.commands, "t_process", "auto")
         draft = image_plan("t_process", 3)
         self.commands.save_plan(

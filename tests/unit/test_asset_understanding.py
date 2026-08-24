@@ -3,17 +3,21 @@ from __future__ import annotations
 import io
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 import pypdfium2 as pdfium
 from harness.core.errors import HarnessError
+from harness.domain.service import TaskCommandService
 from harness.services.asset_tools import AssetToolRegistry
 from harness.services.asset_understanding import AssetUnderstandingService
 from harness.services.assets import AssetService
 from harness.services.model_clients import ModelResult, ModelUsage
 from harness.services.task_config import TaskConfigService
 from harness.services.usage import UsageService
+from harness.storage.store import FileStateStore
 from PIL import Image
 from runtime_helpers import build_config_snapshot, build_service, create_task
 
@@ -58,11 +62,23 @@ class FakeModelFactory:
         raise AssertionError("text client is not used by asset parsing")
 
 
+@contextmanager
+def running_service(
+    root: Path,
+) -> Iterator[tuple[FileStateStore, TaskCommandService]]:
+    store, commands = build_service(root)
+    try:
+        yield store, commands
+    finally:
+        store.close()
+
+
 class AssetUnderstandingTests(unittest.TestCase):
     def test_asset_catalog_enforces_the_task_file_limit_before_parsing(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            store, commands = build_service(root)
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            running_service(Path(temporary)) as (store, commands),
+        ):
             create_task(commands, "task_asset_limit")
             assets = AssetService(store)
             config = TaskConfigService(
@@ -88,9 +104,10 @@ class AssetUnderstandingTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "ASSET_VALIDATION_FAILED")
 
     def test_text_markdown_image_and_pdf_routes_are_traceable_and_cached(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            store, commands = build_service(root)
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            running_service(Path(temporary)) as (store, commands),
+        ):
             create_task(commands, "task_understanding")
             assets = AssetService(store)
             factory = FakeModelFactory()
@@ -180,9 +197,10 @@ class AssetUnderstandingTests(unittest.TestCase):
             self.assertTrue(all(item["agent_type"] == "master" for item in usage))
 
     def test_bad_encrypted_and_over_limit_pdfs_have_business_warnings(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            store, commands = build_service(root)
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            running_service(Path(temporary)) as (store, commands),
+        ):
             create_task(commands, "task_pdf_errors")
             assets = AssetService(store)
             config = TaskConfigService(

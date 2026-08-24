@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -107,6 +108,27 @@ class ImageAgentConfigMaterializerTests(unittest.TestCase):
         self.assertEqual(first_model, second_model)
         self.assertEqual(second.provider_environment["ARK_API_KEY"], "rotated-secret")
         self.assertNotIn("changed-after-task", second.model_config_path.read_text(encoding="utf-8"))
+
+    def test_task_snapshot_is_pinned_once_under_concurrent_reads(self) -> None:
+        service = TaskConfigService(self.store, build_config_snapshot())
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            snapshots = list(
+                executor.map(
+                    lambda _: service.get_public("t_image_config"),
+                    range(32),
+                )
+            )
+
+        self.assertTrue(all(snapshot == snapshots[0] for snapshot in snapshots))
+        snapshot_root = (
+            self.store.layout.control_root
+            / "tasks"
+            / "t_image_config"
+            / "master"
+        )
+        self.assertTrue((snapshot_root / "config-snapshot.json").is_file())
+        self.assertEqual(list(snapshot_root.glob(".config-snapshot.json.*.tmp")), [])
 
     def _snapshot_with_overrides(self) -> ConfigSnapshot:
         raw = build_config_snapshot().model_dump(mode="json")
