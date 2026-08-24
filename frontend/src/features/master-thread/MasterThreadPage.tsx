@@ -595,8 +595,6 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         closeConfirmReview();
         setNotice("计划或任务已更新，本次未启动；请重新审阅最新版本。");
         void queryClient.invalidateQueries({ queryKey: masterSessionQuery(taskId).queryKey });
-      } else {
-        setNotice(error instanceof Error ? error.message : "启动请求未完成，请检查错误后重试。");
       }
     },
     onSettled: () => {
@@ -696,7 +694,6 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         <footer><span>{content.length.toLocaleString("zh-CN")} / 20,000</span><button type="submit" className="workbench-primary-button" aria-label="发送 Master 消息" disabled={!content.trim() || busy || append.isPending}>{append.isPending ? "正在保存…" : busy ? "等待 Master 完成" : "发送消息"}</button></footer>
         {notice ? <p className="master-composer__notice" role="status">{notice}</p> : null}
         {append.isError ? <p className="workbench-inline-error" role="alert">{append.error.message}</p> : null}
-        {confirm.isError ? <p className="workbench-inline-error" role="alert">{confirm.error.message}</p> : null}
       </form>
       <TaskCardEditorDialog
         card={editingCard}

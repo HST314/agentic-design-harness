@@ -21,17 +21,21 @@ jobs:
         with:
           fetch-depth: 0
           submodules: true
-      - uses: actions/setup-python@v5
+      - name: Set up the production Image runtime Python
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-      - run: python -m pip install --require-hashes -r requirements-dev.txt
+          python-version: "3.10"
       - name: Build the locked Image runtime dependencies used by startup tests
         run: >-
           python -m pip install --disable-pip-version-check --upgrade
           --target .runtime/image-agent-deps
           -r agents/image_agent_mvp/requirements.lock
           -r requirements/image-agent-web.in
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
       - run: python -m unittest discover -s tests -v
       - run: python -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash tests/e2e
       - run: python -m pyright backend/harness
