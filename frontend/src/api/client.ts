@@ -384,13 +384,40 @@ const DEPLOYMENT_ERROR_CODES = new Set([
 
 const DEPLOYMENT_ERROR_TERMS = /(?:api\s*key|credential|endpoint|mastergateway|model_list\.yaml|provider(?:\.yaml)?|runtime\.yaml|\.env|凭据|模型路由|配置(?:文件|快照|修订|错误|缺失))/i;
 
-export function designerErrorMessage(message: string, code?: string): string {
+const ADAPTER_VALIDATION_MESSAGES: Record<string, string> = {
+  "Task card agent_type must be image.": "任务卡的智能体类型必须为图片。",
+  "Image TaskCard 1.1 requires parameters.usage_context.": "图片任务卡缺少使用场景。",
+  "Image category_id and category_version must be supplied together.": "图片类别标识和类别版本必须同时填写。",
+  "Image Agent requires at least one verified source asset.": "图片任务缺少已验证的源素材。",
+  "Image Agent requires exactly one required final image delivery.": "图片任务必须且只能包含一个必需的最终图片交付项。",
+};
+
+export function designerErrorMessage(
+  message: string,
+  code?: string,
+  details?: Record<string, unknown>,
+): string {
   const deploymentCode = code !== undefined && (
     DEPLOYMENT_ERROR_CODES.has(code)
     || DEPLOYMENT_ERROR_PREFIXES.some((prefix) => code.startsWith(prefix))
   );
-  if (!deploymentCode && !DEPLOYMENT_ERROR_TERMS.test(message)) return message;
-  return "智能创作服务暂时不可用，请稍后重试；当前任务内容已保留。如持续失败，请联系支持人员。";
+  const validationErrors = Array.isArray(details?.errors)
+    ? details.errors
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .map((item) => item.trim())
+    : [];
+  if (
+    deploymentCode
+    || [message, ...validationErrors].some((item) => DEPLOYMENT_ERROR_TERMS.test(item))
+  ) {
+    return "智能创作服务暂时不可用，请稍后重试；当前任务内容已保留。如持续失败，请联系支持人员。";
+  }
+  if (code === "VALIDATION_ERROR" && validationErrors.length > 0) {
+    return `任务卡未通过智能体校验：${validationErrors
+      .map((item) => ADAPTER_VALIDATION_MESSAGES[item] ?? `校验项不合法（${item}）`)
+      .join("；")}`;
+  }
+  return message;
 }
 
 export interface DeliveryReview {
@@ -814,6 +841,11 @@ export class ApiClient {
     } catch {
       // The status fallback remains useful when an intermediary returns a non-JSON body.
     }
-    return new ApiError(designerErrorMessage(message, code), response.status, code, details);
+    return new ApiError(
+      designerErrorMessage(message, code, details),
+      response.status,
+      code,
+      details,
+    );
   }
 }
