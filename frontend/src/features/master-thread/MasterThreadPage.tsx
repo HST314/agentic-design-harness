@@ -476,6 +476,7 @@ function ConfirmDialog({
   taskRevision,
   open,
   pending,
+  error,
   onCancel,
   onConfirm,
 }: {
@@ -483,6 +484,7 @@ function ConfirmDialog({
   taskRevision: number | null;
   open: boolean;
   pending: boolean;
+  error: string | null;
   onCancel: () => void;
   onConfirm: () => void;
 }): React.JSX.Element | null {
@@ -511,6 +513,7 @@ function ConfirmDialog({
           {proposal.execution_cards.map((card) => <li key={card.card_id}><span><code>{card.card_id}</code><small>实例 {card.instance_id}</small></span><strong>r{card.revision}</strong></li>)}
         </ul>
         <p className="master-confirm-dialog__warning"><Icon name="status" />点击“确认并启动”表示你已知晓本次运行可能产生创作服务费用；启动仍受预算和服务可用性检查。</p>
+        {error ? <p className="workbench-inline-error" role="alert">{error}</p> : null}
         <div className="workbench-dialog-actions">
           <button type="button" className="workbench-secondary-button" disabled={pending} onClick={onCancel}>返回审阅</button>
           <button type="button" className="workbench-primary-button" disabled={pending} onClick={onConfirm}>{pending ? "正在启动…" : "确认并启动"}</button>
@@ -522,7 +525,11 @@ function ConfirmDialog({
 
 function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   const queryClient = useQueryClient();
-  const session = useQuery(masterSessionQuery(taskId));
+  const [pauseMasterPolling, setPauseMasterPolling] = useState(false);
+  const session = useQuery({
+    ...masterSessionQuery(taskId),
+    enabled: !pauseMasterPolling,
+  });
   const [content, setContent] = useState("");
   const [selectedAssets, setSelectedAssets] = useState<Set<string>>(() => new Set());
   const [confirmReview, setConfirmReview] = useState<{
@@ -574,18 +581,26 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         envelope: envelope(operationId("confirm_plan"), proposal.revision),
       });
     },
+    onMutate: () => {
+      setPauseMasterPolling(true);
+    },
     onSuccess: (response) => {
       queryClient.setQueryData(masterSessionQuery(taskId).queryKey, response.session);
       void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
       closeConfirmReview();
-      setNotice("计划已确认，实例启动结果已记录。");
+      setNotice("计划已确认，实例启动已排队；页面会持续同步结果。");
     },
     onError: (error) => {
-      closeConfirmReview();
       if (error instanceof ApiError && error.code === "REVISION_CONFLICT") {
+        closeConfirmReview();
         setNotice("计划或任务已更新，本次未启动；请重新审阅最新版本。");
         void queryClient.invalidateQueries({ queryKey: masterSessionQuery(taskId).queryKey });
+      } else {
+        setNotice(error instanceof Error ? error.message : "启动请求未完成，请检查错误后重试。");
       }
+    },
+    onSettled: () => {
+      setPauseMasterPolling(false);
     },
   });
   const reviseCard = useMutation({
@@ -615,7 +630,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   });
 
   if (session.isPending) return <section className="workbench-page"><div className="workbench-intake-card" role="status">正在恢复 Master 永久线程…</div></section>;
-  if (session.isError || !session.data) {
+  if (!session.data) {
     return <section className="workbench-page"><div className="workbench-intake-card"><p className="workbench-inline-error" role="alert">{session.error?.message ?? "无法读取 Master 线程。"}</p><button type="button" className="workbench-secondary-button" onClick={() => void session.refetch()}>重新读取</button></div></section>;
   }
   const data: MasterSessionResponse = session.data;
@@ -634,6 +649,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         <span className={`master-task-status master-task-status--${data.task.status.toLowerCase()}`}><span aria-hidden="true" />{taskStatusLabel[data.task.status] ?? data.task.status}</span>
       </header>
       <TaskTabs taskId={taskId} />
+      {session.isError ? <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>后台同步暂时失败</strong><p>已保留当前页面数据，系统会继续重试；也可稍后手动刷新。</p></div></div> : null}
       {data.thread.last_error && !busy ? (
         <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>本次智能分析未完成</strong><p>任务内容和对话记录已保留。请稍后重新发送；若持续失败，请联系支持人员。</p></div></div>
       ) : busy ? (
@@ -691,7 +707,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         onCancel={() => { if (!reviseCard.isPending) closeCardEditor(); }}
         onSave={(editable) => { if (editingCard) reviseCard.mutate({ card: editingCard, editable }); }}
       />
-      <ConfirmDialog proposal={confirmReview?.proposal ?? null} taskRevision={confirmReview?.taskRevision ?? null} open={confirmReview !== null} pending={confirm.isPending} onCancel={closeConfirmReview} onConfirm={() => confirm.mutate()} />
+      <ConfirmDialog proposal={confirmReview?.proposal ?? null} taskRevision={confirmReview?.taskRevision ?? null} open={confirmReview !== null} pending={confirm.isPending} error={confirm.isError ? confirm.error.message : null} onCancel={closeConfirmReview} onConfirm={() => confirm.mutate()} />
     </section>
   );
 }

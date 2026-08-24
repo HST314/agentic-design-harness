@@ -75,6 +75,10 @@ class StartTaskRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class RetryStartOperationRequest(StrictRequest):
+    envelope: CommandEnvelope
+
+
 class CreateTaskIntakeRequest(StrictRequest):
     prompt: str = Field(min_length=1, max_length=20_000)
     start_policy: Literal["manual", "auto"] = "manual"
@@ -534,6 +538,29 @@ def build_v1_router(container: Container) -> APIRouter:
             envelope=body.envelope,
         )
 
+    @router.get("/tasks/{task_id}/start-operations/latest", tags=["tasks"])
+    async def get_latest_start_operation(task_id: str) -> dict[str, Any]:
+        operation = await run_in_threadpool(
+            container.application.latest_start_operation, task_id
+        )
+        return {"schema_version": "1.1", "operation": operation}
+
+    @router.get("/start-operations/{operation_id}", tags=["tasks"])
+    async def get_start_operation(operation_id: str) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.application.get_start_operation, operation_id
+        )
+
+    @router.post("/start-operations/{operation_id}/retry", tags=["tasks"])
+    async def retry_start_operation(
+        operation_id: str, body: RetryStartOperationRequest
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.application.retry_start_operation,
+            operation_id,
+            envelope=body.envelope,
+        )
+
     @router.post("/tasks/{task_id}/cancel", tags=["tasks"])
     async def cancel_task(task_id: str, body: InstanceOperationRequest) -> dict[str, Any]:
         result = await run_in_threadpool(
@@ -554,7 +581,27 @@ def build_v1_router(container: Container) -> APIRouter:
             instance = container.store.instance.get(task_id, instance_id)
             if instance is None:
                 raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
-            if refresh and instance["status"] in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+            start_operation = container.application.latest_start_operation(
+                task_id, instance_id=instance_id
+            )
+            start_progress = (
+                None
+                if start_operation is None
+                else start_operation["instance_progress"].get(instance_id)
+            )
+            start_in_progress = (
+                start_operation is not None
+                and start_operation["state"] in {"QUEUED", "RUNNING"}
+                and (
+                    not isinstance(start_progress, dict)
+                    or start_progress.get("state") != "RUNNING"
+                )
+            )
+            if (
+                refresh
+                and not start_in_progress
+                and instance["status"] in {"RUNNING", "WAITING_APPROVAL"}
+            ):
                 result = container.application.observe_instance(task_id, instance_id)
             else:
                 result = {"instance": instance, "observation": None, "transition": None}

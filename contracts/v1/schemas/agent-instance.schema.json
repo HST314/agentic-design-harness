@@ -141,6 +141,35 @@
         }
       ]
     },
+    "start_failure": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details",
+            "phase",
+            "operation_id",
+            "attempt",
+            "retryable",
+            "failed_at"
+          ],
+          "properties": {
+            "code": {"type": "string", "minLength": 1, "maxLength": 128},
+            "message": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "details": {"type": "object"},
+            "phase": {"type": "string", "minLength": 1, "maxLength": 64},
+            "operation_id": {"$ref": "common.schema.json#/$defs/identifier"},
+            "attempt": {"type": "integer", "minimum": 1},
+            "retryable": {"type": "boolean"},
+            "failed_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+          }
+        }
+      ]
+    },
     "created_at": {
       "$ref": "common.schema.json#/$defs/timestamp"
     }

@@ -4,10 +4,12 @@ import base64
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
+from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
 from harness.storage.repository import utc_now
 
@@ -15,6 +17,31 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ApplicationTests(unittest.TestCase):
+    def test_runtime_drift_fails_before_the_control_plane_becomes_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            drifted_dependencies = root / "drifted-dependencies"
+            drifted_dependencies.mkdir()
+            app = create_app(
+                HarnessSettings(
+                    control_root=root / "control-data",
+                    workspace_root=root / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                    image_agent_dependency_root=drifted_dependencies,
+                )
+            )
+
+            with (
+                self.assertRaises(HarnessError) as rejected,
+                TestClient(app),
+            ):
+                self.fail("a drifted deployment must not enter the lifespan")
+
+            self.assertEqual(
+                rejected.exception.code, "IMAGE_RUNTIME_ATTESTATION_FAILED"
+            )
+            self.assertFalse(app.state.container.store.writer_lease.acquired)
+
     def test_lifecycle_health_readiness_and_contract_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -164,6 +191,31 @@ class ApplicationTests(unittest.TestCase):
                         ),
                     )
                     current_revision = transition["task_revision"]
+                    if status == "STARTING":
+                        starting = client.get("/api/v1/instances/i_api_g2")
+                        self.assertEqual(starting.status_code, 200, starting.text)
+                        self.assertEqual(starting.json()["instance"]["status"], "STARTING")
+                        self.assertIsNone(starting.json()["observation"])
+                    if status == "RUNNING":
+                        operation = {
+                            "state": "RUNNING",
+                            "instance_progress": {
+                                "i_api_g2": {"state": "AGENT_STARTING"}
+                            },
+                        }
+                        with patch.object(
+                            container.application,
+                            "latest_start_operation",
+                            return_value=operation,
+                        ):
+                            agent_starting = client.get("/api/v1/instances/i_api_g2")
+                        self.assertEqual(
+                            agent_starting.status_code, 200, agent_starting.text
+                        )
+                        self.assertEqual(
+                            agent_starting.json()["instance"]["status"], "RUNNING"
+                        )
+                        self.assertIsNone(agent_starting.json()["observation"])
                 created_approval = container.approvals.ensure_workflow_approval(
                     "t_api_g2",
                     "i_api_g2",

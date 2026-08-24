@@ -104,6 +104,44 @@ class ImageRuntimeBuilderTests(unittest.TestCase):
                 builder.prepare(runtime)
             self.assertEqual(list(runtime.iterdir()), [])
 
+    def test_cached_artifact_rejects_permission_drift_and_root_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            dependencies = root / "dependencies"
+            runtime = root / "runtime"
+            source.mkdir()
+            dependencies.mkdir()
+            (source / "main_front.py").write_text("app = object()\n", encoding="utf-8")
+            (dependencies / "dependency.py").write_text("VALUE = 1\n", encoding="utf-8")
+            builder = ImageRuntimeBuilder(
+                source,
+                dependencies,
+                revision="revision_1",
+                package_version="1.0.0",
+                source_content_sha256=content_tree_sha256(source),
+                dependency_content_sha256=dependency_tree_sha256(dependencies),
+            )
+
+            artifact = builder.prepare(runtime)
+            try:
+                (artifact / "main_front.py").chmod(0o644)
+                with self.assertRaisesRegex(HarnessError, "not read-only"):
+                    builder.prepare(runtime)
+            finally:
+                builder._make_removable(artifact)
+
+            outside = root / "outside"
+            outside.mkdir()
+            symlink_runtime = root / "symlink-runtime"
+            symlink_artifacts = symlink_runtime / "image-artifacts"
+            symlink_artifacts.mkdir(parents=True)
+            (symlink_artifacts / builder.identity_sha256).symlink_to(
+                outside, target_is_directory=True
+            )
+            with self.assertRaisesRegex(HarnessError, "not a safe directory"):
+                builder.prepare(symlink_runtime)
+
     def test_mutated_source_or_dependency_fails_content_attestation(self) -> None:
         for mutated_tree in ("source", "dependency"):
             with (

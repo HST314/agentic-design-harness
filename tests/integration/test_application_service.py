@@ -53,6 +53,8 @@ class FakeImageAdapter:
         self.advance_delay = 0.0
         self.advance_accepted = True
         self.validation_delegate = None
+        self.prepare_error = None
+        self.start_error = None
 
     def validate_task_card(self, card):
         if self.validation_delegate is not None:
@@ -61,11 +63,15 @@ class FakeImageAdapter:
         return ValidationResult(valid=not errors, errors=errors)
 
     def prepare(self, request):
+        if self.prepare_error is not None:
+            raise self.prepare_error
         if self.runtime_spec is None:
             raise AssertionError("no runtime artifact was configured for this test")
         return self.runtime_spec
 
     def start(self, instance_id, operation_id):
+        if self.start_error is not None:
+            raise self.start_error
         self.start_calls.append((instance_id, operation_id))
         return AdapterCommandResult(True, operation_id)
 
@@ -416,6 +422,105 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(started["launches"]), 1)
         self.assertEqual(len(self.fake_adapter.start_calls), 1)
         self.application.cancel_instance("t_prompt_only_image", "i_image_1")
+
+    def test_start_failure_is_persisted_and_retry_resumes_the_same_operation(self) -> None:
+        created = create_task(self.commands, "t_start_failure")
+        draft = image_plan("t_start_failure")
+        saved = self.application.save_plan_and_create_instances(
+            "t_start_failure",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save-start-failure",
+            envelope=envelope("save-start-failure", created["revision"]),
+        )
+        self.fake_adapter.prepare_error = HarnessError(
+            "PROCESS_START_FAILED",
+            "The verified runtime artifact was unavailable.",
+            {"failure_type": "InjectedPrepareFailure"},
+        )
+
+        failed = self.application.confirm_and_start_ready_instances(
+            "t_start_failure",
+            operation_id="start-failure-operation",
+            envelope=envelope("start-failure-operation", saved["task_revision"]),
+        )
+
+        self.assertEqual(failed["state"], "RETRYABLE_FAILED")
+        instance = self.store.instance.get("t_start_failure", "i_image_1")
+        self.assertEqual(instance["status"], "FAILED_TO_START")
+        self.assertEqual(instance["start_failure"]["phase"], "PREPARING")
+        self.assertNotIn("request", failed)
+
+        self.fake_adapter.prepare_error = None
+        self._configure_runtime_artifact("retry-start-failure-agent")
+        retry_envelope = envelope(
+            "retry-start-failure",
+            self.store.task.revision("t_start_failure", "t_start_failure"),
+        )
+        retried = self.application.retry_start_operation(
+            "start-failure-operation",
+            envelope=retry_envelope,
+        )
+
+        self.assertEqual(retried["state"], "COMMITTED")
+        instance = self.store.instance.get("t_start_failure", "i_image_1")
+        self.assertEqual(instance["status"], "RUNNING")
+        self.assertIsNone(instance.get("start_failure"))
+        self.assertEqual(len(self.fake_adapter.start_calls), 1)
+        self.assertEqual(
+            self.application.retry_start_operation(
+                "start-failure-operation", envelope=retry_envelope
+            )["state"],
+            "COMMITTED",
+        )
+        with self.assertRaises(HarnessError) as conflict:
+            self.application.retry_start_operation(
+                "start-failure-operation",
+                envelope=envelope(
+                    "retry-start-failure",
+                    self.store.task.revision("t_start_failure", "t_start_failure"),
+                ),
+            )
+        self.assertEqual(conflict.exception.code, "IDEMPOTENCY_CONFLICT")
+        self.application.cancel_instance("t_start_failure", "i_image_1")
+
+    def test_adapter_rejection_after_process_ready_is_failed_to_start(self) -> None:
+        created = create_task(self.commands, "t_agent_start_failure")
+        draft = image_plan("t_agent_start_failure")
+        saved = self.application.save_plan_and_create_instances(
+            "t_agent_start_failure",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save-agent-start-failure",
+            envelope=envelope("save-agent-start-failure", created["revision"]),
+        )
+        self._configure_runtime_artifact("agent-start-failure-agent")
+        self.fake_adapter.start_error = HarnessError(
+            "PROCESS_START_FAILED",
+            "The Agent rejected its managed start request.",
+            {"http_status": 503, "route": "api/projects/i_image_1/jobs"},
+        )
+
+        failed = self.application.confirm_and_start_ready_instances(
+            "t_agent_start_failure",
+            operation_id="agent-start-failure-operation",
+            envelope=envelope("agent-start-failure-operation", saved["task_revision"]),
+        )
+
+        self.assertEqual(failed["state"], "RETRYABLE_FAILED")
+        instance_state = self.store.instance.get(
+            "t_agent_start_failure", "i_image_1"
+        )
+        self.assertEqual(instance_state["status"], "FAILED_TO_START")
+        self.assertEqual(instance_state["process"]["state"], "RUNNING")
+        self.assertEqual(instance_state["start_failure"]["phase"], "AGENT_STARTING")
+        self.assertEqual(
+            instance_state["start_failure"]["details"],
+            {"http_status": 503, "route": "api/projects/i_image_1/jobs"},
+        )
+        self.application.cancel_instance("t_agent_start_failure", "i_image_1")
 
     def test_concurrent_plan_operations_cannot_leave_losing_assignments(self) -> None:
         created = create_task(self.commands, "t_concurrent_application")

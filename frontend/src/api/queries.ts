@@ -74,6 +74,10 @@ export const agentWorkbenchLinkQuery = (
   ),
   retry: false,
   staleTime: 15_000,
+  refetchInterval: (query) => (
+    query.state.data?.link_status === "STARTING" ? 1_000 : false
+  ),
+  refetchIntervalInBackground: false,
 });
 
 export const deliveryBundlesQuery = (taskId: string) => queryOptions({

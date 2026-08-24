@@ -17,7 +17,7 @@ from harness.core.errors import HarnessError
 from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.assets import AssetService
 from harness.services.task_config import TaskConfigService
-from harness.storage.atomic import digest_json
+from harness.storage.atomic import atomic_write_json, digest_json
 from harness.storage.repository import utc_now
 from PIL import Image
 from runtime_helpers import (
@@ -71,6 +71,26 @@ class ImageAdapterTests(unittest.TestCase):
             interpreter=Path(sys.executable),
             dependency_root=source_root,
         )
+
+    def test_recovery_replays_the_idempotent_start_when_no_job_was_persisted(self) -> None:
+        atomic_write_json(
+            self.adapter._state_path("t_image_adapter", "i_image_adapter"),
+            {"job_id": None},
+        )
+        snapshot = {
+            **instance(
+                "t_image_adapter", "i_image_adapter", "s_image", "image", True
+            ),
+            "status": "RUNNING",
+        }
+
+        with patch.object(self.adapter, "get_status") as get_status:
+            recovery = self.adapter.recover(snapshot)
+
+        self.assertFalse(recovery.recovered)
+        self.assertEqual(recovery.status, "RUNNING")
+        self.assertEqual(recovery.details["mode"], "idempotent_start_replay")
+        get_status.assert_not_called()
 
     def tearDown(self) -> None:
         self.store.close()

@@ -284,13 +284,13 @@ class ImageObservationMixin:
             raise HarnessError(
                 "PROCESS_START_FAILED",
                 "Image Agent rejected a local adapter request.",
-                {"http_status": exc.code, "path": path.split("?", 1)[0]},
+                {"http_status": exc.code, "route": path.split("?", 1)[0].lstrip("/")},
             ) from None
         except (OSError, TimeoutError, URLError):
             raise HarnessError(
                 "PROCESS_START_FAILED",
                 "Image Agent did not answer a local adapter request.",
-                {"path": path.split("?", 1)[0]},
+                {"route": path.split("?", 1)[0].lstrip("/")},
             ) from None
         if len(raw) > 8 * 1024 * 1024 or content_type != "application/json":
             self._protocol_error("Image Agent returned an unsafe response body.")
