@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
 from ..adapters import AdapterRegistry, ImageAgentAdapter, PptAgentContractAdapter
+from ..adapters.image_attestation import RuntimeAttestation
 from ..adapters.image_lock import load_image_agent_lock
 from ..contracts import ContractRegistry
 from ..core.config import HarnessSettings, load_settings
@@ -66,6 +67,20 @@ class Container:
     master_threads: MasterThreadService
     work_items: WorkItemProjectionService
     agent_workbench: AgentWorkbenchService
+    runtime_attestation: RuntimeAttestation | None = None
+    runtime_artifact: Path | None = None
+    recovery_completed: bool = False
+
+    @property
+    def ready(self) -> bool:
+        return bool(
+            self.store.ready
+            and self.runtime_attestation is not None
+            and self.runtime_artifact is not None
+            and self.recovery_completed
+            and self.application.start_operation_runner_alive
+            and self.master_threads.run_monitor_alive
+        )
 
 
 class ContractValidationRequest(BaseModel):
@@ -113,23 +128,19 @@ def build_container(
         image_agent_config,
         host=settings.host,
     )
-    adapters = AdapterRegistry(
-        [
-            ImageAgentAdapter(
-                store,
-                contracts,
-                assets,
-                image_agent_config,
-                source_root=settings.image_agent_root,
-                interpreter=settings.image_agent_python,
-                dependency_root=settings.image_agent_dependency_root,
-                release_lock=image_release_lock,
-                revision=image_release_lock.revision,
-                host=settings.host,
-            ),
-            PptAgentContractAdapter(),
-        ]
+    image_adapter = ImageAgentAdapter(
+        store,
+        contracts,
+        assets,
+        image_agent_config,
+        source_root=settings.image_agent_root,
+        interpreter=settings.image_agent_python,
+        dependency_root=settings.image_agent_dependency_root,
+        release_lock=image_release_lock,
+        revision=image_release_lock.revision,
+        host=settings.host,
     )
+    adapters = AdapterRegistry([image_adapter, PptAgentContractAdapter()])
 
     application = HarnessApplicationService(
         store,
@@ -164,7 +175,7 @@ def build_container(
         retry_budgets,
         adapters,
     )
-    agent_workbench = AgentWorkbenchService(store, adapters, work_items)
+    agent_workbench = AgentWorkbenchService(store, adapters, work_items, application)
     return Container(
         settings=settings,
         contracts=contracts,
@@ -230,15 +241,35 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        image_adapter = container.adapters.get("image")
+        if not isinstance(image_adapter, ImageAgentAdapter):
+            raise HarnessError(
+                "IMAGE_RUNTIME_ATTESTATION_FAILED",
+                "The Image Agent adapter is not configured.",
+            )
+        attestation = image_adapter.prepare_runtime_artifact(
+            harness_root=container.settings.image_agent_lock_path.resolve().parents[1],
+            cache_root=(
+                container.settings.image_agent_dependency_root.resolve().parent
+                / "image-runtime"
+            ),
+        )
+        container.runtime_attestation = attestation
+        container.runtime_artifact = image_adapter.runtime_artifact_root
         warnings = container.store.start()
         usage_recoveries = container.usage.recover()
         retry_budget_recoveries = container.retry_budgets.recover()
         asset_recoveries = container.assets.recover()
         process_recoveries = container.supervisor.reconcile()
-        application_recoveries = container.application.recover()
+        application_recoveries = container.application.recover(
+            defer_start_operations=True
+        )
         master_recoveries = container.master_threads.recover()
         adapter_recoveries = recover_adapters(container)
         container.supervisor.start_monitoring()
+        container.application.start_monitoring()
+        container.master_threads.start_monitoring()
+        container.recovery_completed = True
         logger.info(
             "control_plane_started",
             extra={
@@ -257,6 +288,9 @@ def create_app(
         try:
             yield
         finally:
+            container.recovery_completed = False
+            container.master_threads.close_monitoring()
+            container.application.close_monitoring()
             container.supervisor.close()
             container.store.close()
             logger.info("control_plane_stopped")
@@ -340,7 +374,7 @@ def create_app(
 
     @app.get("/readyz", tags=["foundation"])
     async def readiness() -> JSONResponse:
-        ready = container.store.ready
+        ready = container.ready
         return JSONResponse(
             status_code=200 if ready else 503,
             content={"status": "ready" if ready else "not_ready"},

@@ -23,6 +23,7 @@ from .application_delivery import ApplicationDeliveryMixin
 from .application_planning import ApplicationPlanningMixin
 from .approvals import ApprovalInboxService
 from .assets import AssetService
+from .start_operations import StartOperationRunner
 from .supervisor import ProcessSupervisor
 
 CrashHook = Callable[[str], None]
@@ -48,6 +49,18 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         self.adapters = adapters
         self.intent_root = store.layout.control_root / "application-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.start_operation_runner = StartOperationRunner(self._run_pending_starts)
+
+    @property
+    def start_operation_runner_alive(self) -> bool:
+        return self.start_operation_runner.alive
+
+    def start_monitoring(self) -> None:
+        self.start_operation_runner.start()
+        self.start_operation_runner.notify()
+
+    def close_monitoring(self) -> None:
+        self.start_operation_runner.close()
 
     def save_plan_and_create_instances(
         self,
@@ -106,7 +119,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     crash_hook("after_application_intent")
             return self._resume_save_plan(intent_path, crash_hook)
 
-    def recover(self) -> list[dict[str, Any]]:
+    def recover(self, *, defer_start_operations: bool = False) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for path in sorted(self.intent_root.glob("*.json")):
             operation_id = path.stem
@@ -126,6 +139,16 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                         with self.commands.task_guard(task_id):
                             result = self._resume_save_plan(path, None)
                     elif intent["kind"] == "START_READY_INSTANCES":
+                        self._migrate_start_intent(path, intent)
+                        if defer_start_operations:
+                            results.append(
+                                {
+                                    "operation_id": operation_id,
+                                    "status": "PENDING",
+                                    "result": self.get_start_operation(operation_id),
+                                }
+                            )
+                            continue
                         result = self._resume_start(path, None)
                     elif intent["kind"] in {"START_INSTANCE", "RESTART_INSTANCE"}:
                         result = self._resume_instance_operation(path)
@@ -183,7 +206,9 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                         {"operation_id": operation_id},
                     )
                 if intent["state"] == "COMMITTED":
-                    return deepcopy(intent["result"])
+                    return self._start_operation_summary(intent)
+                if intent["state"] == "ABORTED":
+                    self._raise_terminal_intent(intent)
             else:
                 plan = self._plan(task_id)
                 if plan["task"]["status"] not in {
@@ -205,21 +230,151 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     if item["status"] == "UNAVAILABLE"
                 ]
                 intent = {
-                    "schema_version": "1.0",
+                    "schema_version": "1.1",
                     "kind": "START_READY_INSTANCES",
                     "operation_id": operation_id,
                     "request_sha256": request_sha256,
                     "request": request,
                     "target_instance_ids": targets,
                     "unavailable": unavailable,
-                    "state": "PREPARED",
-                    "prepared_at": utc_now(),
+                    "instance_progress": {
+                        instance_id: {
+                            "state": "PENDING",
+                            "attempt": 0,
+                            "launch_id": None,
+                            "side_effect_stage": "NONE",
+                            "last_error": None,
+                            "updated_at": utc_now(),
+                        }
+                        for instance_id in targets
+                    },
+                    "state": "QUEUED",
+                    "last_error": None,
+                    "created_at": utc_now(),
+                    "updated_at": utc_now(),
+                    "completed_at": None,
                     "result": None,
                 }
                 atomic_write_json(intent_path, intent)
                 if crash_hook:
                     crash_hook("after_start_intent")
+            self._confirm_start_intent(intent_path)
+            if self.start_operation_runner.alive and crash_hook is None:
+                self.start_operation_runner.notify()
+                return self.get_start_operation(operation_id)
             return self._resume_start(intent_path, crash_hook)
+
+    def latest_start_operation(
+        self, task_id: str, *, instance_id: str | None = None
+    ) -> dict[str, Any] | None:
+        validate_identifier(task_id, "task_id")
+        candidates: list[dict[str, Any]] = []
+        for path in self.intent_root.glob("*.json"):
+            intent = read_json(path)
+            if (
+                intent.get("kind") != "START_READY_INSTANCES"
+                or intent.get("request", {}).get("task_id") != task_id
+                or (
+                    instance_id is not None
+                    and instance_id not in intent.get("target_instance_ids", [])
+                )
+            ):
+                continue
+            candidates.append(intent)
+        if not candidates:
+            return None
+        latest = max(
+            candidates,
+            key=lambda item: str(item.get("updated_at") or item.get("prepared_at") or ""),
+        )
+        latest = self._migrate_start_intent(
+            self._intent_path(latest["operation_id"]), latest, persist=False
+        )
+        return self._start_operation_summary(latest)
+
+    def get_start_operation(self, operation_id: str) -> dict[str, Any]:
+        validate_identifier(operation_id, "operation_id")
+        path = self._intent_path(operation_id)
+        if not path.is_file():
+            raise HarnessError("TASK_NOT_FOUND", "The requested start operation does not exist.")
+        intent = read_json(path)
+        if intent.get("kind") != "START_READY_INSTANCES":
+            raise HarnessError("TASK_NOT_FOUND", "The requested start operation does not exist.")
+        intent = self._migrate_start_intent(path, intent, persist=False)
+        return self._start_operation_summary(intent)
+
+    def retry_start_operation(
+        self, operation_id: str, *, envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        validate_identifier(operation_id, "operation_id")
+        path = self._intent_path(operation_id)
+        with FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds):
+            if not path.is_file():
+                raise HarnessError(
+                    "TASK_NOT_FOUND", "The requested start operation does not exist."
+                )
+            intent = self._migrate_start_intent(path, read_json(path))
+            if envelope.actor_type not in {"human", "master"}:
+                raise HarnessError(
+                    "VALIDATION_ERROR", "Only a human or Master may recover a start."
+                )
+            retry_request_sha256 = digest_json(envelope.model_dump(mode="json"))
+            if intent.get("last_retry_idempotency_key") == envelope.idempotency_key:
+                if intent.get("last_retry_request_sha256") != retry_request_sha256:
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The start recovery idempotency key was reused for another request.",
+                    )
+                return self._start_operation_summary(intent)
+            if intent["state"] != "RETRYABLE_FAILED":
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "Only a retryable failed start operation may be recovered.",
+                    {"current": intent["state"]},
+                )
+            task_id = intent["request"]["task_id"]
+            self.commands.validate_task_revision(task_id, envelope.expected_revision)
+            now = utc_now()
+            for progress in intent["instance_progress"].values():
+                if progress["state"] == "RETRYABLE_FAILED":
+                    progress.update(
+                        {
+                            "state": "PENDING",
+                            "attempt": int(progress.get("attempt", 0)) + 1,
+                            "last_error": None,
+                            "updated_at": now,
+                        }
+                    )
+            intent.update(
+                {
+                    "state": "QUEUED",
+                    "last_error": None,
+                    "last_retry_idempotency_key": envelope.idempotency_key,
+                    "last_retry_request_sha256": retry_request_sha256,
+                    "updated_at": now,
+                }
+            )
+            atomic_write_json(path, intent)
+        if self.start_operation_runner.alive:
+            self.start_operation_runner.notify()
+            return self._start_operation_summary(intent)
+        return self._resume_start(path, None)
+
+    def _run_pending_starts(self) -> None:
+        for path in sorted(self.intent_root.glob("*.json")):
+            intent = read_json(path)
+            if intent.get("kind") != "START_READY_INSTANCES":
+                continue
+            intent = self._migrate_start_intent(path, intent)
+            if intent["state"] not in {"QUEUED", "RUNNING"}:
+                continue
+            with FileLock(
+                self._intent_lock(intent["operation_id"]),
+                self.store.lock_timeout_seconds,
+            ):
+                latest = read_json(path)
+                if latest["state"] in {"QUEUED", "RUNNING"}:
+                    self._resume_start(path, None)
 
     def cancel_instance(
         self,

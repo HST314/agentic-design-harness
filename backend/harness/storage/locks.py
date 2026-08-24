@@ -45,8 +45,11 @@ class FileLock:
                     if time.monotonic() >= deadline:
                         raise HarnessError(
                             "REVISION_CONFLICT",
-                            "Timed out waiting for the state writer lock.",
-                            {"lock": self.path.name},
+                            f'Timed out waiting for lock "{self.path.name}".',
+                            {
+                                "lock": self.path.name,
+                                "waited_seconds": self.timeout_seconds,
+                            },
                         ) from None
                     time.sleep(0.01)
         except BaseException:

@@ -18,9 +18,13 @@ python3 scripts/dev.py start
 | 探针 | 含义 | 自动化使用 |
 | --- | --- | --- |
 | `/healthz` | 后端进程存活 | 只用于判断进程是否响应 |
-| `/readyz` | 契约已加载且持有唯一 writer lease | 前端、业务调用和流量切换的唯一就绪依据 |
+| `/readyz` | Image Runtime 已验签并冻结、恢复已完成、持有唯一 writer lease、后台执行器存活 | 前端、业务调用和流量切换的唯一就绪依据 |
 
 后端根路径 `/` 返回 404 是正常行为。进程管理器应发送正常终止信号，等待 Harness 停止监管线程、回收 Agent 进程树并释放 writer lease；不要以强制结束作为日常关闭方式。
+
+启动时会在 writer lease 和业务写入之前核对 Image Agent 源码、依赖树、依赖锁集合、版本与平台身份，并按内容身份生成全局只读制品。任何漂移都以 `IMAGE_RUNTIME_ATTESTATION_FAILED` 拒绝 ready；不得通过跳过 lock、改写摘要或直接从可变源码启动来恢复。
+
+计划确认只提交持久化 Start Operation，不在 Master 请求锁内等待进程就绪。后台执行器按 `QUEUED → RUNNING → COMMITTED` 推进；逐实例阶段可从 `PREPARING`、`PROCESS_STARTING`、`AGENT_STARTING` 到 `RUNNING`。重启会迁移旧 `PREPARED` 意图并从已持久化副作用边界恢复，不重复发送已接受的启动命令。
 
 ## 状态与文件布局
 
@@ -39,7 +43,7 @@ python3 scripts/dev.py start
 2. 在同一备份 revision 中复制两个根目录，保留权限、符号链接语义和时间信息。
 3. 记录主仓 commit、Image Agent lock 摘要以及三份根 YAML 的摘要；秘密另按安全流程备份。
 4. 恢复到空目录，并使用匹配的代码、依赖和 Image lock 启动。
-5. 启动会截断不完整 NDJSON 尾部、重建投影与索引、恢复 usage cursor、对账 publication intent，并观察活动 Agent，而不重放副作用命令。
+5. 启动会截断不完整 NDJSON 尾部、重建投影与索引、恢复 usage cursor、对账 publication intent 与 Start Operation，并观察活动 Agent，而不重放已接受的副作用命令。
 6. 检查 `recovery-warnings.ndjson`、`readyz`、任务事件、实例 job ID 和 BundleManifest 可见性。
 
 不要通过重新发送 start、advance、approval 或 delivery confirm 来“修复”恢复；这可能制造重复副作用。恢复 warning 需要先定位数据与代码身份，再决定恢复备份或使用专用幂等入口。

@@ -46,6 +46,17 @@ class DeliveryRejection(TypedDict):
     retryable: bool
 
 
+class StartFailure(TypedDict):
+    code: str
+    message: str
+    details: dict[str, Any]
+    phase: str
+    operation_id: str
+    attempt: int
+    retryable: bool
+    failed_at: str
+
+
 class AuthorizedDowngrade(TypedDict):
     authorization_id: str
     authorized_at: str
@@ -79,6 +90,7 @@ class AgentInstanceSnapshot(TypedDict):
     created_at: str
     restart_required: NotRequired[bool]
     delivery_rejection: NotRequired[DeliveryRejection | None]
+    start_failure: NotRequired[StartFailure | None]
 
 
 class StageSnapshot(TypedDict):

@@ -31,6 +31,8 @@
             "ASSET_VALIDATION_FAILED",
             "ASSET_CORRUPTED",
             "PROCESS_START_FAILED",
+            "IMAGE_RUNTIME_ATTESTATION_FAILED",
+            "CONTROL_PLANE_NOT_READY",
             "MASTER_RUN_FAILED",
             "MASTER_OUTPUT_INVALID",
             "MASTER_ASSET_CATALOG_FAILED",

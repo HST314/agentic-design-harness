@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..core.errors import HarnessError
 from ..storage.atomic import atomic_write_json, digest_json, fsync_directory, read_json
+from ..storage.locks import FileLock
 
 IMAGE_ENTRYPOINT = "_harness_image_server.py"
 IMAGE_WEB_REQUIREMENTS = "_harness-image-web.in"
@@ -75,6 +76,8 @@ class ImageRuntimeBuilder:
         package_version: str,
         source_content_sha256: str,
         dependency_content_sha256: str,
+        identity_sha256: str | None = None,
+        platform: str = "unknown",
     ) -> None:
         self.source_root = source_root
         self.dependency_root = dependency_root
@@ -82,48 +85,77 @@ class ImageRuntimeBuilder:
         self.package_version = package_version
         self.source_content_sha256 = source_content_sha256
         self.dependency_content_sha256 = dependency_content_sha256
+        self.identity_sha256 = identity_sha256 or digest_json(
+            {
+                "builder_schema": "3.0",
+                "revision": revision,
+                "package_version": package_version,
+                "source_content_sha256": source_content_sha256,
+                "dependency_content_sha256": dependency_content_sha256,
+                "platform": platform,
+            }
+        )
+        self.platform = platform
 
     def prepare(self, runtime_root: Path) -> Path:
         self._validate_attestation()
-        artifact_root = runtime_root / "image-agent-artifact"
-        if artifact_root.exists():
-            marker = read_json(artifact_root / _MARKER)
-            if marker != self._marker():
+        runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        artifacts_root = runtime_root / "image-artifacts"
+        artifacts_root.mkdir(exist_ok=True, mode=0o700)
+        artifact_root = artifacts_root / self.identity_sha256
+        lock_path = runtime_root.parent / f".{runtime_root.name}-image-artifacts.lock"
+        with FileLock(lock_path, 60):
+            if artifact_root.is_symlink():
                 raise HarnessError(
-                    "IDEMPOTENCY_CONFLICT",
-                    "The existing Image runtime artifact has another revision.",
+                    "PROCESS_START_FAILED",
+                    "The cached Image runtime artifact is not a safe directory.",
                 )
-            self._verify_artifact_content(artifact_root)
+            if artifact_root.exists():
+                if not artifact_root.is_dir():
+                    raise HarnessError(
+                        "PROCESS_START_FAILED",
+                        "The cached Image runtime artifact is not a safe directory.",
+                    )
+                self._verify_read_only_artifact(artifact_root)
+                marker = read_json(artifact_root / _MARKER)
+                if marker != self._marker():
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The existing Image runtime artifact has another identity.",
+                    )
+                self._verify_artifact_content(artifact_root)
+                return artifact_root
+            temporary = artifacts_root / f".{self.identity_sha256}-{uuid.uuid4().hex}"
+            try:
+                temporary.mkdir(mode=0o700)
+                self._copy_tree(self.source_root, temporary)
+                actual_source_sha256 = content_tree_sha256(temporary)
+                self._require_content_digest(
+                    "source", actual_source_sha256, self.source_content_sha256
+                )
+                dependencies = temporary / "_dependencies"
+                dependencies.mkdir(mode=0o700)
+                self._copy_tree(self.dependency_root, dependencies)
+                actual_dependency_sha256 = dependency_tree_sha256(dependencies)
+                self._require_content_digest(
+                    "dependency", actual_dependency_sha256, self.dependency_content_sha256
+                )
+                (temporary / IMAGE_ENTRYPOINT).write_text(_SERVER_SOURCE, encoding="utf-8")
+                (temporary / IMAGE_WEB_REQUIREMENTS).write_text(
+                    _WEB_REQUIREMENTS_SOURCE, encoding="utf-8"
+                )
+                atomic_write_json(temporary / _MARKER, self._marker(), mode=0o444)
+                self._make_read_only(temporary)
+                os.replace(temporary, artifact_root)
+                fsync_directory(artifacts_root)
+            except BaseException:
+                if temporary.exists():
+                    self._make_removable(temporary)
+                    shutil.rmtree(temporary)
+                if not any(artifacts_root.iterdir()):
+                    artifacts_root.rmdir()
+                raise
             return artifact_root
-        temporary = runtime_root / f".image-agent-artifact-{uuid.uuid4().hex}"
-        try:
-            temporary.mkdir(mode=0o700)
-            self._copy_tree(self.source_root, temporary)
-            actual_source_sha256 = content_tree_sha256(temporary)
-            self._require_content_digest(
-                "source", actual_source_sha256, self.source_content_sha256
-            )
-            dependencies = temporary / "_dependencies"
-            dependencies.mkdir(mode=0o700)
-            self._copy_tree(self.dependency_root, dependencies)
-            actual_dependency_sha256 = dependency_tree_sha256(dependencies)
-            self._require_content_digest(
-                "dependency", actual_dependency_sha256, self.dependency_content_sha256
-            )
-            (temporary / IMAGE_ENTRYPOINT).write_text(_SERVER_SOURCE, encoding="utf-8")
-            (temporary / IMAGE_WEB_REQUIREMENTS).write_text(
-                _WEB_REQUIREMENTS_SOURCE, encoding="utf-8"
-            )
-            atomic_write_json(temporary / _MARKER, self._marker(), mode=0o444)
-            self._make_read_only(temporary)
-            os.replace(temporary, artifact_root)
-            fsync_directory(runtime_root)
-        except BaseException:
-            if temporary.exists():
-                self._make_removable(temporary)
-                shutil.rmtree(temporary)
-            raise
-        return artifact_root
 
     def _verify_artifact_content(self, artifact_root: Path) -> None:
         actual_source_sha256 = content_tree_sha256(
@@ -144,6 +176,43 @@ class ImageRuntimeBuilder:
         self._require_content_digest(
             "dependency", actual_dependency_sha256, self.dependency_content_sha256
         )
+        try:
+            server_source = (artifact_root / IMAGE_ENTRYPOINT).read_text(encoding="utf-8")
+            requirements = (artifact_root / IMAGE_WEB_REQUIREMENTS).read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            server_source = requirements = ""
+        if server_source != _SERVER_SOURCE or requirements != _WEB_REQUIREMENTS_SOURCE:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The cached Image runtime bootstrap content is invalid.",
+            )
+
+    @staticmethod
+    def _verify_read_only_artifact(artifact_root: Path) -> None:
+        writable = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+        try:
+            root_metadata = artifact_root.lstat()
+            if not stat.S_ISDIR(root_metadata.st_mode) or root_metadata.st_mode & writable:
+                raise OSError("unsafe artifact root")
+            for current, directories, files in os.walk(artifact_root, followlinks=False):
+                for name in (*directories, *files):
+                    metadata = (Path(current) / name).lstat()
+                    if (
+                        stat.S_ISLNK(metadata.st_mode)
+                        or not (
+                            stat.S_ISDIR(metadata.st_mode)
+                            or stat.S_ISREG(metadata.st_mode)
+                        )
+                        or metadata.st_mode & writable
+                    ):
+                        raise OSError("unsafe artifact member")
+        except OSError:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The cached Image runtime artifact is not read-only.",
+            ) from None
 
     def _validate_attestation(self) -> None:
         for label, value in (
@@ -218,7 +287,9 @@ class ImageRuntimeBuilder:
 
     def _marker(self) -> dict[str, str]:
         return {
-            "schema_version": "2.0",
+            "schema_version": "3.0",
+            "identity_sha256": self.identity_sha256,
+            "platform": self.platform,
             "source_revision": self.revision,
             "package_version": self.package_version,
             "source_content_sha256": self.source_content_sha256,

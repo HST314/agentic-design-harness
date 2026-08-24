@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -13,6 +14,7 @@ from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
 from harness.services.master_orchestrator import MasterRunObservation
 from harness.storage.atomic import atomic_write_json, read_json
+from harness.storage.locks import FileLock
 from harness.storage.repository import Actor, utc_now
 from runtime_helpers import build_config_snapshot
 
@@ -150,6 +152,27 @@ class InterruptedBeforePlanSaveApplication(RecordingApplication):
 
 
 class MasterThreadApiTests(unittest.TestCase):
+    def test_existing_master_session_get_does_not_wait_for_the_command_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self._app(Path(temporary))
+            app.state.container.master_threads.orchestrator = RecordingOrchestrator()
+            with TestClient(app) as client:
+                task_id = self._create_submit(client, "manual")
+                lock_path = (
+                    app.state.container.store.layout.control_root
+                    / "locks"
+                    / f"command-{task_id}.lock"
+                )
+                with FileLock(lock_path, 1):
+                    started_at = time.monotonic()
+                    response = client.get(
+                        f"/api/v1/tasks/{task_id}/master/messages"
+                    )
+                    elapsed = time.monotonic() - started_at
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertLess(elapsed, 0.5)
+
     def test_revisioned_thread_adjustment_and_manual_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))

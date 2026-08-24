@@ -31,6 +31,7 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
+from .image_attestation import RuntimeAttestation, attest_image_runtime
 from .image_delivery import image_dimensions, normalize_image_delivery, stage_final_delivery
 from .image_lock import (
     ImageAgentReleaseLock,
@@ -114,6 +115,8 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.package_version = self.release_lock.package_version
         self.host = host
         self.request_timeout_seconds = request_timeout_seconds
+        self.runtime_attestation: RuntimeAttestation | None = None
+        self.runtime_artifact_root: Path | None = None
         self.runtime_builder = ImageRuntimeBuilder(
             source_root,
             dependency_root,
@@ -122,6 +125,53 @@ class ImageAgentAdapter(ImageObservationMixin):
             source_content_sha256=self.release_lock.source_content_sha256,
             dependency_content_sha256=self.release_lock.runtime_dependency_tree_sha256,
         )
+
+    def prepare_runtime_artifact(
+        self, *, harness_root: Path, cache_root: Path
+    ) -> RuntimeAttestation:
+        """Attest and freeze the only Image runtime accepted by this process."""
+
+        if not self.interpreter.is_absolute() or not self.interpreter.is_file():
+            raise HarnessError(
+                "IMAGE_RUNTIME_ATTESTATION_FAILED",
+                "The isolated Image Agent interpreter is not configured.",
+            )
+        try:
+            attestation = attest_image_runtime(
+                self.release_lock,
+                source_root=self.source_root,
+                dependency_root=self.dependency_root,
+                harness_root=harness_root,
+            )
+            builder = ImageRuntimeBuilder(
+                self.source_root.resolve(strict=True),
+                self.dependency_root.resolve(strict=True),
+                revision=self.revision,
+                package_version=self.package_version,
+                source_content_sha256=attestation.source_sha256,
+                dependency_content_sha256=attestation.dependency_sha256,
+                identity_sha256=attestation.identity_sha256,
+                platform=attestation.platform,
+            )
+            artifact_root = builder.prepare(cache_root)
+            self._validate_runtime_source(artifact_root)
+        except HarnessError as exc:
+            if exc.code == "IMAGE_RUNTIME_ATTESTATION_FAILED":
+                raise
+            raise HarnessError(
+                "IMAGE_RUNTIME_ATTESTATION_FAILED",
+                "The Image Agent runtime artifact cannot be verified.",
+                {"cause_code": exc.code},
+            ) from None
+        except (OSError, ValueError):
+            raise HarnessError(
+                "IMAGE_RUNTIME_ATTESTATION_FAILED",
+                "The Image Agent runtime artifact cannot be inspected.",
+            ) from None
+        self.runtime_builder = builder
+        self.runtime_artifact_root = artifact_root
+        self.runtime_attestation = attestation
+        return attestation
 
     def validate_task_card(self, card: TaskCard) -> ValidationResult:
         try:
@@ -153,7 +203,13 @@ class ImageAgentAdapter(ImageObservationMixin):
                 "The Image Agent adapter rejected its task card.",
                 {"errors": list(validation.errors)},
             )
-        self._validate_runtime_source()
+        artifact_root = self.runtime_artifact_root
+        if artifact_root is None or self.runtime_attestation is None:
+            raise HarnessError(
+                "CONTROL_PLANE_NOT_READY",
+                "The verified Image runtime artifact is not ready.",
+            )
+        self._validate_runtime_source(artifact_root)
         instance_id = str(request.instance["instance_id"])
         task_id = str(request.instance["task_id"])
         instance_root = self.store.layout.initialize_instance(task_id, instance_id)
@@ -220,7 +276,6 @@ class ImageAgentAdapter(ImageObservationMixin):
                 )
         else:
             atomic_write_json(state_path, expected_state)
-        artifact_root = self.runtime_builder.prepare(runtime_root)
         entrypoint = artifact_root / IMAGE_ENTRYPOINT
         return ProcessSpec(
             command=(
@@ -864,6 +919,16 @@ class ImageAgentAdapter(ImageObservationMixin):
         status = str(instance_snapshot["status"])
         if status not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
             return AdapterRecoveryResult(recovered=True, status=status)
+        state = self._state(task_id, instance_id)
+        if not state.get("job_id"):
+            # The durable request marker is written before the HTTP call.  A
+            # missing job id therefore means replaying the same idempotency key
+            # is the only safe way to decide whether the call crossed the wire.
+            return AdapterRecoveryResult(
+                recovered=False,
+                status=status,
+                details={"mode": "idempotent_start_replay"},
+            )
         observation = self.get_status(instance_id)
         return AdapterRecoveryResult(
             recovered=True,
@@ -876,27 +941,25 @@ class ImageAgentAdapter(ImageObservationMixin):
         )
 
 
-    def _validate_runtime_source(self) -> None:
+    def _validate_runtime_source(self, source_root: Path | None = None) -> None:
+        selected_root = source_root or self.runtime_artifact_root or self.source_root
         if self.revision != self.release_lock.revision:
             raise HarnessError(
                 "SCHEMA_VERSION_UNSUPPORTED",
                 "The configured Image Agent revision is not supported by this Harness build.",
             )
         if (
-            not self.source_root.is_absolute()
-            or not self.source_root.is_dir()
-            or self.source_root.is_symlink()
+            not selected_root.is_absolute()
+            or not selected_root.is_dir()
+            or selected_root.is_symlink()
             or not self.interpreter.is_absolute()
             or not self.interpreter.is_file()
-            or not self.dependency_root.is_absolute()
-            or not self.dependency_root.is_dir()
-            or self.dependency_root.is_symlink()
         ):
             raise HarnessError(
                 "ADAPTER_UNAVAILABLE",
                 "The Image Agent source or isolated interpreter is not configured.",
             )
-        pyproject = self.source_root / "pyproject.toml"
+        pyproject = selected_root / "pyproject.toml"
         try:
             match = _PACKAGE_VERSION.search(pyproject.read_text(encoding="utf-8"))
         except OSError:
@@ -908,7 +971,8 @@ class ImageAgentAdapter(ImageObservationMixin):
             )
 
     def _validate_image_contract(self, card: dict[str, Any]) -> None:
-        schema_path = self.source_root / "schemas" / "ImageTaskCard.schema.json"
+        selected_root = self.runtime_artifact_root or self.source_root
+        schema_path = selected_root / "schemas" / "ImageTaskCard.schema.json"
         try:
             schema = json.loads(schema_path.read_text(encoding="utf-8"))
             Draft202012Validator.check_schema(schema)

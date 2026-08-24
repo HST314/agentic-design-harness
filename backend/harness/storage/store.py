@@ -380,6 +380,7 @@ class FileStateStore:
             "config_revision",
             "process",
             "restart_required",
+            "start_failure",
             "ui_url",
         }
         if not changes or not set(changes).issubset(allowed):

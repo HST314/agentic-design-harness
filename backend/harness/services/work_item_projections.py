@@ -316,6 +316,15 @@ class WorkItemProjectionService:
                     "message": "当前运行实例不存在, 请检查计划投影。",
                 }
             )
+        elif current.get("start_failure"):
+            failure = current["start_failure"]
+            alerts.append(
+                {
+                    "code": str(failure["code"]),
+                    "severity": "error",
+                    "message": str(failure["message"]),
+                }
+            )
         elif current.get("delivery_rejection"):
             rejection = current["delivery_rejection"]
             alerts.append(

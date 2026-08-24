@@ -12,7 +12,7 @@ REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(RE
 
 .PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check docs-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e p6-acceptance evidence dev-setup dev-doctor dev-smoke
 
-test: test-env
+test: test-env image-agent-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
 
 lint: test-env
@@ -93,7 +93,7 @@ check: test lint compile secret-scan boundary-check lock-check docs-check fronte
 
 verify: check typecheck dependency-audit sbom capacity-benchmark
 
-serve: test-env
+serve: test-env lock-check image-agent-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m harness
 
 dev-setup:
