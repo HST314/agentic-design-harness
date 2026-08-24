@@ -18,6 +18,7 @@ from harness.adapters import (
     PptAgentContractAdapter,
     ValidationResult,
 )
+from harness.adapters.image import ImageAgentAdapter
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.application import HarnessApplicationService
@@ -37,8 +38,6 @@ from runtime_helpers import (
 )
 
 FAKE_AGENT = Path(__file__).resolve().parents[1] / "fixtures" / "fake_agent_process.py"
-
-
 class FakeImageAdapter:
     agent_type = "image"
     available = True
@@ -53,8 +52,11 @@ class FakeImageAdapter:
         self.delivery_bundles = []
         self.advance_delay = 0.0
         self.advance_accepted = True
+        self.validation_delegate = None
 
     def validate_task_card(self, card):
+        if self.validation_delegate is not None:
+            return self.validation_delegate(card)
         errors = () if card.get("agent_type") == "image" else ("wrong agent type",)
         return ValidationResult(valid=not errors, errors=errors)
 
@@ -373,6 +375,47 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(recovered[0]["status"], "RECOVERED")
         self.assertEqual(len(self.fake_adapter.start_calls), 1)
         self.application.cancel_instance("t_confirm_recovery", "i_image_1")
+
+    def test_prompt_only_image_card_can_be_confirmed_and_started(self) -> None:
+        self._configure_runtime_artifact("prompt-only-image-fake-agent")
+        contract_adapter = ImageAgentAdapter(
+            self.store,
+            self.store.contracts,
+            self.assets,
+            self.image_config,
+            source_root=self.root,
+            interpreter=Path(sys.executable),
+            dependency_root=self.root,
+        )
+        self.fake_adapter.validation_delegate = contract_adapter.validate_task_card
+        created = create_task(self.commands, "t_prompt_only_image")
+        draft = image_plan("t_prompt_only_image")
+        card = draft["task_cards"][0]
+        card.update(
+            {
+                "schema_version": "1.1",
+                "created_at": "2026-08-24T08:00:00Z",
+            }
+        )
+        card["parameters"]["usage_context"] = "Internal campaign review."
+        saved = self.application.save_plan_and_create_instances(
+            "t_prompt_only_image",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save-prompt-only-image",
+            envelope=envelope("save-prompt-only-image", created["revision"]),
+        )
+
+        started = self.application.confirm_and_start_ready_instances(
+            "t_prompt_only_image",
+            operation_id="start-prompt-only-image",
+            envelope=envelope("start-prompt-only-image", saved["task_revision"]),
+        )
+
+        self.assertEqual(len(started["launches"]), 1)
+        self.assertEqual(len(self.fake_adapter.start_calls), 1)
+        self.application.cancel_instance("t_prompt_only_image", "i_image_1")
 
     def test_concurrent_plan_operations_cannot_leave_losing_assignments(self) -> None:
         created = create_task(self.commands, "t_concurrent_application")

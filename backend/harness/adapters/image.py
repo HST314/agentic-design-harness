@@ -136,8 +136,6 @@ class ImageAgentAdapter(ImageObservationMixin):
             errors.append("Image TaskCard 1.1 requires parameters.usage_context.")
         if bool(parameters.get("category_id")) != bool(parameters.get("category_version")):
             errors.append("Image category_id and category_version must be supplied together.")
-        if not card.get("input_assets"):
-            errors.append("Image Agent requires at least one verified source asset.")
         required_images = [
             item
             for item in card.get("expected_deliveries", [])
@@ -300,6 +298,22 @@ class ImageAgentAdapter(ImageObservationMixin):
             }
             for manifest in manifests
         ]
+        if not source_refs:
+            source_refs.append(
+                {
+                    "ref_id": card["card_id"],
+                    "ref_type": "task_card",
+                    "excerpt": card["objective"],
+                    "source_hash": digest_json(
+                        {
+                            "objective": card["objective"],
+                            "instructions": instructions,
+                            "parameters": card["parameters"],
+                            "revision": card["revision"],
+                        }
+                    ),
+                }
+            )
         asset_inputs = []
         for manifest in manifests:
             usage_rule = " ".join(
