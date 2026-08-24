@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -226,7 +227,7 @@ class ConfigKernelTests(unittest.TestCase):
                 DevelopmentLauncher,
                 "venv_python",
                 new_callable=PropertyMock,
-                return_value=Path("/usr/bin/python3"),
+                return_value=Path(sys.executable),
             ),
             patch("scripts.dev.command_succeeds", return_value=True),
             patch.object(

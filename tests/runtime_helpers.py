@@ -121,14 +121,23 @@ def build_config_snapshot(
     )
 
 
-def build_store(root: Path) -> FileStateStore:
+def build_store(
+    root: Path, *, lock_timeout_seconds: float | None = None
+) -> FileStateStore:
     contracts = ContractRegistry(CONTRACTS_ROOT)
-    lock_timeout = 5.0 if os.name == "nt" else 0.25
+    default_lock_timeout = 5.0 if os.name == "nt" else 0.25
+    lock_timeout = (
+        default_lock_timeout
+        if lock_timeout_seconds is None
+        else lock_timeout_seconds
+    )
     return FileStateStore(root / "control-data", root / "workspace", contracts, lock_timeout)
 
 
-def build_service(root: Path) -> tuple[FileStateStore, TaskCommandService]:
-    store = build_store(root)
+def build_service(
+    root: Path, *, lock_timeout_seconds: float | None = None
+) -> tuple[FileStateStore, TaskCommandService]:
+    store = build_store(root, lock_timeout_seconds=lock_timeout_seconds)
     store.start()
     return store, TaskCommandService(store, store.contracts)
 
