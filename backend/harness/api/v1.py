@@ -264,7 +264,7 @@ class RuntimeSettingsPatch(StrictRequest):
 
 class RuntimeSettingsProposalRequest(StrictRequest):
     base_revision: int = Field(ge=1)
-    patch: RuntimeSettingsPatch
+    overrides: RuntimeSettingsPatch
     sync_unstarted_image_work_items: bool = False
     expected_sync_instance_ids: list[
         Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")]
@@ -693,7 +693,7 @@ def build_v1_router(container: Container) -> APIRouter:
             task_id,
             instance_id,
             base_revision=body.base_revision,
-            patch=body.patch.model_dump(exclude_unset=True),
+            patch=body.overrides.model_dump(exclude_unset=True),
             sync_unstarted_image_work_items=body.sync_unstarted_image_work_items,
             expected_sync_instance_ids=body.expected_sync_instance_ids,
             envelope=body.envelope,

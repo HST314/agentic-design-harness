@@ -36,7 +36,7 @@ Harness 是实例运行配置的唯一控制面。任务创建时冻结无秘密
 - `POST /api/v1/instances/{instance_id}/runtime-setting-proposals`；
 - `POST /api/v1/instances/{instance_id}/runtime-setting-proposals/{proposal_id}/confirm`。
 
-proposal 只接受白名单业务字段，携带实例 base revision、任务 expected revision 与幂等键。显式同步未启动 Image 工作项时，客户端必须回传预览得到的完整实例 ID 集合；确认会在任务锁内重新计算并逐一校验 base，集合变化返回 `SYNC_SCOPE_CHANGED`，不会部分同步。
+proposal 的 `overrides` 只接受白名单业务字段，请求同时携带实例 base revision、任务 expected revision 与幂等键。显式同步未启动 Image 工作项时，客户端必须回传预览得到的完整实例 ID 集合；确认会在任务锁内重新计算并逐一校验 base，集合变化返回 `SYNC_SCOPE_CHANGED`，不会部分同步。
 
 未启动实例确认后直接切换本地不可变 revision，返回 `APPLIED_BEFORE_START`。已运行实例只在 Image Agent 报告“无活动 job、无未决事务、无未知模型调用结果、存在有效 checkpoint”时应用；否则返回 HTTP 202 和 `WAITING_SAFE_POINT`。安全应用使用 `CONFIRMED → MATERIALIZED → CHILD_BRANCH_CREATED → INSTANCE_POINTER_COMMITTED → APPLIED` saga，远端分支调用不持有任务锁，恢复时以同一幂等键重放。Harness 只在验证 branch/checkpoint/config hash receipt 后切换实例指针；任一摘要或归属不一致均失败关闭。
 

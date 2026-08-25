@@ -42,6 +42,11 @@ class ApplicationDeliveryMixin:
             config_application = self.runtime_settings.apply_pending_if_safe(
                 task_id, instance_id
             )
+            if (
+                config_application is not None
+                and config_application["status"] == "APPLIED_ON_BRANCH"
+            ):
+                observation = adapter.get_status(instance_id)
         if observation.status not in {"RUNNING", "WAITING_APPROVAL", "FAILED"}:
             raise HarnessError(
                 "VALIDATION_ERROR",

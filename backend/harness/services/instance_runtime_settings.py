@@ -30,6 +30,7 @@ from .runtime_config_state import (
     is_unstarted_image_instance,
 )
 from .task_config import TaskConfigService
+from .work_item_projections import logical_work_items
 
 CrashHook = Callable[[str], None]
 _TERMINAL_SAGA_STATES = frozenset({"APPLIED", "FAILED"})
@@ -87,13 +88,15 @@ class InstanceRuntimeSettingsService:
         editable = (
             not bool(current.get("legacy"))
             and baseline_is_current
-            and self._pending_saga(instance_id) is None
+            and self._pending_saga(instance_id, include_sync=True) is None
             and self._terminal_saga(instance_id, state="FAILED") is None
         )
         inherited = self.materializer.effective_runtime(task_revision, {})
         effective = deepcopy(current["manifest"]["effective_runtime"])
         inherited_models = self._effective_model_ids(task_revision, {})
-        effective_models = deepcopy(current["manifest"]["model_bindings"])
+        effective_models = self._effective_model_ids(
+            task_revision, current["manifest"]["overrides"]
+        )
         values: dict[str, Any] = {}
         for field in RUNTIME_SETTING_FIELDS:
             if field == "advanced_model_overrides":
@@ -114,7 +117,7 @@ class InstanceRuntimeSettingsService:
             "schema_version": "2.0",
             "scope": {
                 "task_id": task_id,
-                "work_item_id": instance["stage_id"],
+                "work_item_id": self._work_item_ids(task_id)[instance_id],
                 "instance_id": instance_id,
             },
             "revision": {
@@ -158,11 +161,15 @@ class InstanceRuntimeSettingsService:
         }
         request_hash = digest_json(request)
         proposal_id = self._proposal_id(task_id, instance_id, envelope.idempotency_key)
+        observed_instance = self._image_instance(task_id, instance_id)
+        path = self._proposal_path(task_id, instance_id, proposal_id)
+        observed_boundary = None
+        if not path.exists():
+            observed_boundary = self._workflow_boundary(task_id, observed_instance)
         with FileLock(
             application_task_lock_path(self.store, task_id),
             self.store.lock_timeout_seconds,
         ):
-            path = self._proposal_path(task_id, instance_id, proposal_id)
             if path.exists():
                 existing = read_json(path)
                 if existing.get("request_hash") != request_hash:
@@ -172,7 +179,7 @@ class InstanceRuntimeSettingsService:
                     )
                 return self._proposal_response(existing)
             self._validate_task_revision(task_id, envelope.expected_revision)
-            if self._pending_saga(instance_id) is not None:
+            if self._pending_saga(instance_id, include_sync=True) is not None:
                 raise HarnessError(
                     "SETTINGS_REVISION_CONFLICT",
                     "The instance already has an unfinished runtime settings operation.",
@@ -245,8 +252,8 @@ class InstanceRuntimeSettingsService:
                 target_id: self._config_identity(task_id, target_id)
                 for target_id in sync_ids
             }
-            boundary = self._workflow_boundary(task_id, instance)
-            mode = self._apply_mode(instance, boundary)
+            mode = self._apply_mode(task_id, instance)
+            boundary = self._proposal_boundary(mode, observed_boundary, instance)
             effective = self.materializer.effective_runtime(task_revision, overrides)
             effective_models = self._effective_model_ids(task_revision, overrides)
             proposal = {
@@ -263,7 +270,14 @@ class InstanceRuntimeSettingsService:
                 "overrides": deepcopy(overrides),
                 "effective_runtime": effective,
                 "effective_model_ids": effective_models,
-                "diff": self._diff(current, effective, effective_models),
+                "diff": self._diff(
+                    current,
+                    self._effective_model_ids(
+                        task_revision, current["manifest"]["overrides"]
+                    ),
+                    effective,
+                    effective_models,
+                ),
                 "apply_mode": mode,
                 "workflow_boundary": boundary,
                 "sync_instance_ids": sync_ids,
@@ -301,6 +315,14 @@ class InstanceRuntimeSettingsService:
     ) -> dict[str, Any]:
         self._require_settings_actor(envelope)
         validate_identifier(proposal_id, "proposal_id")
+        confirm_request_hash = digest_json(
+            {
+                "task_id": task_id,
+                "instance_id": instance_id,
+                "proposal_id": proposal_id,
+                "envelope": envelope.model_dump(mode="json"),
+            }
+        )
         with FileLock(
             application_task_lock_path(self.store, task_id),
             self.store.lock_timeout_seconds,
@@ -311,29 +333,48 @@ class InstanceRuntimeSettingsService:
             proposal = read_json(proposal_path)
             saga_path = self._saga_path(proposal_id)
             if proposal.get("confirm_idempotency_key") is not None:
-                if proposal["confirm_idempotency_key"] != envelope.idempotency_key:
+                if (
+                    proposal["confirm_idempotency_key"] != envelope.idempotency_key
+                    or proposal.get("confirm_request_hash") != confirm_request_hash
+                ):
                     raise HarnessError(
-                        "INVALID_STATE_TRANSITION",
-                        "The settings proposal was already confirmed by another command.",
+                        "IDEMPOTENCY_CONFLICT",
+                        "The settings confirmation idempotency key was reused for another request.",
+                    )
+                if not saga_path.is_file():
+                    raise HarnessError(
+                        "CONFIG_INTEGRITY_FAILED",
+                        "The confirmed settings proposal lost its application saga.",
                     )
                 saga = read_json(saga_path)
+                self._validate_confirmation_saga(
+                    saga,
+                    task_id=task_id,
+                    instance_id=instance_id,
+                    proposal_id=proposal_id,
+                    confirm_request_hash=confirm_request_hash,
+                    idempotency_key=envelope.idempotency_key,
+                )
+                if saga["state"] == "INTENT_PERSISTED":
+                    saga.update({"state": "CONFIRMED", "updated_at": utc_now()})
+                    self._write_saga(saga)
                 replay = self._saga_response(saga)
             elif saga_path.exists():
                 saga = read_json(saga_path)
-                if (
-                    saga.get("task_id") != task_id
-                    or saga.get("instance_id") != instance_id
-                    or saga.get("confirm_idempotency_key") != envelope.idempotency_key
-                ):
-                    raise HarnessError(
-                        "CONFIG_INTEGRITY_FAILED",
-                        "The persisted settings confirmation intent is inconsistent.",
-                    )
+                self._validate_confirmation_saga(
+                    saga,
+                    task_id=task_id,
+                    instance_id=instance_id,
+                    proposal_id=proposal_id,
+                    confirm_request_hash=confirm_request_hash,
+                    idempotency_key=envelope.idempotency_key,
+                )
                 proposal.update(
                     {
                         "status": "CONFIRMED",
                         "confirmed_at": saga["confirmed_at"],
                         "confirm_idempotency_key": envelope.idempotency_key,
+                        "confirm_request_hash": confirm_request_hash,
                     }
                 )
                 self._write_proposal(proposal_path, proposal)
@@ -349,6 +390,8 @@ class InstanceRuntimeSettingsService:
                         "result": "CONFIRMED",
                     },
                 )
+                saga.update({"state": "CONFIRMED", "updated_at": utc_now()})
+                self._write_saga(saga)
                 self._resume_sync_targets_locked(saga, crash_hook)
                 if saga["mode"] == "before_start":
                     self._resume_local_source_locked(saga, crash_hook)
@@ -377,8 +420,7 @@ class InstanceRuntimeSettingsService:
                     proposal["overrides"],
                     require_current_approval=True,
                 )
-                boundary = self._workflow_boundary(task_id, instance)
-                mode = self._apply_mode(instance, boundary)
+                mode = self._apply_mode(task_id, instance)
                 if mode != proposal["apply_mode"]:
                     raise HarnessError(
                         "SETTINGS_REVISION_CONFLICT",
@@ -392,9 +434,11 @@ class InstanceRuntimeSettingsService:
                     "task_id": task_id,
                     "instance_id": instance_id,
                     "mode": mode,
-                    "state": "CONFIRMED",
+                    "state": "INTENT_PERSISTED",
                     "actor": {"actor_type": envelope.actor_type, "actor_id": envelope.actor_id},
                     "confirm_idempotency_key": envelope.idempotency_key,
+                    "confirm_request_hash": confirm_request_hash,
+                    "confirm_envelope": envelope.model_dump(mode="json"),
                     "confirmed_at": now,
                     "updated_at": now,
                     "source": {
@@ -431,6 +475,7 @@ class InstanceRuntimeSettingsService:
                         "status": "CONFIRMED",
                         "confirmed_at": now,
                         "confirm_idempotency_key": envelope.idempotency_key,
+                        "confirm_request_hash": confirm_request_hash,
                     }
                 )
                 self._write_proposal(proposal_path, proposal)
@@ -446,6 +491,8 @@ class InstanceRuntimeSettingsService:
                         "result": "CONFIRMED",
                     },
                 )
+                saga.update({"state": "CONFIRMED", "updated_at": utc_now()})
+                self._write_saga(saga)
                 if crash_hook:
                     crash_hook("after_config_saga_intent")
                 self._resume_sync_targets_locked(saga, crash_hook)
@@ -490,6 +537,8 @@ class InstanceRuntimeSettingsService:
                 "CONFIG_INTEGRITY_FAILED",
                 "A settings saga has the wrong task owner.",
             )
+        if saga["state"] == "INTENT_PERSISTED":
+            return self._saga_response(saga)
         if saga["mode"] == "before_start":
             with FileLock(
                 application_task_lock_path(self.store, task_id),
@@ -673,6 +722,12 @@ class InstanceRuntimeSettingsService:
                     "CONFIG_INTEGRITY_FAILED",
                     "A settings saga has the wrong task owner.",
                 )
+            if saga["state"] == "INTENT_PERSISTED":
+                raise HarnessError(
+                    "SAFE_CHECKPOINT_UNAVAILABLE",
+                    "Recover the persisted settings confirmation before starting the instance.",
+                    {"proposal_id": saga["proposal_id"]},
+                )
             self._resume_sync_targets_locked(saga, None)
             if saga["instance_id"] == instance_id and saga["mode"] == "before_start":
                 self._resume_local_source_locked(saga, None)
@@ -685,7 +740,17 @@ class InstanceRuntimeSettingsService:
             if saga["state"] in _TERMINAL_SAGA_STATES:
                 continue
             try:
-                result = self.apply_pending_if_safe(saga["task_id"], saga["instance_id"])
+                if saga["state"] == "INTENT_PERSISTED":
+                    result = self.confirm(
+                        saga["task_id"],
+                        saga["instance_id"],
+                        saga["proposal_id"],
+                        envelope=CommandEnvelope.model_validate(saga["confirm_envelope"]),
+                    )
+                else:
+                    result = self.apply_pending_if_safe(
+                        saga["task_id"], saga["instance_id"]
+                    )
                 results.append({"proposal_id": saga["proposal_id"], "result": result})
             except HarnessError as exc:
                 results.append({"proposal_id": saga["proposal_id"], "error_code": exc.code})
@@ -918,6 +983,7 @@ class InstanceRuntimeSettingsService:
         plan = self.store.plan.get(task_id, task_id)
         if plan is None:
             return []
+        work_item_ids = self._work_item_ids(task_id, plan=plan)
         candidates = []
         for instance in plan["instances"]:
             if instance["instance_id"] == source_instance_id:
@@ -926,10 +992,38 @@ class InstanceRuntimeSettingsService:
                 candidates.append(
                     {
                         "instance_id": instance["instance_id"],
-                        "work_item_id": instance["stage_id"],
+                        "work_item_id": work_item_ids[instance["instance_id"]],
                     }
                 )
         return sorted(candidates, key=lambda item: item["instance_id"])
+
+    def _work_item_ids(
+        self, task_id: str, *, plan: dict[str, Any] | None = None
+    ) -> dict[str, str]:
+        selected = self.store.plan.get(task_id, task_id) if plan is None else plan
+        if selected is None:
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "Runtime settings require a saved WorkItem plan.",
+            )
+        stages = sorted(selected["stages"], key=lambda item: item["position"])
+        mapping: dict[str, str] = {}
+        for item in logical_work_items(self.store, task_id, selected, stages):
+            for instance_id in item["instance_ids"]:
+                if instance_id in mapping:
+                    raise HarnessError(
+                        "CONFIG_INTEGRITY_FAILED",
+                        "An Image instance resolves to multiple WorkItems.",
+                        {"instance_id": instance_id},
+                    )
+                mapping[instance_id] = item["work_item_id"]
+        planned_ids = {item["instance_id"] for item in selected["instances"]}
+        if set(mapping) != planned_ids:
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "The WorkItem projection does not cover every planned instance.",
+            )
+        return mapping
 
     def _workflow_boundary(
         self, task_id: str, instance: dict[str, Any]
@@ -1008,16 +1102,37 @@ class InstanceRuntimeSettingsService:
             "reason": reason or (None if safe_now else "SAFE_CHECKPOINT_UNAVAILABLE"),
         }
 
-    @staticmethod
-    def _apply_mode(instance: dict[str, Any], boundary: dict[str, Any]) -> str:
-        if boundary["state"] == "initial" and boundary["safe_now"]:
+    def _apply_mode(self, task_id: str, instance: dict[str, Any]) -> str:
+        if is_unstarted_image_instance(self.store, task_id, instance):
             return "before_start"
-        if boundary["reason"] == "INSTANCE_CONFIG_LOCKED":
+        if instance["status"] in _LOCKED_INSTANCE_STATES:
             raise HarnessError(
                 "INSTANCE_CONFIG_LOCKED",
                 "The instance has no future execution boundary for runtime settings.",
             )
         return "safe_checkpoint_branch"
+
+    @staticmethod
+    def _proposal_boundary(
+        mode: str,
+        observed: dict[str, Any] | None,
+        instance: dict[str, Any],
+    ) -> dict[str, Any]:
+        if mode == "before_start":
+            return {
+                "state": "initial",
+                "checkpoint_id": None,
+                "safe_now": True,
+                "reason": None,
+            }
+        if observed is not None and observed["state"] != "initial":
+            return deepcopy(observed)
+        return {
+            "state": instance["status"],
+            "checkpoint_id": None,
+            "safe_now": False,
+            "reason": "SAFE_CHECKPOINT_UNAVAILABLE",
+        }
 
     def _image_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
         validate_identifier(task_id, "task_id")
@@ -1109,6 +1224,7 @@ class InstanceRuntimeSettingsService:
     @staticmethod
     def _diff(
         current: dict[str, Any],
+        current_model_ids: dict[str, str],
         effective: dict[str, Any],
         effective_models: dict[str, str],
     ) -> list[dict[str, Any]]:
@@ -1116,7 +1232,7 @@ class InstanceRuntimeSettingsService:
         changes = []
         for field in RUNTIME_SETTING_FIELDS:
             before = (
-                current["manifest"]["model_bindings"]
+                current_model_ids
                 if field == "advanced_model_overrides"
                 else prior[field]
             )
@@ -1235,6 +1351,28 @@ class InstanceRuntimeSettingsService:
                 {"expected_revision": expected_revision, "actual_revision": actual},
             )
 
+    @staticmethod
+    def _validate_confirmation_saga(
+        saga: dict[str, Any],
+        *,
+        task_id: str,
+        instance_id: str,
+        proposal_id: str,
+        confirm_request_hash: str,
+        idempotency_key: str,
+    ) -> None:
+        if (
+            saga.get("task_id") != task_id
+            or saga.get("instance_id") != instance_id
+            or saga.get("proposal_id") != proposal_id
+            or saga.get("confirm_idempotency_key") != idempotency_key
+            or saga.get("confirm_request_hash") != confirm_request_hash
+        ):
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "The persisted settings confirmation intent is inconsistent.",
+            )
+
     def _proposal_response(self, proposal: dict[str, Any]) -> dict[str, Any]:
         return {
             "schema_version": "2.0",
@@ -1284,13 +1422,26 @@ class InstanceRuntimeSettingsService:
         }
 
     def _pending_projection(self, instance_id: str) -> dict[str, Any] | None:
-        saga = self._pending_saga(instance_id)
-        return None if saga is None else self._saga_response(saga)
+        saga = self._pending_saga(instance_id, include_sync=True)
+        if saga is None:
+            return None
+        projection = self._saga_response(saga)
+        if saga["instance_id"] != instance_id:
+            projection.update(
+                {
+                    "instance_id": instance_id,
+                    "source_instance_id": saga["instance_id"],
+                    "sync_target": True,
+                }
+            )
+        return projection
 
-    def _pending_saga(self, instance_id: str) -> dict[str, Any] | None:
+    def _pending_saga(
+        self, instance_id: str, *, include_sync: bool = False
+    ) -> dict[str, Any] | None:
         candidates = [
             item
-            for item in self._sagas_for_instance(instance_id)
+            for item in self._sagas_for_instance(instance_id, include_sync=include_sync)
             if item["state"] not in _TERMINAL_SAGA_STATES
         ]
         if len(candidates) > 1:

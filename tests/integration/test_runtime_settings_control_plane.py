@@ -165,11 +165,106 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "APPLIED_BEFORE_START")
         self.assertEqual(result["sync_instance_ids"], ["i_image_2"])
+        self.assertTrue(source["scope"]["work_item_id"].startswith("work_"))
+        self.assertNotEqual(source["scope"]["work_item_id"], "s_image")
         for instance_id in ("i_image_1", "i_image_2"):
             current = self.materializer.revisions.read_current(task_id, instance_id)
             self.assertEqual(current["manifest"]["overrides"]["candidate_concurrency"], 2)
             self.assertTrue(current["manifest"]["overrides"]["watermark"])
             self.assertEqual(current["manifest"]["apply_status"], "APPLIED")
+
+    def test_runtime_settings_report_catalog_model_ids_without_false_diff(self) -> None:
+        task_id = self._planned_task("task_model_id_projection")
+        current = self.settings.get(task_id, "i_image_1")
+
+        models = current["values"]["advanced_model_overrides"]
+        self.assertEqual(models["inherited"]["intake_clarify"], "ark-text-primary")
+        self.assertEqual(models["effective"], models["inherited"])
+        proposal = self.settings.propose(
+            task_id,
+            "i_image_1",
+            base_revision=current["revision"]["current"],
+            patch={"watermark": True},
+            sync_unstarted_image_work_items=False,
+            expected_sync_instance_ids=[],
+            envelope=self._settings_envelope(task_id, "propose-model-projection"),
+        )
+        self.assertEqual([item["field"] for item in proposal["diff"]], ["watermark"])
+
+    def test_confirm_rejects_same_idempotency_key_for_a_different_request(self) -> None:
+        task_id = self._planned_task("task_confirm_idempotency")
+        current = self.settings.get(task_id, "i_image_1")
+        proposal = self.settings.propose(
+            task_id,
+            "i_image_1",
+            base_revision=current["revision"]["current"],
+            patch={"watermark": True},
+            sync_unstarted_image_work_items=False,
+            expected_sync_instance_ids=[],
+            envelope=self._settings_envelope(task_id, "propose-confirm-idempotency"),
+        )
+        first = self._settings_envelope(task_id, "confirm-idempotency")
+        self.settings.confirm(
+            task_id,
+            "i_image_1",
+            proposal["proposal_id"],
+            envelope=first,
+        )
+
+        with self.assertRaises(HarnessError) as raised:
+            self.settings.confirm(
+                task_id,
+                "i_image_1",
+                proposal["proposal_id"],
+                envelope=envelope(
+                    first.idempotency_key,
+                    first.expected_revision,
+                    actor_id="another-actor",
+                ),
+            )
+        self.assertEqual(raised.exception.code, "IDEMPOTENCY_CONFLICT")
+
+    def test_persisted_sync_intent_blocks_conflicting_target_proposals(self) -> None:
+        task_id = self._planned_task("task_sync_intent_gate", count=2)
+        source = self.settings.get(task_id, "i_image_1")
+        self.settings.get(task_id, "i_image_2")
+        proposal = self.settings.propose(
+            task_id,
+            "i_image_1",
+            base_revision=source["revision"]["current"],
+            patch={"watermark": True},
+            sync_unstarted_image_work_items=True,
+            expected_sync_instance_ids=["i_image_2"],
+            envelope=self._settings_envelope(task_id, "propose-sync-intent-gate"),
+        )
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_config_saga_persisted":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.settings.confirm(
+                task_id,
+                "i_image_1",
+                proposal["proposal_id"],
+                envelope=self._settings_envelope(task_id, "confirm-sync-intent-gate"),
+                crash_hook=crash,
+            )
+
+        target = self.settings.get(task_id, "i_image_2")
+        self.assertFalse(target["editable"])
+        self.assertTrue(target["pending_application"]["sync_target"])
+        with self.assertRaises(HarnessError) as raised:
+            self.settings.propose(
+                task_id,
+                "i_image_2",
+                base_revision=target["revision"]["current"],
+                patch={"candidate_concurrency": 2},
+                sync_unstarted_image_work_items=False,
+                expected_sync_instance_ids=[],
+                envelope=self._settings_envelope(task_id, "propose-conflicting-target"),
+            )
+        self.assertEqual(raised.exception.code, "SETTINGS_REVISION_CONFLICT")
 
     def test_task_rebase_preserves_overrides_and_stops_at_start_lock(self) -> None:
         task_id = self._planned_task("task_rebase_settings")
@@ -403,6 +498,46 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(recovered["status"], "APPLIED_BEFORE_START")
 
+    def test_startup_recovery_completes_a_persisted_confirmation_intent(self) -> None:
+        task_id = self._planned_task("task_confirm_startup_recovery")
+        base = self.settings.get(task_id, "i_image_1")
+        proposal = self.settings.propose(
+            task_id,
+            "i_image_1",
+            base_revision=base["revision"]["current"],
+            patch={"candidate_concurrency": 3},
+            sync_unstarted_image_work_items=False,
+            expected_sync_instance_ids=[],
+            envelope=self._settings_envelope(task_id, "propose-startup-recovery"),
+        )
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_config_saga_persisted":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.settings.confirm(
+                task_id,
+                "i_image_1",
+                proposal["proposal_id"],
+                envelope=self._settings_envelope(task_id, "confirm-startup-recovery"),
+                crash_hook=crash,
+            )
+
+        recovered = self.settings.recover()
+
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(
+            recovered[0]["result"]["status"], "APPLIED_BEFORE_START"
+        )
+        replay = self.settings.confirm(
+            task_id,
+            "i_image_1",
+            proposal["proposal_id"],
+            envelope=self._settings_envelope(task_id, "confirm-startup-recovery"),
+        )
+        self.assertEqual(replay["status"], "APPLIED_BEFORE_START")
+
     def test_local_application_recovers_pointer_before_instance_projection(self) -> None:
         task_id = self._planned_task("task_local_projection_recovery")
         base = self.settings.get(task_id, "i_image_1")
@@ -504,7 +639,7 @@ class RuntimeSettingsApiTests(unittest.TestCase):
                     "/api/v1/instances/i_image_1/runtime-setting-proposals",
                     json={
                         "base_revision": revision,
-                        "patch": {"watermark": True},
+                        "overrides": {"watermark": True},
                         "sync_unstarted_image_work_items": False,
                         "expected_sync_instance_ids": [],
                         "envelope": self._body_envelope("runtime-api-propose", task_revision),
