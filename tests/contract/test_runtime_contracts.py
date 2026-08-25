@@ -6,6 +6,7 @@ from pathlib import Path
 
 from harness.contracts import ContractRegistry
 from harness.core.errors import HarnessError
+from harness.storage.atomic import digest_json
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -85,3 +86,145 @@ class RuntimeContractTests(unittest.TestCase):
             self.registry.validate("main-task", {})
         self.assertEqual(captured.exception.code, "VALIDATION_ERROR")
         self.assertEqual(captured.exception.details["schema"], "main-task.schema.json")
+
+    def test_registry_dispatches_versioned_configuration_revision_contracts(self) -> None:
+        created_at = "2026-08-25T03:00:00Z"
+        task_body = {
+            "provider_ids": ["ark"],
+            "model_list": {"schema_version": "1.0", "models": []},
+            "runtime": {"schema_version": "1.0", "image_agent": {}},
+        }
+        task_revision = {
+            "schema_version": "2.0",
+            "task_id": "task_contract",
+            "revision_id": "task-config-r000001",
+            "parent_revision_id": None,
+            "source_system_revision": "cfg_contract",
+            **task_body,
+            "config_hash": digest_json(task_body),
+            "created_by": {"type": "system", "id": "contract_test"},
+            "created_at": created_at,
+        }
+        task_state = {
+            "schema_version": "2.0",
+            "task_id": "task_contract",
+            "current_revision_id": "task-config-r000001",
+            "source_system_revision": "cfg_contract",
+            "locked_at": None,
+            "locked_reason": None,
+            "revision": 1,
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+        self.registry.validate("task-config-revision", task_revision)
+        self.registry.validate("task-config-state", task_state)
+
+        effective_runtime = {
+            "question_preference": "proactive",
+            "max_auto_questions": 3,
+            "clarification_total_budget": 10,
+            "candidate_concurrency": 5,
+            "default_output_size": "2560x1440",
+            "response_format": "url",
+            "watermark": False,
+            "self_check": {
+                "termination": "solo",
+                "fixed_rounds": 2,
+                "max_rounds": 4,
+                "stop_early_on_pass": False,
+            },
+        }
+        manifest = {
+            "schema_version": "2.0",
+            "task_id": "task_contract",
+            "instance_id": "instance_contract",
+            "revision_id": "cfg-inst-r000001",
+            "parent_revision_id": None,
+            "task_config_revision_id": "task-config-r000001",
+            "overrides": {},
+            "effective_runtime": effective_runtime,
+            "model_bindings": {
+                "intake_clarify": "text-model",
+                "confirmation_build": "text-model",
+                "initial_candidate_generation": "image-model",
+                "self_check_inspection": "vision-model",
+                "self_check_rework": "image-model",
+                "human_prompt_rework": "image-model",
+            },
+            "runtime_sha256": "a" * 64,
+            "model_config_sha256": "b" * 64,
+            "config_hash": "c" * 64,
+            "created_by": {"type": "system", "id": "contract_test"},
+            "created_at": created_at,
+            "confirmed_at": created_at,
+            "apply_mode": "before_start",
+            "apply_status": "APPLIED",
+            "branch_id": None,
+            "checkpoint_id": None,
+            "effective_from_state": "initial",
+        }
+        state = {
+            "schema_version": "2.0",
+            "task_id": "task_contract",
+            "instance_id": "instance_contract",
+            "current_revision_id": "cfg-inst-r000001",
+            "pending_revision_id": None,
+            "revision": 1,
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+        self.registry.validate("instance-runtime-config-manifest", manifest)
+        self.registry.validate("instance-runtime-config-state", state)
+
+    def test_runtime_revision_contract_rejects_unregistered_override_fields(self) -> None:
+        manifest = self._valid_manifest()
+        manifest["overrides"] = {"offline_mode": True}
+        with self.assertRaises(HarnessError) as captured:
+            self.registry.validate("instance-runtime-config-manifest", manifest)
+        self.assertEqual(captured.exception.code, "VALIDATION_ERROR")
+
+    @staticmethod
+    def _valid_manifest() -> dict[str, object]:
+        return {
+            "schema_version": "2.0",
+            "task_id": "task_contract",
+            "instance_id": "instance_contract",
+            "revision_id": "cfg-inst-r000001",
+            "parent_revision_id": None,
+            "task_config_revision_id": "task-config-r000001",
+            "overrides": {},
+            "effective_runtime": {
+                "question_preference": "proactive",
+                "max_auto_questions": 3,
+                "clarification_total_budget": 10,
+                "candidate_concurrency": 5,
+                "default_output_size": "2560x1440",
+                "response_format": "url",
+                "watermark": False,
+                "self_check": {
+                    "termination": "solo",
+                    "fixed_rounds": 2,
+                    "max_rounds": 4,
+                    "stop_early_on_pass": False,
+                },
+            },
+            "model_bindings": {state: "model" for state in (
+                "intake_clarify",
+                "confirmation_build",
+                "initial_candidate_generation",
+                "self_check_inspection",
+                "self_check_rework",
+                "human_prompt_rework",
+            )},
+            "runtime_sha256": "a" * 64,
+            "model_config_sha256": "b" * 64,
+            "config_hash": "c" * 64,
+            "created_by": {"type": "system", "id": "contract_test"},
+            "created_at": "2026-08-25T03:00:00Z",
+            "confirmed_at": "2026-08-25T03:00:00Z",
+            "apply_mode": "before_start",
+            "apply_status": "APPLIED",
+            "branch_id": None,
+            "checkpoint_id": None,
+            "effective_from_state": "initial",
+        }

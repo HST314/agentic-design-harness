@@ -11,6 +11,8 @@
 | TokenUsageEvent | `1.1` | `1.0`、`1.1` |
 | DeliveryBundleCandidate | `1.0` | `1.0` |
 | BundleManifest | `1.0` | `1.0` |
+| TaskConfigState / TaskConfigRevision | `2.0` | `2.0` |
+| InstanceRuntimeConfigState / InstanceRuntimeConfigManifest | `2.0` | `2.0` |
 
 机器可读事实源为 `contracts/v1/catalogs/schema-versions.json`。API 路径版本 `/api/v1` 与对象的 `schema_version` 相互独立；每个跨边界根对象必须声明自己的版本。
 
@@ -45,6 +47,8 @@ python scripts/generate_frontend_contracts.py --check
 - 滚动升级固定“先消费者、后生产者”：先部署同时支持旧/新版本的消费者，再允许生产者写新版本。
 
 TaskCard 1.1 在 1.0 基础上增加 Image 的 `usage_context`、`category_id` 和 `category_version` 可选参数；TokenUsageEvent 1.1 增加 Provider、调用类型、request ID、原始 usage 和非 Token 计费单位。不能把图片计费单位估算成文本 Token。
+
+配置修订对象从 `2.0` 起独立版本化：主任务修订只保存 Provider ID、模型清单和运行配置，不保存 Provider URL、凭据或绝对路径；实例 manifest 只接受明确的安全字段白名单，并通过双文件 SHA-256 与总配置哈希固定不可变内容。业务对象仍保持各自现行版本，不因配置修订对象采用 `2.0` 而整体升级。
 
 ## 跨对象不变量
 
