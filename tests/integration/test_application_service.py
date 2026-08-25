@@ -24,7 +24,9 @@ from harness.services.agent_config_materialization import ImageAgentConfigMateri
 from harness.services.application import HarnessApplicationService
 from harness.services.approvals import ApprovalInboxService
 from harness.services.assets import AssetService
+from harness.services.instance_runtime_settings import InstanceRuntimeSettingsService
 from harness.services.process_runtime import AgentRuntimeArtifact, ProcessSpec
+from harness.services.runtime_config_observability import RuntimeConfigObservability
 from harness.services.supervisor import ProcessSupervisor
 from harness.services.task_config import TaskConfigService
 from harness.storage.atomic import read_json
@@ -123,6 +125,13 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.supervisor = ProcessSupervisor(self.store, self.commands, self.image_config)
         self.fake_adapter = FakeImageAdapter()
         self.adapters = AdapterRegistry([self.fake_adapter, PptAgentContractAdapter()])
+        self.runtime_settings = InstanceRuntimeSettingsService(
+            self.store,
+            self.task_config,
+            self.image_config,
+            self.adapters,
+            RuntimeConfigObservability(self.store),
+        )
         self.application = HarnessApplicationService(
             self.store,
             self.commands,
@@ -130,6 +139,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             self.approvals,
             self.supervisor,
             self.adapters,
+            self.task_config,
+            self.runtime_settings,
         )
         self.read_only_artifacts: list[Path] = []
 
@@ -377,6 +388,9 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             )
         plan = self.store.plan.get("t_confirm_recovery", "t_confirm_recovery")
         self.assertEqual(plan["task"]["status"], "AWAITING_START_CONFIRMATION")
+        locked = self.task_config.get_current("t_confirm_recovery")["state"]
+        self.assertEqual(locked["locked_reason"], "launch_intent_accepted")
+        self.assertIsNotNone(locked["locked_at"])
         recovered = self.application.recover()
         self.assertEqual(recovered[0]["status"], "RECOVERED")
         self.assertEqual(len(self.fake_adapter.start_calls), 1)

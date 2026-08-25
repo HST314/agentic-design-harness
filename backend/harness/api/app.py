@@ -31,13 +31,16 @@ from ..services.approvals import ApprovalInboxService
 from ..services.asset_tools import AssetToolRegistry
 from ..services.asset_understanding import AssetUnderstandingService
 from ..services.assets import AssetService
+from ..services.instance_runtime_settings import InstanceRuntimeSettingsService
 from ..services.master_orchestrator import MasterOrchestrator
 from ..services.master_threads import MasterThreadService
 from ..services.model_clients import ModelClientFactory, OpenAICompatibleProviderAdapter
 from ..services.plan_proposals import PlanProposalValidationService
 from ..services.retry_budget import RetryBudgetService
+from ..services.runtime_config_observability import RuntimeConfigObservability
 from ..services.supervisor import ProcessSupervisor
 from ..services.task_config import TaskConfigService
+from ..services.task_config_rebase import TaskConfigRebaseService
 from ..services.task_intakes import TaskIntakeService
 from ..services.usage import UsageService
 from ..services.work_item_projections import WorkItemProjectionService
@@ -57,6 +60,8 @@ class Container:
     plan_proposals: PlanProposalValidationService
     task_config: TaskConfigService
     image_agent_config: ImageAgentConfigMaterializer
+    runtime_settings: InstanceRuntimeSettingsService
+    task_config_rebase: TaskConfigRebaseService
     approvals: ApprovalInboxService
     usage: UsageService
     retry_budgets: RetryBudgetService
@@ -161,6 +166,20 @@ def build_container(
         host=settings.host,
     )
     adapters = AdapterRegistry([image_adapter, PptAgentContractAdapter()])
+    runtime_config_observability = RuntimeConfigObservability(store)
+    runtime_settings = InstanceRuntimeSettingsService(
+        store,
+        task_config,
+        image_agent_config,
+        adapters,
+        runtime_config_observability,
+    )
+    task_config_rebase = TaskConfigRebaseService(
+        store,
+        task_config,
+        image_agent_config,
+        runtime_config_observability,
+    )
 
     application = HarnessApplicationService(
         store,
@@ -169,6 +188,8 @@ def build_container(
         approvals,
         supervisor,
         adapters,
+        task_config,
+        runtime_settings,
     )
     task_intakes = TaskIntakeService(store, commands, assets, task_config)
     master_orchestrator = MasterOrchestrator(
@@ -207,6 +228,8 @@ def build_container(
         plan_proposals=plan_proposals,
         task_config=task_config,
         image_agent_config=image_agent_config,
+        runtime_settings=runtime_settings,
+        task_config_rebase=task_config_rebase,
         approvals=approvals,
         usage=usage,
         retry_budgets=retry_budgets,
@@ -314,6 +337,7 @@ def create_app(
         )
         master_recoveries = container.master_threads.recover()
         adapter_recoveries = recover_adapters(container)
+        runtime_config_recoveries = container.runtime_settings.recover()
         container.supervisor.start_monitoring()
         container.application.start_monitoring()
         container.master_threads.start_monitoring()
@@ -330,6 +354,7 @@ def create_app(
                     "master_recovery_count": len(master_recoveries),
                     "process_recovery_count": len(process_recoveries),
                     "adapter_recovery_count": len(adapter_recoveries),
+                    "runtime_config_recovery_count": len(runtime_config_recoveries),
                     "control_plane_status": container.status,
                 }
             },

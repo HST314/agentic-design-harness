@@ -26,6 +26,22 @@ TaskCard 由 Master 生成并在主系统审阅。Image Agent 受管页面不显
 
 React 的 WorkItem 页面只请求 `GET /api/v1/instances/{instance_id}/ui-link`。服务端验证任务归属、当前实例、端口 allowlist、HTML 响应和 frame 策略；不合法 URL 返回稳定错误，不生成空白或任意 iframe。
 
+## 运行配置控制面
+
+Harness 是实例运行配置的唯一控制面。任务创建时冻结无秘密的任务配置 revision；首个持久启动意图与系统默认 rebase 共用任务锁，意图一旦被接受便锁定任务基线。系统默认发布只 rebase 从未启动的任务，并为其未启动 Image 实例生成新 revision；实例覆盖原样保留。若模型已从当前批准列表移除，任务进入 `CONFIG_REVIEW_REQUIRED`，不得静默清除覆盖。
+
+实例查询、预览与确认入口为：
+
+- `GET /api/v1/instances/{instance_id}/runtime-settings`；
+- `POST /api/v1/instances/{instance_id}/runtime-setting-proposals`；
+- `POST /api/v1/instances/{instance_id}/runtime-setting-proposals/{proposal_id}/confirm`。
+
+proposal 的 `overrides` 只接受白名单业务字段，请求同时携带实例 base revision、任务 expected revision 与幂等键。显式同步未启动 Image 工作项时，客户端必须回传预览得到的完整实例 ID 集合；确认会在任务锁内重新计算并逐一校验 base，集合变化返回 `SYNC_SCOPE_CHANGED`，不会部分同步。
+
+未启动实例确认后直接切换本地不可变 revision，返回 `APPLIED_BEFORE_START`。已运行实例只在 Image Agent 报告“无活动 job、无未决事务、无未知模型调用结果、存在有效 checkpoint”时应用；否则返回 HTTP 202 和 `WAITING_SAFE_POINT`。安全应用使用 `CONFIRMED → MATERIALIZED → CHILD_BRANCH_CREATED → INSTANCE_POINTER_COMMITTED → APPLIED` saga，远端分支调用不持有任务锁，恢复时以同一幂等键重放。Harness 只在验证 branch/checkpoint/config hash receipt 后切换实例指针；任一摘要或归属不一致均失败关闭。
+
+运行时 revision 位于实例 `runtime-config/revisions/`，`state.json` 只保存当前及待应用指针，远端应用 receipt 单独不可变保存。Provider Key 与 URL 不进入 revision、proposal、saga、事件或 API 响应；启动时才从进程配置解析到子进程环境。
+
 ## 分支级双资产交付
 
 每个冻结分支生成稳定 `bundle_id`，并形成私有 `DeliveryBundleCandidate`：最终图片、`design-note.md`、branch、checkpoint、TaskCard revision 以及两份文件的 MIME、大小和 SHA-256。不同分支不会互相覆盖；同一分支内容变化会形成新候选。

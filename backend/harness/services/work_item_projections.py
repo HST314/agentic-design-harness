@@ -20,6 +20,62 @@ _TODO_STATUSES = {"CREATED", "PENDING", "READY", "AWAITING_START_CONFIRMATION"}
 _COMPLETE_STATUSES = {"SUCCEEDED", "SKIPPED", "SUPERSEDED", "ARCHIVED"}
 
 
+def logical_work_items(
+    store: FileStateStore,
+    task_id: str,
+    plan: dict[str, Any],
+    stages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve the canonical WorkItem identities for one saved plan."""
+
+    confirmed = [
+        item
+        for item in store.plan_proposal.list(task_id)
+        if item["status"] == "CONFIRMED"
+        and item["revision"] == plan["task"]["plan_revision"]
+    ]
+    if confirmed:
+        latest = max(confirmed, key=lambda item: (item["revision"], item["updated_at"]))
+        return deepcopy(latest["work_items"])
+
+    # API-created legacy plans predate WorkItem. Each immutable execution card
+    # receives a deterministic logical identity so retries never duplicate it.
+    raw_items: list[dict[str, Any]] = []
+    for card in plan["task_cards"]:
+        identifier = hashlib.sha256(card["card_id"].encode("utf-8")).hexdigest()[:24]
+        raw_items.append(
+            {
+                "schema_version": "1.0",
+                "work_item_id": f"work_{identifier}",
+                "task_id": task_id,
+                "stage_id": card["stage_id"],
+                "title": card["objective"],
+                "agent_type": card["agent_type"],
+                "required": next(
+                    item["required"]
+                    for item in plan["instances"]
+                    if item["instance_id"] == card["instance_id"]
+                ),
+                "depends_on": [],
+                "current_instance_id": card["instance_id"],
+                "instance_ids": [card["instance_id"]],
+                "task_card_ids": [card["card_id"]],
+            }
+        )
+    items_by_stage: dict[str, list[str]] = {}
+    for item in raw_items:
+        items_by_stage.setdefault(item["stage_id"], []).append(item["work_item_id"])
+    stage_by_id = {item["stage_id"]: item for item in stages}
+    for item in raw_items:
+        stage = stage_by_id[item["stage_id"]]
+        item["depends_on"] = [
+            dependency_item
+            for dependency_stage in stage["depends_on"]
+            for dependency_item in items_by_stage.get(dependency_stage, [])
+        ]
+    return raw_items
+
+
 class WorkItemProjectionService:
     """Build a stable logical-card read model without writing domain state."""
 
@@ -96,52 +152,7 @@ class WorkItemProjectionService:
         plan: dict[str, Any],
         stages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        confirmed = [
-            item
-            for item in self.store.plan_proposal.list(task_id)
-            if item["status"] == "CONFIRMED"
-            and item["revision"] == plan["task"]["plan_revision"]
-        ]
-        if confirmed:
-            latest = max(confirmed, key=lambda item: (item["revision"], item["updated_at"]))
-            return deepcopy(latest["work_items"])
-
-        # API-created legacy plans predate WorkItem. Each immutable execution card
-        # receives a deterministic logical identity so retries never duplicate it.
-        raw_items: list[dict[str, Any]] = []
-        for card in plan["task_cards"]:
-            identifier = hashlib.sha256(card["card_id"].encode("utf-8")).hexdigest()[:24]
-            raw_items.append(
-                {
-                    "schema_version": "1.0",
-                    "work_item_id": f"work_{identifier}",
-                    "task_id": task_id,
-                    "stage_id": card["stage_id"],
-                    "title": card["objective"],
-                    "agent_type": card["agent_type"],
-                    "required": next(
-                        item["required"]
-                        for item in plan["instances"]
-                        if item["instance_id"] == card["instance_id"]
-                    ),
-                    "depends_on": [],
-                    "current_instance_id": card["instance_id"],
-                    "instance_ids": [card["instance_id"]],
-                    "task_card_ids": [card["card_id"]],
-                }
-            )
-        items_by_stage: dict[str, list[str]] = {}
-        for item in raw_items:
-            items_by_stage.setdefault(item["stage_id"], []).append(item["work_item_id"])
-        stage_by_id = {item["stage_id"]: item for item in stages}
-        for item in raw_items:
-            stage = stage_by_id[item["stage_id"]]
-            item["depends_on"] = [
-                dependency_item
-                for dependency_stage in stage["depends_on"]
-                for dependency_item in items_by_stage.get(dependency_stage, [])
-            ]
-        return raw_items
+        return logical_work_items(self.store, task_id, plan, stages)
 
     def _project_item(
         self,

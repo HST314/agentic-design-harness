@@ -5,11 +5,14 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 from harness.core.config_kernel import ConfigSnapshot
+from harness.core.errors import HarnessError
 from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.task_config import TaskConfigService
+from harness.storage.locks import FileLock
 from runtime_helpers import build_config_snapshot, build_service, create_task
 
 
@@ -48,26 +51,41 @@ class ImageAgentConfigMaterializerTests(unittest.TestCase):
             / "i_image_config"
             / "runtime-config"
         )
-        self.assertEqual(result["runtime_path"], expected_root / "runtime.yaml")
-        self.assertEqual(result["model_config_path"], expected_root / "model_config.yaml")
+        revision_root = expected_root / "revisions" / "cfg-inst-r000001"
+        self.assertEqual(result["runtime_path"], revision_root / "runtime.yaml")
+        self.assertEqual(result["model_config_path"], revision_root / "model_config.yaml")
+        self.assertEqual(result["config_root"], expected_root)
         runtime = self._yaml(result["runtime_path"])
         model_config = self._yaml(result["model_config_path"])
         bindings = {item["state"]: item for item in model_config["state_bindings"]}
 
         self.assertEqual(runtime["question_preference"], "blocking_only")
         self.assertEqual(runtime["candidate_concurrency"], 4)
-        self.assertFalse(runtime["offline_mode"])
-        self.assertEqual(runtime["self_check"], {"release": "manual"})
+        self.assertNotIn("offline_mode", runtime)
+        self.assertEqual(
+            runtime["self_check"],
+            {
+                "termination": "solo",
+                "fixed_rounds": 2,
+                "max_rounds": 4,
+                "stop_early_on_pass": False,
+            },
+        )
         self.assertEqual(bindings["intake_clarify"]["model"], "text-model")
         self.assertEqual(bindings["confirmation_build"]["model"], "text-model-alt")
         self.assertEqual(bindings["initial_candidate_generation"]["model"], "image-model")
         self.assertEqual(bindings["self_check_inspection"]["model"], "vision-model-alt")
         self.assertEqual(bindings["self_check_rework"]["model"], "image-model-alt")
         self.assertEqual(bindings["human_prompt_rework"]["model"], "image-model")
-        self.assertEqual(runtime["source_config_revision"], snapshot.revision)
-        self.assertEqual(model_config["source_config_revision"], snapshot.revision)
-        self.assertEqual(runtime["config_hash"], model_config["config_hash"])
-        self.assertEqual(runtime["generated_at"], model_config["generated_at"])
+        self.assertEqual(
+            result["manifest"]["model_bindings"],
+            {state: binding["model"] for state, binding in bindings.items()},
+        )
+        self.assertEqual(result["source_config_revision"], snapshot.revision)
+        self.assertEqual(result["task_config_revision_id"], "task-config-r000001")
+        self.assertEqual(result["runtime_config_revision_id"], "cfg-inst-r000001")
+        self.assertNotIn("source_config_revision", runtime)
+        self.assertNotIn("config_hash", model_config)
         if os.name != "nt":
             self.assertEqual(result["runtime_path"].stat().st_mode & 0o777, 0o400)
             self.assertEqual(result["model_config_path"].stat().st_mode & 0o777, 0o400)
@@ -126,9 +144,88 @@ class ImageAgentConfigMaterializerTests(unittest.TestCase):
             / "tasks"
             / "t_image_config"
             / "master"
+            / "config"
         )
-        self.assertTrue((snapshot_root / "config-snapshot.json").is_file())
-        self.assertEqual(list(snapshot_root.glob(".config-snapshot.json.*.tmp")), [])
+        self.assertTrue((snapshot_root / "state.json").is_file())
+        self.assertTrue(
+            (snapshot_root / "revisions" / "task-config-r000001.json").is_file()
+        )
+        self.assertEqual(list(snapshot_root.glob(".state.json.*.tmp")), [])
+
+    def test_instance_revision_is_materialized_once_under_concurrent_reads(self) -> None:
+        service = TaskConfigService(self.store, build_config_snapshot())
+        materializer = ImageAgentConfigMaterializer(self.store, service)
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(
+                executor.map(
+                    lambda _: materializer.materialize(
+                        "t_image_config", "i_image_concurrent"
+                    ),
+                    range(16),
+                )
+            )
+
+        self.assertEqual(
+            {item["runtime_config_revision_id"] for item in results},
+            {"cfg-inst-r000001"},
+        )
+        self.assertEqual(len({item["config_hash"] for item in results}), 1)
+
+    def test_concurrent_initialization_timeout_reuses_the_committed_winner(self) -> None:
+        service = TaskConfigService(self.store, build_config_snapshot())
+        materializer = ImageAgentConfigMaterializer(self.store, service)
+        expected = materializer.materialize(
+            "t_image_config", "i_image_concurrent_winner"
+        )
+        committed = materializer.revisions.read_current(
+            "t_image_config", "i_image_concurrent_winner"
+        )
+        self.assertIsNotNone(committed)
+
+        with (
+            patch.object(
+                materializer.revisions,
+                "read_current",
+                side_effect=[None, committed],
+            ),
+            patch.object(
+                FileLock,
+                "acquire",
+                side_effect=HarnessError(
+                    "REVISION_CONFLICT", "Synthetic concurrent lock timeout."
+                ),
+            ),
+        ):
+            actual = materializer.materialize(
+                "t_image_config", "i_image_concurrent_winner"
+            )
+
+        self.assertEqual(actual, expected)
+
+    def test_task_pin_timeout_reuses_the_committed_winner(self) -> None:
+        service = TaskConfigService(self.store, build_config_snapshot())
+        expected = service.get_public("t_image_config")
+        committed = service.revisions.read_current("t_image_config")
+        self.assertIsNotNone(committed)
+
+        with (
+            patch.object(
+                service.revisions,
+                "read_current",
+                side_effect=[None, None, committed],
+            ),
+            patch.object(
+                service.revisions,
+                "commit",
+                side_effect=HarnessError(
+                    "REVISION_CONFLICT", "Synthetic concurrent lock timeout."
+                ),
+            ),
+        ):
+            actual = service.get_public("t_image_config")
+
+        self.assertEqual(actual, expected)
 
     def _snapshot_with_overrides(self) -> ConfigSnapshot:
         raw = build_config_snapshot().model_dump(mode="json")

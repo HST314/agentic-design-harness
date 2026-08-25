@@ -37,6 +37,16 @@ class ApplicationDeliveryMixin:
             return {"instance": instance, "observation": None, "transition": None}
         adapter = self.adapters.get(instance["agent_type"])
         observation = adapter.get_status(instance_id)
+        config_application = None
+        if instance["agent_type"] == "image":
+            config_application = self.runtime_settings.apply_pending_if_safe(
+                task_id, instance_id
+            )
+            if (
+                config_application is not None
+                and config_application["status"] == "APPLIED_ON_BRANCH"
+            ):
+                observation = adapter.get_status(instance_id)
         if observation.status not in {"RUNNING", "WAITING_APPROVAL", "FAILED"}:
             raise HarnessError(
                 "VALIDATION_ERROR",
@@ -68,6 +78,7 @@ class ApplicationDeliveryMixin:
                 "transition": delivery["transition"],
                 "approval": None,
                 "delivery": delivery,
+                "config_application": config_application,
             }
         transition = None
         if observation.status != instance["status"]:
@@ -139,6 +150,7 @@ class ApplicationDeliveryMixin:
             },
             "transition": transition,
             "approval": approval,
+            "config_application": config_application,
         }
 
     def resolve_approval(
@@ -165,6 +177,17 @@ class ApplicationDeliveryMixin:
         }
         request_sha256 = digest_json(request)
         intent_path = self._intent_path(operation_id)
+        if decision == "APPROVED":
+            application = self.runtime_settings.apply_pending_if_safe(
+                task_id,
+                initial_approval["approval"]["instance_id"],
+            )
+            if application is not None and application["status"] == "WAITING_SAFE_POINT":
+                raise HarnessError(
+                    "SAFE_CHECKPOINT_UNAVAILABLE",
+                    "The pending runtime configuration is not yet safe to apply.",
+                    {"proposal_id": application["proposal_id"]},
+                )
         with (
             FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
             FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
@@ -236,6 +259,10 @@ class ApplicationDeliveryMixin:
                 atomic_write_json(intent_path, intent)
                 if crash_hook:
                     crash_hook("after_approval_intent")
+            if decision == "APPROVED" and intent["advance"] is None:
+                self.runtime_settings.assert_no_pending_advance(
+                    task_id, intent["instance_id"]
+                )
             return self._resume_approval(intent_path, crash_hook)
 
     def publish_delivery_and_complete(

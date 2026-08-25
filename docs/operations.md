@@ -24,6 +24,8 @@ python3 scripts/dev.py start
 
 启动时会在 writer lease 和业务写入之前核对 Image Agent revision、源码与依赖锁集合，并使用实际运行解释器验证包名/版本、可导入性和导入路径；实际依赖内容摘要用于缓存身份、变化检测和只读制品校验。Image 环境校验失败时记录 `IMAGE_RUNTIME_ATTESTATION_FAILED`，控制面继续恢复并以 `degraded` 就绪，仅禁用 Image Adapter；不得通过跳过 lock、改写摘要或直接从可变源码启动 Image 任务。
 
+启动恢复还会扫描未完成的运行配置 saga。`WAITING_SAFE_POINT` 是正常等待状态：应先观察实例推进到无活动 job 的 checkpoint，控制面会在实例观察或下一次批准推进前重试。`FAILED`、`CONFIG_INTEGRITY_FAILED`、`INSTANCE_CONFIG_LOCKED` 需要人工核对 revision、Image 分支与 checkpoint，不能通过编辑 `state.json`、复制 YAML 或重复发送不同幂等键绕过。`GET /api/v1/runtime-settings/metrics` 提供 rebase 结果、同步范围变化、分支创建失败、摘要不一致、确认到应用延迟以及最早等待时间；对应配置事件也出现在任务公开审计流中，且不包含凭据。
+
 计划确认只提交持久化 Start Operation，不在 Master 请求锁内等待进程就绪。后台执行器按 `QUEUED → RUNNING → COMMITTED` 推进；逐实例阶段可从 `PREPARING`、`PROCESS_STARTING`、`AGENT_STARTING` 到 `RUNNING`。重启会迁移旧 `PREPARED` 意图并从已持久化副作用边界恢复，不重复发送已接受的启动命令。
 
 ## 状态与文件布局
@@ -43,7 +45,7 @@ python3 scripts/dev.py start
 2. 在同一备份 revision 中复制两个根目录，保留权限、符号链接语义和时间信息。
 3. 记录主仓 commit、Image Agent lock 摘要以及三份根 YAML 的摘要；秘密另按安全流程备份。
 4. 恢复到空目录，并使用匹配的代码、依赖和 Image lock 启动。
-5. 启动会截断不完整 NDJSON 尾部、重建投影与索引、恢复 usage cursor、对账 publication intent 与 Start Operation，并观察活动 Agent，而不重放已接受的副作用命令。
+5. 启动会截断不完整 NDJSON 尾部、重建投影与索引、恢复 usage cursor、对账 publication intent、Start Operation 与运行配置 saga，并观察活动 Agent；只以原幂等键恢复已记录副作用。
 6. 检查 `recovery-warnings.ndjson`、`readyz`、任务事件、实例 job ID 和 BundleManifest 可见性。
 
 不要通过重新发送 start、advance、approval 或 delivery confirm 来“修复”恢复；这可能制造重复副作用。恢复 warning 需要先定位数据与代码身份，再决定恢复备份或使用专用幂等入口。

@@ -79,9 +79,10 @@ class ApplicationPlanningMixin:
             return self._start_operation_summary(intent)
         if intent["state"] == "RETRYABLE_FAILED":
             return self._start_operation_summary(intent)
+        task_id = intent["request"]["task_id"]
+        self.task_config.lock_for_start(task_id)
         self._confirm_start_intent(intent_path)
         intent = read_json(intent_path)
-        task_id = intent["request"]["task_id"]
         plan = self._plan(task_id)
         if plan["task"]["status"] not in {"RUNNING", "BLOCKED_UNAVAILABLE", "FAILED"}:
             raise HarnessError(
@@ -175,6 +176,8 @@ class ApplicationPlanningMixin:
                 {"instance_id": instance_id},
             )
         self._require_valid_card(adapter, cast(TaskCard, card))
+        if instance["agent_type"] == "image":
+            self.runtime_settings.ensure_before_start_locked(task_id, instance_id)
         spec = adapter.prepare(
             PrepareRequest(
                 instance=cast(AgentInstanceSnapshot, deepcopy(instance)),

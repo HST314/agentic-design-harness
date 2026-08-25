@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import HarnessError
-from .atomic import atomic_write_json, canonical_json_bytes, canonical_yaml_bytes, digest_json
+from .atomic import (
+    atomic_write_bytes,
+    atomic_write_json,
+    canonical_json_bytes,
+    canonical_yaml_bytes,
+    digest_json,
+)
 from .config_revision_io import (
     CrashHook,
     ensure_private_directory,
@@ -97,6 +103,7 @@ class InstanceConfigRevisionStore:
         *,
         expected_revision: int,
         updated_at: str,
+        applied_receipt: dict[str, Any] | None = None,
         crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
         self._validate_scope(task_id, instance_id)
@@ -112,11 +119,19 @@ class InstanceConfigRevisionStore:
                 )
             target = self.read_revision(task_id, instance_id, revision_id)
             manifest = target["manifest"]
-            if manifest["apply_status"] != "APPLIED":
+            if manifest["apply_status"] != "APPLIED" and applied_receipt is None:
                 raise HarnessError(
                     "INVALID_STATE_TRANSITION",
                     "Only an applied configuration revision may become current.",
                     {"revision_id": revision_id},
+                )
+            if applied_receipt is not None:
+                self._validate_application_receipt(manifest, applied_receipt)
+                self.record_application(
+                    task_id,
+                    instance_id,
+                    revision_id,
+                    applied_receipt,
                 )
             expected_parent = None if current is None else current["manifest"]["revision_id"]
             if manifest["parent_revision_id"] != expected_parent:
@@ -143,6 +158,111 @@ class InstanceConfigRevisionStore:
             invoke_crash_hook(crash_hook, "after_instance_state_published")
             return state
 
+    def set_pending(
+        self,
+        task_id: str,
+        instance_id: str,
+        revision_id: str,
+        *,
+        expected_revision: int,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        """CAS the single pending revision without changing the active pointer."""
+
+        self._validate_scope(task_id, instance_id)
+        validate_identifier(revision_id, "revision_id")
+        with FileLock(self._lock_path(task_id, instance_id), self.store.lock_timeout_seconds):
+            current = self.read_current(task_id, instance_id)
+            if current is None:
+                raise HarnessError(
+                    "CONFIG_INTEGRITY_FAILED",
+                    "A pending revision requires an active instance baseline.",
+                )
+            state = current["state"]
+            if int(state["revision"]) != expected_revision:
+                raise HarnessError(
+                    "SETTINGS_REVISION_CONFLICT",
+                    "The instance configuration state changed after it was read.",
+                    {
+                        "expected_revision": expected_revision,
+                        "actual_revision": int(state["revision"]),
+                    },
+                )
+            existing = state.get("pending_revision_id")
+            if existing not in {None, revision_id}:
+                raise HarnessError(
+                    "SETTINGS_REVISION_CONFLICT",
+                    "Another runtime configuration revision is already pending.",
+                    {"pending_revision_id": existing},
+                )
+            self.read_revision(task_id, instance_id, revision_id)
+            if existing == revision_id:
+                return deepcopy(state)
+            updated = {
+                **state,
+                "pending_revision_id": revision_id,
+                "revision": expected_revision + 1,
+                "updated_at": updated_at,
+            }
+            self.store.contracts.validate("instance-runtime-config-state", updated)
+            validate_public_config_tree(updated)
+            atomic_write_json(self._state_path(task_id, instance_id), updated, mode=0o640)
+            return deepcopy(updated)
+
+    def record_application(
+        self,
+        task_id: str,
+        instance_id: str,
+        revision_id: str,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Publish the immutable local receipt for a remote branch application."""
+
+        self._validate_scope(task_id, instance_id)
+        validate_identifier(revision_id, "revision_id")
+        manifest = self.read_revision(task_id, instance_id, revision_id)["manifest"]
+        self._validate_application_receipt(manifest, receipt)
+        document = {
+            "schema_version": "1.0",
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "revision_id": revision_id,
+            "branch_id": receipt["branch_id"],
+            "checkpoint_id": receipt["checkpoint_id"],
+            "from_checkpoint": receipt["from_checkpoint"],
+            "effective_from_state": receipt["effective_from_state"],
+            "config_hash": receipt["config_hash"],
+            "applied_at": receipt["applied_at"],
+        }
+        validate_public_config_tree(document)
+        root = self._applications_root(task_id, instance_id)
+        ensure_private_directory(root)
+        path = root / f"{revision_id}.json"
+        content = canonical_json_bytes(document) + b"\n"
+        if path.exists():
+            if read_regular_bytes(path, trusted_root=root) != content:
+                raise HarnessError(
+                    "CONFIG_INTEGRITY_FAILED",
+                    "The runtime configuration application receipt changed after publication.",
+                    {"revision_id": revision_id},
+                )
+            return document
+        atomic_write_bytes(path, content, mode=0o440)
+        return document
+
+    def read_application(
+        self, task_id: str, instance_id: str, revision_id: str
+    ) -> dict[str, Any] | None:
+        path = self._applications_root(task_id, instance_id) / f"{revision_id}.json"
+        if not path.exists():
+            return None
+        document = read_json_object(
+            path, trusted_root=self._applications_root(task_id, instance_id)
+        )
+        manifest = self.read_revision(task_id, instance_id, revision_id)["manifest"]
+        self._validate_application_receipt(manifest, document)
+        return document
+
     def read_current(self, task_id: str, instance_id: str) -> dict[str, Any] | None:
         self._validate_scope(task_id, instance_id)
         state_path = self._state_path(task_id, instance_id)
@@ -159,7 +279,10 @@ class InstanceConfigRevisionStore:
             self._integrity("The instance configuration state has the wrong scope.")
         bundle = self.read_revision(task_id, instance_id, str(state["current_revision_id"]))
         if bundle["manifest"]["apply_status"] != "APPLIED":
-            self._integrity("The active instance configuration revision is not applied.")
+            receipt = self.read_application(task_id, instance_id, str(state["current_revision_id"]))
+            if receipt is None:
+                self._integrity("The active instance configuration revision is not applied.")
+            bundle["application"] = receipt
         pending = state.get("pending_revision_id")
         if pending is not None:
             if pending == state["current_revision_id"]:
@@ -452,6 +575,9 @@ class InstanceConfigRevisionStore:
     def _revisions_root(self, task_id: str, instance_id: str) -> Path:
         return self._runtime_root(task_id, instance_id) / "revisions"
 
+    def _applications_root(self, task_id: str, instance_id: str) -> Path:
+        return self._runtime_root(task_id, instance_id) / "applications"
+
     def _revision_root(self, task_id: str, instance_id: str, revision_id: str) -> Path:
         validate_identifier(revision_id, "revision_id")
         return self._revisions_root(task_id, instance_id) / revision_id
@@ -469,3 +595,35 @@ class InstanceConfigRevisionStore:
     @staticmethod
     def _integrity(message: str) -> None:
         raise HarnessError("CONFIG_INTEGRITY_FAILED", message)
+
+    @staticmethod
+    def _validate_application_receipt(
+        manifest: dict[str, Any], receipt: dict[str, Any]
+    ) -> None:
+        required_strings = (
+            "branch_id",
+            "checkpoint_id",
+            "from_checkpoint",
+            "effective_from_state",
+            "config_hash",
+            "applied_at",
+        )
+        if any(
+            not isinstance(receipt.get(field), str) or not receipt[field]
+            for field in required_strings
+        ):
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "The runtime configuration application receipt is incomplete.",
+            )
+        if (
+            receipt.get("revision_id", manifest["revision_id"])
+            != manifest["revision_id"]
+            or receipt["config_hash"] != manifest["config_hash"]
+            or receipt["effective_from_state"] != manifest["effective_from_state"]
+        ):
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "The runtime configuration application receipt does not match its revision.",
+                {"revision_id": manifest["revision_id"]},
+            )
