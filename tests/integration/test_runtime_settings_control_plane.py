@@ -266,6 +266,69 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "SETTINGS_REVISION_CONFLICT")
 
+    def test_cross_task_sagas_do_not_block_settings_or_first_start(self) -> None:
+        for saga_state in ("WAITING_SAFE_POINT", "FAILED"):
+            with self.subTest(saga_state=saga_state):
+                suffix = saga_state.lower()
+                foreign_task_id = self._planned_task(f"task_foreign_saga_{suffix}")
+                local_task_id = self._planned_task(f"task_local_saga_{suffix}")
+                foreign_proposal_id = self._persist_runtime_saga(
+                    foreign_task_id, saga_state
+                )
+
+                current = self.settings.get(local_task_id, "i_image_1")
+
+                self.assertTrue(current["editable"])
+                self.assertIsNone(current["pending_application"])
+                proposal = self.settings.propose(
+                    local_task_id,
+                    "i_image_1",
+                    base_revision=current["revision"]["current"],
+                    patch={"watermark": True},
+                    sync_unstarted_image_work_items=False,
+                    expected_sync_instance_ids=[],
+                    envelope=self._settings_envelope(
+                        local_task_id, f"propose-local-{suffix}"
+                    ),
+                )
+                self.assertEqual(proposal["status"], "DRAFT")
+
+                self.settings.ensure_before_start(local_task_id, "i_image_1")
+                foreign_sagas = self.settings._sagas_for_instance(
+                    foreign_task_id, "i_image_1"
+                )
+                self.assertEqual(len(foreign_sagas), 1)
+                self.assertEqual(foreign_sagas[0]["proposal_id"], foreign_proposal_id)
+                self.assertEqual(foreign_sagas[0]["state"], saga_state)
+
+    def test_pending_saga_uniqueness_is_scoped_to_task_and_instance(self) -> None:
+        task_ids = (
+            self._planned_task("task_pending_scope_a"),
+            self._planned_task("task_pending_scope_b"),
+        )
+        proposal_ids = {
+            task_id: self._persist_runtime_saga(task_id, "WAITING_SAFE_POINT")
+            for task_id in task_ids
+        }
+        self.adapter.boundary = {
+            "state": "candidate_generation",
+            "checkpoint_id": None,
+            "safe_now": False,
+            "reason": "ACTIVE_JOB",
+        }
+
+        for task_id in task_ids:
+            with self.subTest(task_id=task_id):
+                current = self.settings.get(task_id, "i_image_1")
+                self.assertFalse(current["editable"])
+                self.assertEqual(
+                    current["pending_application"]["proposal_id"],
+                    proposal_ids[task_id],
+                )
+                pending = self.settings.apply_pending_if_safe(task_id, "i_image_1")
+                self.assertEqual(pending["proposal_id"], proposal_ids[task_id])
+                self.assertEqual(pending["status"], "WAITING_SAFE_POINT")
+
     def test_task_rebase_preserves_overrides_and_stops_at_start_lock(self) -> None:
         task_id = self._planned_task("task_rebase_settings")
         source = self.settings.get(task_id, "i_image_1")
@@ -600,6 +663,58 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
                 status,
                 envelope(f"{status.lower()}-{task_id}", current, actor_type="adapter"),
             )
+
+    def _persist_runtime_saga(self, task_id: str, saga_state: str) -> str:
+        base = self.settings.get(task_id, "i_image_1")
+        self._start_instance_projection(task_id, "i_image_1")
+        original_boundary = deepcopy(self.adapter.boundary)
+        original_receipt_override = self.adapter.receipt_from_checkpoint_override
+        if saga_state == "WAITING_SAFE_POINT":
+            self.adapter.boundary = {
+                "state": "candidate_generation",
+                "checkpoint_id": None,
+                "safe_now": False,
+                "reason": "ACTIVE_JOB",
+            }
+        elif saga_state == "FAILED":
+            self.adapter.receipt_from_checkpoint_override = "checkpoint_wrong_task_scope"
+        else:
+            raise AssertionError(f"unsupported saga state: {saga_state}")
+        proposal = self.settings.propose(
+            task_id,
+            "i_image_1",
+            base_revision=base["revision"]["current"],
+            patch={"candidate_concurrency": 2},
+            sync_unstarted_image_work_items=False,
+            expected_sync_instance_ids=[],
+            envelope=self._settings_envelope(task_id, f"propose-{saga_state.lower()}"),
+        )
+        try:
+            if saga_state == "FAILED":
+                with self.assertRaises(HarnessError) as raised:
+                    self.settings.confirm(
+                        task_id,
+                        "i_image_1",
+                        proposal["proposal_id"],
+                        envelope=self._settings_envelope(
+                            task_id, f"confirm-{saga_state.lower()}"
+                        ),
+                    )
+                self.assertEqual(raised.exception.code, "CONFIG_INTEGRITY_FAILED")
+            else:
+                result = self.settings.confirm(
+                    task_id,
+                    "i_image_1",
+                    proposal["proposal_id"],
+                    envelope=self._settings_envelope(
+                        task_id, f"confirm-{saga_state.lower()}"
+                    ),
+                )
+                self.assertEqual(result["status"], "WAITING_SAFE_POINT")
+        finally:
+            self.adapter.boundary = original_boundary
+            self.adapter.receipt_from_checkpoint_override = original_receipt_override
+        return proposal["proposal_id"]
 
     def _settings_envelope(self, task_id: str, key: str) -> CommandEnvelope:
         return envelope(key, self.store.task.revision(task_id, task_id))
