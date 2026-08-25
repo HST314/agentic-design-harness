@@ -88,8 +88,8 @@ class InstanceRuntimeSettingsService:
         editable = (
             not bool(current.get("legacy"))
             and baseline_is_current
-            and self._pending_saga(instance_id, include_sync=True) is None
-            and self._terminal_saga(instance_id, state="FAILED") is None
+            and self._pending_saga(task_id, instance_id, include_sync=True) is None
+            and self._terminal_saga(task_id, instance_id, state="FAILED") is None
         )
         inherited = self.materializer.effective_runtime(task_revision, {})
         effective = deepcopy(current["manifest"]["effective_runtime"])
@@ -135,7 +135,7 @@ class InstanceRuntimeSettingsService:
             ),
             "workflow_boundary": self._workflow_boundary(task_id, instance),
             "sync_candidates": self._sync_candidates(task_id, instance_id),
-            "pending_application": self._pending_projection(instance_id),
+            "pending_application": self._pending_projection(task_id, instance_id),
         }
 
     def propose(
@@ -179,12 +179,12 @@ class InstanceRuntimeSettingsService:
                     )
                 return self._proposal_response(existing)
             self._validate_task_revision(task_id, envelope.expected_revision)
-            if self._pending_saga(instance_id, include_sync=True) is not None:
+            if self._pending_saga(task_id, instance_id, include_sync=True) is not None:
                 raise HarnessError(
                     "SETTINGS_REVISION_CONFLICT",
                     "The instance already has an unfinished runtime settings operation.",
                 )
-            if self._terminal_saga(instance_id, state="FAILED") is not None:
+            if self._terminal_saga(task_id, instance_id, state="FAILED") is not None:
                 raise HarnessError(
                     "INSTANCE_CONFIG_LOCKED",
                     "A failed settings saga must be repaired before another proposal.",
@@ -514,9 +514,9 @@ class InstanceRuntimeSettingsService:
         *,
         crash_hook: CrashHook | None = None,
     ) -> dict[str, Any] | None:
-        saga = self._pending_saga(instance_id)
+        saga = self._pending_saga(task_id, instance_id)
         if saga is None:
-            failed = self._terminal_saga(instance_id, state="FAILED")
+            failed = self._terminal_saga(task_id, instance_id, state="FAILED")
             if failed is not None:
                 raise HarnessError(
                     str(
@@ -532,11 +532,6 @@ class InstanceRuntimeSettingsService:
                     {"proposal_id": failed["proposal_id"]},
                 )
             return None
-        if saga["task_id"] != task_id:
-            raise HarnessError(
-                "CONFIG_INTEGRITY_FAILED",
-                "A settings saga has the wrong task owner.",
-            )
         if saga["state"] == "INTENT_PERSISTED":
             return self._saga_response(saga)
         if saga["mode"] == "before_start":
@@ -714,14 +709,9 @@ class InstanceRuntimeSettingsService:
     def ensure_before_start_locked(self, task_id: str, instance_id: str) -> None:
         """Apply pre-start revisions while the caller owns the task start lock."""
 
-        for saga in self._sagas_for_instance(instance_id, include_sync=True):
+        for saga in self._sagas_for_instance(task_id, instance_id, include_sync=True):
             if saga["state"] in _TERMINAL_SAGA_STATES:
                 continue
-            if saga["task_id"] != task_id:
-                raise HarnessError(
-                    "CONFIG_INTEGRITY_FAILED",
-                    "A settings saga has the wrong task owner.",
-                )
             if saga["state"] == "INTENT_PERSISTED":
                 raise HarnessError(
                     "SAFE_CHECKPOINT_UNAVAILABLE",
@@ -762,8 +752,8 @@ class InstanceRuntimeSettingsService:
     def assert_no_pending_advance(self, task_id: str, instance_id: str) -> None:
         """Close the proposal-confirm/Agent-advance race under the task lock."""
 
-        saga = self._pending_saga(instance_id)
-        if saga is not None and saga["task_id"] == task_id:
+        saga = self._pending_saga(task_id, instance_id)
+        if saga is not None:
             raise HarnessError(
                 "SAFE_CHECKPOINT_UNAVAILABLE",
                 "Apply the confirmed runtime configuration before advancing the Agent.",
@@ -1421,8 +1411,10 @@ class InstanceRuntimeSettingsService:
             "last_error": deepcopy(saga.get("last_error")),
         }
 
-    def _pending_projection(self, instance_id: str) -> dict[str, Any] | None:
-        saga = self._pending_saga(instance_id, include_sync=True)
+    def _pending_projection(
+        self, task_id: str, instance_id: str
+    ) -> dict[str, Any] | None:
+        saga = self._pending_saga(task_id, instance_id, include_sync=True)
         if saga is None:
             return None
         projection = self._saga_response(saga)
@@ -1437,11 +1429,13 @@ class InstanceRuntimeSettingsService:
         return projection
 
     def _pending_saga(
-        self, instance_id: str, *, include_sync: bool = False
+        self, task_id: str, instance_id: str, *, include_sync: bool = False
     ) -> dict[str, Any] | None:
         candidates = [
             item
-            for item in self._sagas_for_instance(instance_id, include_sync=include_sync)
+            for item in self._sagas_for_instance(
+                task_id, instance_id, include_sync=include_sync
+            )
             if item["state"] not in _TERMINAL_SAGA_STATES
         ]
         if len(candidates) > 1:
@@ -1452,22 +1446,26 @@ class InstanceRuntimeSettingsService:
         return candidates[0] if candidates else None
 
     def _terminal_saga(
-        self, instance_id: str, *, state: str | None = None
+        self, task_id: str, instance_id: str, *, state: str | None = None
     ) -> dict[str, Any] | None:
         candidates = [
             item
-            for item in self._sagas_for_instance(instance_id)
+            for item in self._sagas_for_instance(task_id, instance_id)
             if item["state"] in _TERMINAL_SAGA_STATES
             and (state is None or item["state"] == state)
         ]
         return max(candidates, key=lambda item: item["updated_at"]) if candidates else None
 
     def _sagas_for_instance(
-        self, instance_id: str, *, include_sync: bool = False
+        self, task_id: str, instance_id: str, *, include_sync: bool = False
     ) -> list[dict[str, Any]]:
+        validate_identifier(task_id, "task_id")
+        validate_identifier(instance_id, "instance_id")
         values = []
         for path in self.saga_root.glob("*.json"):
             saga = read_json(path)
+            if saga.get("task_id") != task_id:
+                continue
             owns = saga.get("instance_id") == instance_id
             syncs = include_sync and any(
                 item.get("instance_id") == instance_id for item in saga.get("sync_targets", [])

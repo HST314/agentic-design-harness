@@ -396,6 +396,116 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(self.fake_adapter.start_calls), 1)
         self.application.cancel_instance("t_confirm_recovery", "i_image_1")
 
+    def test_start_recovery_ignores_cross_task_runtime_settings_sagas(self) -> None:
+        self._configure_runtime_artifact("cross-task-settings-recovery-agent")
+        for saga_state in ("WAITING_SAFE_POINT", "FAILED"):
+            with self.subTest(saga_state=saga_state):
+                suffix = saga_state.lower()
+                foreign_task_id = f"t_foreign_settings_{suffix}"
+                recovery_task_id = f"t_start_recovery_{suffix}"
+                foreign_saved = self._save_image_task(foreign_task_id)
+                recovery_saved = self._save_image_task(recovery_task_id)
+
+                base = self.runtime_settings.get(foreign_task_id, "i_image_1")
+                starting = self.commands.transition_instance(
+                    foreign_task_id,
+                    "i_image_1",
+                    "STARTING",
+                    envelope(
+                        f"start-foreign-{suffix}",
+                        foreign_saved["task_revision"],
+                        "adapter",
+                    ),
+                )
+                self.commands.transition_instance(
+                    foreign_task_id,
+                    "i_image_1",
+                    "RUNNING",
+                    envelope(
+                        f"run-foreign-{suffix}",
+                        starting["task_revision"],
+                        "adapter",
+                    ),
+                )
+                safe_now = saga_state == "FAILED"
+                self.fake_adapter.observation = AdapterObservation(
+                    "RUNNING",
+                    step_id="candidate_generation",
+                    details={
+                        "workflow_boundary": {
+                            "state": "candidate_generation",
+                            "checkpoint_id": "checkpoint_foreign" if safe_now else None,
+                            "safe_now": safe_now,
+                            "reason": None if safe_now else "ACTIVE_JOB",
+                        }
+                    },
+                )
+                proposal = self.runtime_settings.propose(
+                    foreign_task_id,
+                    "i_image_1",
+                    base_revision=base["revision"]["current"],
+                    patch={"watermark": True},
+                    sync_unstarted_image_work_items=False,
+                    expected_sync_instance_ids=[],
+                    envelope=envelope(
+                        f"propose-foreign-{suffix}",
+                        self.store.task.revision(foreign_task_id, foreign_task_id),
+                    ),
+                )
+                if saga_state == "FAILED":
+                    with self.assertRaises(HarnessError) as raised:
+                        self.runtime_settings.confirm(
+                            foreign_task_id,
+                            "i_image_1",
+                            proposal["proposal_id"],
+                            envelope=envelope(
+                                f"confirm-foreign-{suffix}",
+                                self.store.task.revision(
+                                    foreign_task_id, foreign_task_id
+                                ),
+                            ),
+                        )
+                    self.assertEqual(raised.exception.code, "CONTROL_PLANE_NOT_READY")
+                else:
+                    pending = self.runtime_settings.confirm(
+                        foreign_task_id,
+                        "i_image_1",
+                        proposal["proposal_id"],
+                        envelope=envelope(
+                            f"confirm-foreign-{suffix}",
+                            self.store.task.revision(foreign_task_id, foreign_task_id),
+                        ),
+                    )
+                    self.assertEqual(pending["status"], "WAITING_SAFE_POINT")
+
+                operation_id = f"recover-cross-task-{suffix}"
+
+                def crash(checkpoint: str) -> None:
+                    if checkpoint == "after_start_intent":
+                        raise SimulatedCrash(checkpoint)
+
+                with self.assertRaises(SimulatedCrash):
+                    self.application.confirm_and_start_ready_instances(
+                        recovery_task_id,
+                        operation_id=operation_id,
+                        envelope=envelope(
+                            f"start-recovery-{suffix}",
+                            recovery_saved["task_revision"],
+                        ),
+                        crash_hook=crash,
+                    )
+
+                recovered = self.application.recover()
+                recovery = next(
+                    item for item in recovered if item["operation_id"] == operation_id
+                )
+                self.assertEqual(recovery["status"], "RECOVERED")
+                self.assertEqual(
+                    self.store.instance.get(recovery_task_id, "i_image_1")["status"],
+                    "RUNNING",
+                )
+                self.application.cancel_instance(recovery_task_id, "i_image_1")
+
     def test_prompt_only_image_card_can_be_confirmed_and_started(self) -> None:
         self._configure_runtime_artifact("prompt-only-image-fake-agent")
         contract_adapter = ImageAgentAdapter(
@@ -1333,6 +1443,18 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             details={"job_id": f"job_{task_id}"},
         )
         return self.application.observe_instance(task_id, "i_image_1")
+
+    def _save_image_task(self, task_id: str) -> dict:
+        created = create_task(self.commands, task_id)
+        draft = image_plan(task_id)
+        return self.application.save_plan_and_create_instances(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id=f"prepare_{task_id}",
+            envelope=envelope(f"prepare-{task_id}", created["revision"]),
+        )
 
     def _running_image_task(self, task_id: str, count: int) -> int:
         created = create_task(self.commands, task_id, "auto")
