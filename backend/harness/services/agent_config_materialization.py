@@ -187,11 +187,10 @@ class ImageAgentConfigMaterializer:
             require_current_approval=require_current_approval,
         )
         effective = self.effective_runtime(task_revision, clean_overrides)
-        runtime = {
-            **deepcopy(effective),
-            "offline_mode": False,
-            "self_check": {**effective["self_check"], "release": "manual"},
-        }
+        # The v2 runtime document is the credential-safe editable projection.
+        # The Image Agent derives managed-only invariants (offline_mode=False
+        # and manual release) while loading the immutable revision.
+        runtime = deepcopy(effective)
         model_config, bindings = self._model_configuration(
             task_revision,
             clean_overrides,
@@ -491,7 +490,10 @@ class ImageAgentConfigMaterializer:
                     "The selected model Provider is not authorized for this instance.",
                     {"state": state, "model_id": selected_id},
                 )
-            bindings[state] = selected_id
+            # Manifest bindings describe the executable provider model, matching
+            # the Image Agent's parsed StateBinding projection. The Harness-only
+            # catalog ID remains the selection input and is not executable.
+            bindings[state] = model["model"]
             documents.append(
                 {
                     "state": state,

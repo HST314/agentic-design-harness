@@ -171,6 +171,7 @@ class RealImageAdapterG3Tests(unittest.TestCase):
             try:
                 with TestClient(app) as client:
                     container = app.state.container
+                    self._container = container
                     self.assertIsInstance(
                         container.adapters.get("image"), ImageAgentAdapter
                     )
@@ -498,9 +499,14 @@ class RealImageAdapterG3Tests(unittest.TestCase):
         if detail is None:
             self.fail("Image instance produced no observation.")
         self.assertNotEqual(detail["instance"]["status"], "FAILED", detail)
-        self.assertIn(
-            detail["instance"]["status"], {"WAITING_APPROVAL", "SUCCEEDED"}, detail
-        )
+        if detail["instance"]["status"] not in {"WAITING_APPROVAL", "SUCCEEDED"}:
+            process_logs = self._container.supervisor.log_summary(
+                "t_g3_real_image", instance_id
+            )
+            self.fail(
+                f"{detail}\nredacted process logs: "
+                f"{json.dumps(process_logs, ensure_ascii=False)}"
+            )
         return detail
 
     def _reach_taskbook_boundary(

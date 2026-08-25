@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -388,7 +389,6 @@ class ConfigRevisionRecoveryTests(unittest.TestCase):
                 "fixed_rounds": 2,
                 "max_rounds": 4,
                 "stop_early_on_pass": False,
-                "release": "manual",
             },
         }
         bindings = {
@@ -406,14 +406,7 @@ class ConfigRevisionRecoveryTests(unittest.TestCase):
                 for state, model in bindings.items()
             ],
         }
-        effective_runtime = {
-            **runtime,
-            "self_check": {
-                key: value
-                for key, value in runtime["self_check"].items()
-                if key != "release"
-            },
-        }
+        effective_runtime = deepcopy(runtime)
         manifest = self.instance_revisions.build_manifest(
             task_id="task_config_recovery",
             instance_id="instance_config_recovery",

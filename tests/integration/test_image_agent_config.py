@@ -58,7 +58,7 @@ class ImageAgentConfigMaterializerTests(unittest.TestCase):
 
         self.assertEqual(runtime["question_preference"], "blocking_only")
         self.assertEqual(runtime["candidate_concurrency"], 4)
-        self.assertFalse(runtime["offline_mode"])
+        self.assertNotIn("offline_mode", runtime)
         self.assertEqual(
             runtime["self_check"],
             {
@@ -66,7 +66,6 @@ class ImageAgentConfigMaterializerTests(unittest.TestCase):
                 "fixed_rounds": 2,
                 "max_rounds": 4,
                 "stop_early_on_pass": False,
-                "release": "manual",
             },
         )
         self.assertEqual(bindings["intake_clarify"]["model"], "text-model")
@@ -75,6 +74,10 @@ class ImageAgentConfigMaterializerTests(unittest.TestCase):
         self.assertEqual(bindings["self_check_inspection"]["model"], "vision-model-alt")
         self.assertEqual(bindings["self_check_rework"]["model"], "image-model-alt")
         self.assertEqual(bindings["human_prompt_rework"]["model"], "image-model")
+        self.assertEqual(
+            result["manifest"]["model_bindings"],
+            {state: binding["model"] for state, binding in bindings.items()},
+        )
         self.assertEqual(result["source_config_revision"], snapshot.revision)
         self.assertEqual(result["task_config_revision_id"], "task-config-r000001")
         self.assertEqual(result["runtime_config_revision_id"], "cfg-inst-r000001")
