@@ -56,6 +56,41 @@ describe("ApiClient", () => {
     });
   });
 
+  test("keeps runtime settings writes on the Harness control plane", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse({ schema_version: "2.0" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://control.example");
+    const envelope = {
+      idempotency_key: "workbench_propose_bridge_request_1",
+      actor_type: "human" as const,
+      actor_id: "human_operator",
+      expected_revision: 7,
+    };
+
+    await client.proposeInstanceRuntimeSettings("instance/image", {
+      base_revision: 2,
+      overrides: { watermark: true },
+      sync_unstarted_image_work_items: false,
+      expected_sync_instance_ids: [],
+      envelope,
+    });
+    await client.confirmInstanceRuntimeSettings("instance/image", "proposal_1", envelope);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://control.example/api/v1/instances/instance%2Fimage/runtime-setting-proposals",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      base_revision: 2,
+      overrides: { watermark: true },
+      sync_unstarted_image_work_items: false,
+      expected_sync_instance_ids: [],
+      envelope,
+    });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://control.example/api/v1/instances/instance%2Fimage/runtime-setting-proposals/proposal_1/confirm",
+    );
+  });
+
   test("exposes stable API error codes and conflict details to recovery UI", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       error: {

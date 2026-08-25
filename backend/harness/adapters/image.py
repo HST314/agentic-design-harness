@@ -325,6 +325,9 @@ class ImageAgentAdapter(ImageObservationMixin):
                 "IMAGE_AGENT_MANAGED_MODE": "1",
                 "IMAGE_AGENT_MANAGED_PROJECT_ID": instance_id,
                 "IMAGE_AGENT_CONTROL_FILE": str(control_path),
+                "HARNESS_TASK_ID": task_id,
+                "HARNESS_INSTANCE_ID": instance_id,
+                "INSTANCE_RUNTIME_SETTINGS_V2": "1",
                 "PYTHONPATH": os.pathsep.join(
                     str(path) for path in image_dependency_pythonpath_entries(artifact_root)
                 ),

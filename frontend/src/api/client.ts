@@ -165,6 +165,65 @@ export interface AgentWorkbenchLinkResponse {
   diagnostic: string;
 }
 
+export interface InstanceRuntimeSettingsResponse {
+  schema_version: "2.0";
+  scope: { task_id: string; work_item_id: string; instance_id: string };
+  revision: {
+    current: number;
+    revision_id: string;
+    task_config_revision_id: string;
+    config_hash: string;
+    pending_revision_id: string | null;
+  };
+  values: Record<string, {
+    inherited: unknown;
+    effective: unknown;
+    overridden: boolean;
+    source: string;
+    explicit?: unknown;
+  }>;
+  editable: boolean;
+  editable_schema: Record<string, unknown>;
+  model_options: Record<string, Array<{ id: string; label: string }>>;
+  workflow_boundary: Record<string, unknown>;
+  sync_candidates: Array<{ instance_id: string; work_item_id?: string }>;
+  pending_application: Record<string, unknown> | null;
+}
+
+export interface RuntimeSettingsProposalResponse {
+  schema_version: "2.0";
+  proposal_id: string;
+  status: string;
+  base_revision: number;
+  effective_runtime: Record<string, unknown>;
+  effective_model_ids: Record<string, string>;
+  diff: Array<{
+    field: string;
+    before: unknown;
+    after: unknown;
+    consumer_state: string;
+    history_effect: "future_only";
+    message: string;
+  }>;
+  apply_mode: string;
+  workflow_boundary: Record<string, unknown>;
+  sync_instance_ids: string[];
+}
+
+export interface RuntimeSettingsConfirmationResponse {
+  schema_version: "2.0";
+  proposal_id: string;
+  instance_id: string;
+  status: "APPLIED_BEFORE_START" | "APPLIED_ON_BRANCH" | "WAITING_SAFE_POINT" | "FAILED";
+  saga_state: string;
+  revision_id: string;
+  config_hash: string | null;
+  branch_id: string | null;
+  checkpoint_id: string | null;
+  sync_instance_ids: string[];
+  last_error: Record<string, unknown> | null;
+}
+
 export interface StartFailure {
   code: string;
   message: string;
@@ -622,6 +681,45 @@ export class ApiClient {
     return this.get(
       `/api/v1/instances/${encodeURIComponent(instanceId)}/ui-link?${query.toString()}`,
       signal,
+    );
+  }
+
+  instanceRuntimeSettings(
+    instanceId: string,
+    signal?: AbortSignal,
+  ): Promise<InstanceRuntimeSettingsResponse> {
+    return this.get(
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/runtime-settings`,
+      signal,
+    );
+  }
+
+  proposeInstanceRuntimeSettings(
+    instanceId: string,
+    body: {
+      base_revision: number;
+      overrides: Record<string, unknown>;
+      sync_unstarted_image_work_items: boolean;
+      expected_sync_instance_ids: string[];
+      envelope: CommandEnvelope;
+    },
+  ): Promise<RuntimeSettingsProposalResponse> {
+    return this.send(
+      "POST",
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/runtime-setting-proposals`,
+      body,
+    );
+  }
+
+  confirmInstanceRuntimeSettings(
+    instanceId: string,
+    proposalId: string,
+    envelope: CommandEnvelope,
+  ): Promise<RuntimeSettingsConfirmationResponse> {
+    return this.send(
+      "POST",
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/runtime-setting-proposals/${encodeURIComponent(proposalId)}/confirm`,
+      { envelope },
     );
   }
 

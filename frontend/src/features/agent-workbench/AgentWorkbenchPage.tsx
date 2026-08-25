@@ -6,11 +6,53 @@ import {
   api,
   workItemDetailQuery,
 } from "../../api/queries";
-import type { AgentWorkbenchLinkResponse } from "../../api/client";
+import { ApiError, type AgentWorkbenchLinkResponse } from "../../api/client";
 import { Icon } from "../../components/Icon";
 import { TaskTabs } from "../master-thread/MasterThreadPage";
+import {
+  bridgeIdempotencyKey,
+  isBridgeHello,
+  newBridgeNonce,
+  parseBridgeRequest,
+  RUNTIME_SETTINGS_BRIDGE_PROTOCOL,
+  RUNTIME_SETTINGS_BRIDGE_VERSION,
+  type RuntimeSettingsBridgeRequest,
+} from "./runtimeSettingsBridge";
 
 type FrameState = "loading" | "ready" | "failed";
+
+async function executeBridgeRequest(
+  request: RuntimeSettingsBridgeRequest,
+  instanceId: string,
+  taskRevision: number | undefined,
+): Promise<unknown> {
+  if (request.action === "runtime_settings.get") {
+    return api.instanceRuntimeSettings(instanceId);
+  }
+  if (!Number.isInteger(taskRevision)) {
+    throw new Error("当前任务版本已变化，请刷新专业工作台后重试。");
+  }
+  const envelope = {
+    idempotency_key: bridgeIdempotencyKey(request.action, request.request_id),
+    actor_type: "human" as const,
+    actor_id: "human_operator",
+    expected_revision: taskRevision as number,
+  };
+  if (request.action === "runtime_settings.propose") {
+    return api.proposeInstanceRuntimeSettings(instanceId, {
+      base_revision: Number(request.payload.base_revision),
+      overrides: request.payload.overrides as Record<string, unknown>,
+      sync_unstarted_image_work_items: Boolean(request.payload.sync_unstarted_image_work_items),
+      expected_sync_instance_ids: request.payload.expected_sync_instance_ids as string[],
+      envelope,
+    });
+  }
+  return api.confirmInstanceRuntimeSettings(
+    instanceId,
+    String(request.payload.proposal_id),
+    envelope,
+  );
+}
 
 const businessStatusLabel = {
   TODO: "待办",
@@ -87,6 +129,7 @@ export function AgentWorkbenchPage(): React.JSX.Element {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const loadTimeoutRef = useRef<number | undefined>(undefined);
+  const announceBridgeRef = useRef<() => void>(() => undefined);
   const [frameKey, setFrameKey] = useState(0);
   const [frameState, setFrameState] = useState<FrameState>("loading");
   const recoverStart = useMutation({
@@ -118,6 +161,77 @@ export function AgentWorkbenchPage(): React.JSX.Element {
     loadTimeoutRef.current = window.setTimeout(() => setFrameState("failed"), 12_000);
     return () => window.clearTimeout(loadTimeoutRef.current);
   }, [frameKey, link.data?.embeddable, link.data?.ui_url]);
+
+  useEffect(() => {
+    const uiUrl = link.data?.embeddable ? link.data.ui_url : null;
+    if (!uiUrl || !instanceId) return undefined;
+    let targetOrigin: string;
+    try {
+      targetOrigin = new URL(uiUrl).origin;
+    } catch {
+      return undefined;
+    }
+    let active = true;
+    let nonce = newBridgeNonce();
+    const post = (payload: Record<string, unknown>): void => {
+      iframeRef.current?.contentWindow?.postMessage(payload, targetOrigin);
+    };
+    const announce = (): void => post({
+      protocol: RUNTIME_SETTINGS_BRIDGE_PROTOCOL,
+      version: RUNTIME_SETTINGS_BRIDGE_VERSION,
+      type: "bridge.init",
+      instance_id: instanceId,
+      nonce,
+    });
+    announceBridgeRef.current = announce;
+    const onMessage = (event: MessageEvent<unknown>): void => {
+      if (!active
+        || event.origin !== targetOrigin
+        || event.source !== iframeRef.current?.contentWindow) return;
+      if (isBridgeHello(event.data, instanceId)) {
+        announce();
+        return;
+      }
+      const request = parseBridgeRequest(event.data, instanceId, nonce);
+      if (!request) return;
+      const consumedNonce = nonce;
+      const nextNonce = newBridgeNonce();
+      nonce = nextNonce;
+      void executeBridgeRequest(request, instanceId, link.data?.task_revision).then(
+        (payload) => post({
+          protocol: RUNTIME_SETTINGS_BRIDGE_PROTOCOL,
+          version: RUNTIME_SETTINGS_BRIDGE_VERSION,
+          type: "bridge.response",
+          instance_id: instanceId,
+          request_id: request.request_id,
+          nonce: consumedNonce,
+          next_nonce: nextNonce,
+          ok: true,
+          payload,
+        }),
+        (error: unknown) => post({
+          protocol: RUNTIME_SETTINGS_BRIDGE_PROTOCOL,
+          version: RUNTIME_SETTINGS_BRIDGE_VERSION,
+          type: "bridge.response",
+          instance_id: instanceId,
+          request_id: request.request_id,
+          nonce: consumedNonce,
+          next_nonce: nextNonce,
+          ok: false,
+          error: {
+            code: error instanceof ApiError ? error.code ?? "BRIDGE_REQUEST_FAILED" : "BRIDGE_REQUEST_FAILED",
+            message: error instanceof Error ? error.message : "主系统未完成设置请求。",
+          },
+        }),
+      );
+    };
+    window.addEventListener("message", onMessage);
+    return () => {
+      active = false;
+      announceBridgeRef.current = () => undefined;
+      window.removeEventListener("message", onMessage);
+    };
+  }, [instanceId, link.data?.embeddable, link.data?.task_revision, link.data?.ui_url]);
 
   const retry = (): void => {
     setFrameState("loading");
@@ -216,8 +330,12 @@ export function AgentWorkbenchPage(): React.JSX.Element {
             title={`Image Agent 工作台：${item.title}`}
             sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
             allow="clipboard-read; clipboard-write"
-            referrerPolicy="no-referrer"
-            onLoad={() => { window.clearTimeout(loadTimeoutRef.current); setFrameState("ready"); }}
+            referrerPolicy="origin"
+            onLoad={() => {
+              window.clearTimeout(loadTimeoutRef.current);
+              setFrameState("ready");
+              announceBridgeRef.current();
+            }}
             onError={() => { window.clearTimeout(loadTimeoutRef.current); setFrameState("failed"); }}
           />
           <div className="agent-workbench-frame__exit">
