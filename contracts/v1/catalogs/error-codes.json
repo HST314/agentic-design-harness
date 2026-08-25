@@ -32,6 +32,54 @@
       "meaning": "The supplied expected revision is stale."
     },
     {
+      "code": "SETTINGS_REVISION_CONFLICT",
+      "http_status": 409,
+      "retryable": true,
+      "meaning": "The runtime settings base revision or immutable revision identity is stale."
+    },
+    {
+      "code": "FIELD_NOT_EDITABLE",
+      "http_status": 422,
+      "retryable": false,
+      "meaning": "A runtime settings override targets a field outside the editable allowlist."
+    },
+    {
+      "code": "MODEL_NOT_APPROVED",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "A selected model is not currently approved for the required capability."
+    },
+    {
+      "code": "MODEL_PROVIDER_NOT_AUTHORIZED",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "The instance launch environment does not authorize the selected model Provider."
+    },
+    {
+      "code": "SYNC_SCOPE_CHANGED",
+      "http_status": 409,
+      "retryable": true,
+      "meaning": "The frozen settings synchronization target set changed before confirmation."
+    },
+    {
+      "code": "SAFE_CHECKPOINT_UNAVAILABLE",
+      "http_status": 409,
+      "retryable": true,
+      "meaning": "The instance cannot currently establish the safe checkpoint required to apply settings."
+    },
+    {
+      "code": "INSTANCE_CONFIG_LOCKED",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "The instance has no future execution boundary at which settings may take effect."
+    },
+    {
+      "code": "CONFIG_INTEGRITY_FAILED",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "A configuration revision, digest, or active revision pointer failed integrity checks."
+    },
+    {
       "code": "IDEMPOTENCY_CONFLICT",
       "http_status": 409,
       "retryable": false,

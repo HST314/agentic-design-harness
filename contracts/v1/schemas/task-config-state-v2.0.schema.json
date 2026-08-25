@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/task-config-state-v2.0.schema.json",
+  "title": "TaskConfigState 2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "current_revision_id",
+    "source_system_revision",
+    "locked_at",
+    "locked_reason",
+    "revision",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "runtime-config-common-v2.0.schema.json#/$defs/schemaVersion"
+    },
+    "task_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "current_revision_id": {
+      "$ref": "runtime-config-common-v2.0.schema.json#/$defs/taskRevisionId"
+    },
+    "source_system_revision": {"$ref": "common.schema.json#/$defs/identifier"},
+    "locked_at": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "common.schema.json#/$defs/timestamp"}
+      ]
+    },
+    "locked_reason": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "$ref": "common.schema.json#/$defs/credentialSafeText",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      ]
+    },
+    "revision": {"type": "integer", "minimum": 1},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "updated_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"locked_at": {"type": "null"}}},
+      "then": {"properties": {"locked_reason": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"locked_at": {"$ref": "common.schema.json#/$defs/timestamp"}}},
+      "then": {
+        "properties": {
+          "locked_reason": {
+            "$ref": "common.schema.json#/$defs/credentialSafeText",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      }
+    }
+  ]
+}

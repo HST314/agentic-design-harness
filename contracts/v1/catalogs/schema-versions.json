@@ -23,6 +23,22 @@
     "bundle-manifest": {
       "current": "1.0",
       "supported": ["1.0"]
+    },
+    "task-config-state": {
+      "current": "2.0",
+      "supported": ["2.0"]
+    },
+    "task-config-revision": {
+      "current": "2.0",
+      "supported": ["2.0"]
+    },
+    "instance-runtime-config-state": {
+      "current": "2.0",
+      "supported": ["2.0"]
+    },
+    "instance-runtime-config-manifest": {
+      "current": "2.0",
+      "supported": ["2.0"]
     }
   },
   "version_pattern": "^[1-9][0-9]*\\.(0|[1-9][0-9]*)$",

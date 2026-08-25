@@ -21,6 +21,8 @@
 | `IMAGE_RUNTIME_ATTESTATION_FAILED` | Image 源码/lock 不匹配，或实际解释器、包版本、导入路径不可用 | 控制面会保持 `degraded`；运行 `scripts/dev.py setup --force` 后再运行 `doctor`，禁止手改摘要或绕过校验 |
 | `CONTROL_PLANE_NOT_READY` | ready 前请求了实例启动，或启动后台执行器未运行 | 等待 `/readyz`；若持续失败，检查启动验签、恢复日志和进程管理器 |
 | `REVISION_CONFLICT` | 页面或调用方持有旧 revision | 重新读取、重新审阅、使用新幂等键提交 |
+| `SETTINGS_REVISION_CONFLICT` | 设置预览基线过期，或同一不可变修订 ID 对应了不同内容 | 重新读取当前设置并生成新提案；不要覆写旧修订 |
+| `CONFIG_INTEGRITY_FAILED` | 活动指针缺失、修订文件不全、哈希不符或配置含私密值/危险路径 | 立即停止后续模型调用，保留现场并从可信备份恢复；不要手工改指针或摘要 |
 | `ASSET_CORRUPTED` | MIME、大小、SHA 或文件身份变化 | 停止发布，检查磁盘和来源，恢复可信备份或重新生成候选 |
 
 ## Python 与依赖

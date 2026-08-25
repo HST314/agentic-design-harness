@@ -21,6 +21,15 @@ def canonical_json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def canonical_yaml_bytes(value: Any) -> bytes:
+    return yaml.safe_dump(
+        value,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=True,
+    ).encode("utf-8")
+
+
 def digest_json(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
@@ -79,13 +88,7 @@ def atomic_write_json(path: Path, value: Any, mode: int = 0o600) -> None:
 
 
 def atomic_write_yaml(path: Path, value: Any, mode: int = 0o600) -> None:
-    content = yaml.safe_dump(
-        value,
-        allow_unicode=True,
-        default_flow_style=False,
-        sort_keys=True,
-    ).encode("utf-8")
-    atomic_write_bytes(path, content, mode)
+    atomic_write_bytes(path, canonical_yaml_bytes(value), mode)
 
 
 def read_json(path: Path) -> Any:

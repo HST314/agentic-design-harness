@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/task-config-revision-v2.0.schema.json",
+  "title": "TaskConfigRevision 2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "revision_id",
+    "parent_revision_id",
+    "source_system_revision",
+    "provider_ids",
+    "model_list",
+    "runtime",
+    "config_hash",
+    "created_by",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "runtime-config-common-v2.0.schema.json#/$defs/schemaVersion"
+    },
+    "task_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "revision_id": {
+      "$ref": "runtime-config-common-v2.0.schema.json#/$defs/taskRevisionId"
+    },
+    "parent_revision_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "runtime-config-common-v2.0.schema.json#/$defs/taskRevisionId"}
+      ]
+    },
+    "source_system_revision": {"$ref": "common.schema.json#/$defs/identifier"},
+    "provider_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"$ref": "common.schema.json#/$defs/identifier"}
+    },
+    "model_list": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": {"$ref": "common.schema.json#/$defs/publicParameterName"},
+      "additionalProperties": {"$ref": "common.schema.json#/$defs/publicParameterValue"}
+    },
+    "runtime": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": {"$ref": "common.schema.json#/$defs/publicParameterName"},
+      "additionalProperties": {"$ref": "common.schema.json#/$defs/publicParameterValue"}
+    },
+    "config_hash": {"$ref": "common.schema.json#/$defs/sha256"},
+    "created_by": {"$ref": "runtime-config-common-v2.0.schema.json#/$defs/actor"},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+  }
+}
