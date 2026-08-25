@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hst314.github.io/agentic-design-harness/contracts/v1/instance-runtime-config-state-v2.0.schema.json",
+  "title": "InstanceRuntimeConfigState 2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "instance_id",
+    "current_revision_id",
+    "pending_revision_id",
+    "revision",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "runtime-config-common-v2.0.schema.json#/$defs/schemaVersion"
+    },
+    "task_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "instance_id": {"$ref": "common.schema.json#/$defs/identifier"},
+    "current_revision_id": {
+      "$ref": "runtime-config-common-v2.0.schema.json#/$defs/instanceRevisionId"
+    },
+    "pending_revision_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "runtime-config-common-v2.0.schema.json#/$defs/instanceRevisionId"}
+      ]
+    },
+    "revision": {"type": "integer", "minimum": 1},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "updated_at": {"$ref": "common.schema.json#/$defs/timestamp"}
+  }
+}
