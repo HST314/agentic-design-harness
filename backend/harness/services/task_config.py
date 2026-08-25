@@ -84,7 +84,7 @@ class TaskConfigService:
                 expected_revision=0,
             )
         except HarnessError as exc:
-            if exc.code != "SETTINGS_REVISION_CONFLICT":
+            if exc.code not in {"REVISION_CONFLICT", "SETTINGS_REVISION_CONFLICT"}:
                 raise
             committed = self.revisions.read_current(task_id)
             if committed is None:

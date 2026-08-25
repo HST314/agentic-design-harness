@@ -96,37 +96,51 @@ class ImageAgentConfigMaterializer:
         validate_identifier(instance_id, "instance_id")
         current = self.revisions.read_current(task_id, instance_id)
         if current is None:
-            with FileLock(
+            materialization_lock = FileLock(
                 self._materialization_lock_path(task_id, instance_id),
                 self.store.lock_timeout_seconds,
-            ):
+            )
+            try:
+                materialization_lock.acquire()
+            except HarnessError as exc:
+                if exc.code != "REVISION_CONFLICT":
+                    raise
+                # A concurrent initializer may have committed the immutable
+                # revision while this reader exhausted its bounded lock wait.
                 current = self.revisions.read_current(task_id, instance_id)
                 if current is None:
-                    built = self.build_revision(
-                        task_id,
-                        instance_id,
-                        overrides={},
-                        created_by={"type": "system", "id": "image_config_materializer"},
-                        apply_mode="before_start",
-                        apply_status="APPLIED",
-                        confirmed_at=utc_now(),
-                        effective_from_state="initial",
-                    )
-                    self.revisions.write_revision(
-                        task_id,
-                        instance_id,
-                        built["manifest"],
-                        built["runtime"],
-                        built["model_config"],
-                    )
-                    self.revisions.set_current(
-                        task_id,
-                        instance_id,
-                        built["manifest"]["revision_id"],
-                        expected_revision=0,
-                        updated_at=built["manifest"]["created_at"],
-                    )
+                    raise
+            else:
+                try:
                     current = self.revisions.read_current(task_id, instance_id)
+                    if current is None:
+                        built = self.build_revision(
+                            task_id,
+                            instance_id,
+                            overrides={},
+                            created_by={"type": "system", "id": "image_config_materializer"},
+                            apply_mode="before_start",
+                            apply_status="APPLIED",
+                            confirmed_at=utc_now(),
+                            effective_from_state="initial",
+                        )
+                        self.revisions.write_revision(
+                            task_id,
+                            instance_id,
+                            built["manifest"],
+                            built["runtime"],
+                            built["model_config"],
+                        )
+                        self.revisions.set_current(
+                            task_id,
+                            instance_id,
+                            built["manifest"]["revision_id"],
+                            expected_revision=0,
+                            updated_at=built["manifest"]["created_at"],
+                        )
+                        current = self.revisions.read_current(task_id, instance_id)
+                finally:
+                    materialization_lock.release()
         assert current is not None
         root = self.runtime_root(task_id, instance_id)
         if current.get("legacy"):
