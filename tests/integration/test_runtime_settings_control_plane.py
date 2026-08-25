@@ -150,7 +150,12 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
             task_id,
             "i_image_1",
             base_revision=source["revision"]["current"],
-            patch={"candidate_concurrency": 2, "watermark": True},
+            patch={
+                "category_constraint": {"release": "manual"},
+                "style_direction": {"release": "off"},
+                "candidate_concurrency": 2,
+                "watermark": True,
+            },
             sync_unstarted_image_work_items=True,
             expected_sync_instance_ids=["i_image_2"],
             envelope=self._settings_envelope(task_id, "propose-sync"),
@@ -164,12 +169,29 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "APPLIED_BEFORE_START")
+        self.assertEqual(
+            [item["field"] for item in proposal["diff"]],
+            [
+                "category_constraint.release",
+                "style_direction.release",
+                "candidate_concurrency",
+                "watermark",
+            ],
+        )
         self.assertEqual(result["sync_instance_ids"], ["i_image_2"])
         self.assertTrue(source["scope"]["work_item_id"].startswith("work_"))
         self.assertNotEqual(source["scope"]["work_item_id"], "s_image")
         for instance_id in ("i_image_1", "i_image_2"):
             current = self.materializer.revisions.read_current(task_id, instance_id)
             self.assertEqual(current["manifest"]["overrides"]["candidate_concurrency"], 2)
+            self.assertEqual(
+                current["manifest"]["overrides"]["category_constraint"]["release"],
+                "manual",
+            )
+            self.assertEqual(
+                current["manifest"]["overrides"]["style_direction"]["release"],
+                "off",
+            )
             self.assertTrue(current["manifest"]["overrides"]["watermark"])
             self.assertEqual(current["manifest"]["apply_status"], "APPLIED")
 

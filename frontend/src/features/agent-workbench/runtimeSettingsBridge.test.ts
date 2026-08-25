@@ -23,7 +23,11 @@ describe("runtime settings bridge protocol", () => {
       action: "runtime_settings.propose",
       payload: {
         base_revision: 3,
-        overrides: { watermark: true },
+        overrides: {
+          category_constraint: { release: "manual" },
+          style_direction: { release: "off" },
+          watermark: true,
+        },
         sync_unstarted_image_work_items: true,
         expected_sync_instance_ids: ["instance_other"],
       },
@@ -35,6 +39,13 @@ describe("runtime settings bridge protocol", () => {
     expect(parseBridgeRequest({
       ...request,
       payload: { ...request.payload, overrides: { adapter_key: "secret" } },
+    }, "instance_image", base.nonce)).toBeNull();
+    expect(parseBridgeRequest({
+      ...request,
+      payload: {
+        ...request.payload,
+        overrides: { category_constraint: { release: "sometimes" } },
+      },
     }, "instance_image", base.nonce)).toBeNull();
     expect(parseBridgeRequest({
       ...request,
