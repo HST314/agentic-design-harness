@@ -50,6 +50,19 @@
         "stop_early_on_pass": {"type": "boolean"}
       }
     },
+    "libraryReleaseOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "release": {"type": "string", "enum": ["auto", "manual", "off"]}
+      }
+    },
+    "effectiveLibraryRelease": {
+      "allOf": [
+        {"$ref": "#/$defs/libraryReleaseOverride"},
+        {"required": ["release"]}
+      ]
+    },
     "runtimeOverrides": {
       "type": "object",
       "additionalProperties": false,
@@ -60,6 +73,8 @@
         },
         "max_auto_questions": {"type": "integer", "minimum": 0, "maximum": 10},
         "clarification_total_budget": {"type": "integer", "minimum": 0, "maximum": 100},
+        "category_constraint": {"$ref": "#/$defs/libraryReleaseOverride"},
+        "style_direction": {"$ref": "#/$defs/libraryReleaseOverride"},
         "candidate_concurrency": {"type": "integer", "minimum": 1, "maximum": 5},
         "default_output_size": {
           "type": "string",
@@ -91,6 +106,8 @@
         },
         "max_auto_questions": {"type": "integer", "minimum": 0, "maximum": 10},
         "clarification_total_budget": {"type": "integer", "minimum": 0, "maximum": 100},
+        "category_constraint": {"$ref": "#/$defs/effectiveLibraryRelease"},
+        "style_direction": {"$ref": "#/$defs/effectiveLibraryRelease"},
         "candidate_concurrency": {"type": "integer", "minimum": 1, "maximum": 5},
         "default_output_size": {
           "type": "string",

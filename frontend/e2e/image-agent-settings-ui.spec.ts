@@ -38,6 +38,14 @@ const fixture = `<!doctype html>
       question_preference: { inherited: 'proactive', effective: 'proactive', overridden: false },
       max_auto_questions: { inherited: 3, effective: 3, overridden: false },
       clarification_total_budget: { inherited: 10, effective: 10, overridden: false },
+      category_constraint: {
+        inherited: { release: 'auto' }, effective: { release: 'manual' },
+        explicit: { release: 'manual' }, overridden: true,
+      },
+      style_direction: {
+        inherited: { release: 'auto' }, effective: { release: 'off' },
+        explicit: { release: 'off' }, overridden: true,
+      },
       candidate_concurrency: { inherited: 5, effective: 3, explicit: 3, overridden: true },
       default_output_size: { inherited: '2560x1440', effective: '2560x1440', overridden: false },
       response_format: { inherited: 'url', effective: 'url', overridden: false },
@@ -131,7 +139,8 @@ test("renders the task settings layout with six accessible tabs and a save scope
     expected_sync_instance_ids: ["instance_image_2"],
   });
   await page.getByRole("tab", { name: "数据库与放行" }).click();
-  await expect(page.getByText("品类与艺术风格的放行遵循当前任务审批流程")).toBeVisible();
+  await expect(page.getByLabel("品类约束放行方式")).toHaveValue("manual");
+  await expect(page.getByLabel("艺术风格放行方式")).toHaveValue("off");
   await expect.poll(() => page.evaluate(
     () => document.documentElement.scrollWidth === document.documentElement.clientWidth,
   )).toBe(true);

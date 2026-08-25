@@ -24,6 +24,8 @@ const SETTING_FIELDS = new Set([
   "question_preference",
   "max_auto_questions",
   "clarification_total_budget",
+  "category_constraint",
+  "style_direction",
   "candidate_concurrency",
   "default_output_size",
   "response_format",
@@ -37,6 +39,7 @@ const SELF_CHECK_FIELDS = new Set([
   "max_rounds",
   "stop_early_on_pass",
 ]);
+const LIBRARY_RELEASE_FIELDS = new Set(["release"]);
 const MODEL_FIELDS = new Set([
   "intake_clarify",
   "confirmation_build",
@@ -83,6 +86,13 @@ function validSelfCheck(value: unknown): boolean {
   });
 }
 
+function validLibraryRelease(value: unknown): boolean {
+  if (value === null) return true;
+  return strictRecord(value, LIBRARY_RELEASE_FIELDS, (_key, item) => (
+    enumOrNull(item, ["auto", "manual", "off"])
+  ));
+}
+
 function validModelOverrides(value: unknown): boolean {
   if (value === null) return true;
   return strictRecord(value, MODEL_FIELDS, (_key, item) => (
@@ -95,6 +105,9 @@ function validOverrides(value: unknown): boolean {
     if (key === "question_preference") return enumOrNull(item, ["proactive", "blocking_only"]);
     if (key === "max_auto_questions") return integerOrNull(item, 0, 10);
     if (key === "clarification_total_budget") return integerOrNull(item, 0, 100);
+    if (key === "category_constraint" || key === "style_direction") {
+      return validLibraryRelease(item);
+    }
     if (key === "candidate_concurrency") return integerOrNull(item, 1, 5);
     if (key === "default_output_size") {
       return item === null || (typeof item === "string" && item.length <= 64 && OUTPUT_SIZE.test(item));

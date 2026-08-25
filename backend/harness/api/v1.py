@@ -239,6 +239,10 @@ class SelfCheckSettingsPatch(StrictRequest):
     stop_early_on_pass: bool | None = None
 
 
+class LibraryReleaseSettingsPatch(StrictRequest):
+    release: Literal["auto", "manual", "off"] | None = None
+
+
 class AdvancedModelSettingsPatch(StrictRequest):
     intake_clarify: str | None = Field(default=None, min_length=1, max_length=128)
     confirmation_build: str | None = Field(default=None, min_length=1, max_length=128)
@@ -254,6 +258,8 @@ class RuntimeSettingsPatch(StrictRequest):
     question_preference: Literal["proactive", "blocking_only"] | None = None
     max_auto_questions: int | None = Field(default=None, ge=0, le=10)
     clarification_total_budget: int | None = Field(default=None, ge=0, le=100)
+    category_constraint: LibraryReleaseSettingsPatch | None = None
+    style_direction: LibraryReleaseSettingsPatch | None = None
     candidate_concurrency: int | None = Field(default=None, ge=1, le=5)
     default_output_size: str | None = Field(default=None, min_length=1, max_length=64)
     response_format: Literal["url", "b64_json"] | None = None
