@@ -19,7 +19,7 @@ class ImageAgentReleaseLockTests(unittest.TestCase):
         release = load_image_agent_lock(default_image_agent_lock_path())
 
         self.assertEqual(
-            release.revision, "066a258db4f5531606b8cbcaf897acbf4bcfd0d9"
+            release.revision, "deac5c05c4aaad7ffb336e2fa127310751de8c5d"
         )
         self.assertEqual(release.package_version, "1.8.2")
         self.assertEqual(release.embedded_path, "agents/image_agent_mvp")
