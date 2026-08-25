@@ -15,11 +15,12 @@ from ..core.config_kernel import (
     RuntimeConfig,
 )
 from ..core.errors import HarnessError
-from ..storage.atomic import atomic_write_json, read_json
+from ..storage.atomic import atomic_write_json
 from ..storage.layout import validate_identifier
 from ..storage.locks import FileLock
 from ..storage.repository import utc_now
 from ..storage.store import FileStateStore
+from ..storage.task_config_revisions import load_legacy_task_snapshot
 
 
 class TaskConfigService:
@@ -135,40 +136,4 @@ class TaskConfigService:
 
     @staticmethod
     def _load_document(path: Path) -> dict[str, Any]:
-        document = read_json(path)
-        required = {
-            "schema_version",
-            "task_id",
-            "source_config_revision",
-            "config_hash",
-            "providers",
-            "model_list",
-            "runtime",
-            "created_at",
-        }
-        if (
-            not isinstance(document, dict)
-            or set(document) != required
-            or document.get("schema_version") != "1.0"
-            or not isinstance(document.get("providers"), dict)
-            or any(
-                not isinstance(value, dict)
-                or set(value) != {"base_url"}
-                or not isinstance(value.get("base_url"), str)
-                for value in document["providers"].values()
-            )
-        ):
-            raise HarnessError("VALIDATION_ERROR", "The task configuration snapshot is invalid.")
-        body = {
-            "providers": document["providers"],
-            "model_list": document["model_list"],
-            "runtime": document["runtime"],
-        }
-        actual_hash = hashlib.sha256(
-            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        if actual_hash != document["config_hash"]:
-            raise HarnessError(
-                "VALIDATION_ERROR", "The task configuration snapshot failed integrity checks."
-            )
-        return deepcopy(document)
+        return load_legacy_task_snapshot(path)
