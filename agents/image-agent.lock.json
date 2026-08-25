@@ -2,11 +2,11 @@
   "schema_version": "1.1",
   "agent": "image_agent_mvp",
   "repository": "https://github.com/HST314/image_agent_mvp.git",
-  "revision": "384c45fa1e9e8bdd7e6f361e59bb96744f3f27cc",
+  "revision": "e11c7560eb99a81ccbe8b52378ea6cacc1b4278b",
   "package_version": "1.8.2",
   "contract_version": "1.0",
   "embedded_path": "agents/image_agent_mvp",
-  "source_content_sha256": "2faa0f32ea41aa5820b2b800301f02251b8f8a8a1b73fcfb05ae08a014b9c412",
+  "source_content_sha256": "e0954f44e985f26cfca3c4a4e2f12c8f93d8bb2cc01ebe099fa8bba8b764c163",
   "dependencies": {
     "files": [
       {
