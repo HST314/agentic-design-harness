@@ -12,11 +12,12 @@ from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from ..adapters.types import AgentInstanceSnapshot, StageSnapshot, TaskCard
 from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
+from ..services.runtime_config_observability import RUNTIME_CONFIG_EVENTS
 from ..storage.atomic import read_json
 from ..storage.layout import validate_identifier
 from ..storage.ndjson import recover_records
@@ -228,6 +229,54 @@ class SettleRetryRequest(StrictRequest):
     actual_tokens: int = Field(ge=0)
     actual_cost_micros: int | None = Field(default=None, ge=0)
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
+class SelfCheckSettingsPatch(StrictRequest):
+    termination: Literal["fix", "solo"] | None = None
+    fixed_rounds: int | None = Field(default=None, ge=1, le=20)
+    max_rounds: int | None = Field(default=None, ge=1, le=50)
+    stop_early_on_pass: bool | None = None
+
+
+class AdvancedModelSettingsPatch(StrictRequest):
+    intake_clarify: str | None = Field(default=None, min_length=1, max_length=128)
+    confirmation_build: str | None = Field(default=None, min_length=1, max_length=128)
+    initial_candidate_generation: str | None = Field(
+        default=None, min_length=1, max_length=128
+    )
+    self_check_inspection: str | None = Field(default=None, min_length=1, max_length=128)
+    self_check_rework: str | None = Field(default=None, min_length=1, max_length=128)
+    human_prompt_rework: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class RuntimeSettingsPatch(StrictRequest):
+    question_preference: Literal["proactive", "blocking_only"] | None = None
+    max_auto_questions: int | None = Field(default=None, ge=0, le=10)
+    clarification_total_budget: int | None = Field(default=None, ge=0, le=100)
+    candidate_concurrency: int | None = Field(default=None, ge=1, le=5)
+    default_output_size: str | None = Field(default=None, min_length=1, max_length=64)
+    response_format: Literal["url", "b64_json"] | None = None
+    watermark: bool | None = None
+    self_check: SelfCheckSettingsPatch | None = None
+    advanced_model_overrides: AdvancedModelSettingsPatch | None = None
+
+
+class RuntimeSettingsProposalRequest(StrictRequest):
+    base_revision: int = Field(ge=1)
+    patch: RuntimeSettingsPatch
+    sync_unstarted_image_work_items: bool = False
+    expected_sync_instance_ids: list[
+        Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")]
+    ] = Field(default_factory=list, max_length=100)
+    envelope: CommandEnvelope
+
+
+class RuntimeSettingsConfirmRequest(StrictRequest):
+    envelope: CommandEnvelope
+
+
+class TaskConfigRebaseRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
@@ -496,7 +545,10 @@ def build_v1_router(container: Container) -> APIRouter:
             events = [
                 _public_audit_event(item)
                 for item in recover_records(path)
-                if item.get("event_type") == "OBJECT_COMMITTED"
+                if (
+                    item.get("event_type") == "OBJECT_COMMITTED"
+                    or item.get("event_type") in RUNTIME_CONFIG_EVENTS
+                )
                 and (
                     actor_type is None
                     or (item.get("actor") or {}).get("actor_type") == actor_type
@@ -617,6 +669,77 @@ def build_v1_router(container: Container) -> APIRouter:
             }
 
         return await run_in_threadpool(read_instance)
+
+    @router.get("/instances/{instance_id}/runtime-settings", tags=["instances"])
+    async def get_instance_runtime_settings(instance_id: str) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        return await run_in_threadpool(
+            container.runtime_settings.get,
+            task_id,
+            instance_id,
+        )
+
+    @router.post(
+        "/instances/{instance_id}/runtime-setting-proposals",
+        tags=["instances"],
+    )
+    async def propose_instance_runtime_settings(
+        instance_id: str,
+        body: RuntimeSettingsProposalRequest,
+    ) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        return await run_in_threadpool(
+            container.runtime_settings.propose,
+            task_id,
+            instance_id,
+            base_revision=body.base_revision,
+            patch=body.patch.model_dump(exclude_unset=True),
+            sync_unstarted_image_work_items=body.sync_unstarted_image_work_items,
+            expected_sync_instance_ids=body.expected_sync_instance_ids,
+            envelope=body.envelope,
+        )
+
+    @router.post(
+        "/instances/{instance_id}/runtime-setting-proposals/{proposal_id}/confirm",
+        tags=["instances"],
+    )
+    async def confirm_instance_runtime_settings(
+        instance_id: str,
+        proposal_id: str,
+        body: RuntimeSettingsConfirmRequest,
+    ) -> Any:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        result = await run_in_threadpool(
+            container.runtime_settings.confirm,
+            task_id,
+            instance_id,
+            proposal_id,
+            envelope=body.envelope,
+        )
+        if result["status"] == "WAITING_SAFE_POINT":
+            return JSONResponse(status_code=202, content=result)
+        return result
+
+    @router.post("/runtime-settings/rebase-unstarted-tasks", tags=["instances"])
+    async def rebase_unstarted_task_settings(
+        body: TaskConfigRebaseRequest,
+    ) -> dict[str, Any]:
+        if body.envelope.actor_type not in {"human", "system"}:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only a human or the system may rebase task configuration defaults.",
+            )
+        return await run_in_threadpool(
+            container.task_config_rebase.rebase_all,
+            actor={
+                "actor_type": body.envelope.actor_type,
+                "actor_id": body.envelope.actor_id,
+            },
+        )
+
+    @router.get("/runtime-settings/metrics", tags=["audit"])
+    async def get_runtime_settings_metrics() -> dict[str, Any]:
+        return await run_in_threadpool(container.runtime_settings.metrics)
 
     @router.get("/instances/{instance_id}/approvals", tags=["approvals"])
     async def list_instance_approvals(
@@ -1204,6 +1327,39 @@ def _task_summary(container: Container, index_item: dict[str, Any]) -> dict[str,
 def _public_audit_event(event: dict[str, Any]) -> dict[str, Any]:
     candidate_actor = event.get("actor")
     actor: dict[str, Any] = candidate_actor if isinstance(candidate_actor, dict) else {}
+    if event.get("event_type") in RUNTIME_CONFIG_EVENTS:
+        safe_fields = {
+            name: deepcopy(event[name])
+            for name in (
+                "instance_id",
+                "proposal_id",
+                "revision_id",
+                "task_config_revision_id",
+                "old_hash",
+                "new_hash",
+                "config_hash",
+                "changed_fields",
+                "conflict_fields",
+                "error_code",
+                "reason",
+                "branch_id",
+                "checkpoint_id",
+                "instance_count",
+            )
+            if name in event
+        }
+        return {
+            "event_id": str(event["event_id"]),
+            "event_type": str(event["event_type"]),
+            "task_id": str(event["task_id"]),
+            "actor": {
+                "actor_type": str(actor.get("actor_type", "system")),
+                "actor_id": str(actor.get("actor_id", "unknown")),
+            },
+            "result": str(event.get("result", "COMMITTED")),
+            "occurred_at": str(event["occurred_at"]),
+            **safe_fields,
+        }
     return {
         "event_id": str(event["event_id"]),
         "event_type": "OBJECT_COMMITTED",

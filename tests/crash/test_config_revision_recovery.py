@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
 from harness.core.errors import HarnessError, SimulatedCrash
-from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.task_config import TaskConfigService
+from harness.storage.atomic import (
+    atomic_write_bytes,
+    atomic_write_json,
+    canonical_yaml_bytes,
+    digest_json,
+)
 from harness.storage.instance_config_revisions import InstanceConfigRevisionStore
 from harness.storage.task_config_revisions import TaskConfigRevisionStore
 from runtime_helpers import build_config_snapshot, build_service, create_task
@@ -34,10 +41,78 @@ class ConfigRevisionRecoveryTests(unittest.TestCase):
 
     def test_legacy_task_and_instance_configurations_remain_readable_without_rewrite(self) -> None:
         snapshot = build_config_snapshot()
+        task_body = {
+            "providers": {
+                name: {"base_url": provider.base_url}
+                for name, provider in snapshot.providers.providers.items()
+            },
+            "model_list": snapshot.model_list.model_dump(mode="json"),
+            "runtime": snapshot.runtime.model_dump(mode="json"),
+        }
+        legacy_task = {
+            "schema_version": "1.0",
+            "task_id": "task_config_recovery",
+            "source_config_revision": snapshot.revision,
+            "config_hash": hashlib.sha256(
+                json.dumps(task_body, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            **task_body,
+            "created_at": CREATED_AT,
+        }
+        legacy_task_path = (
+            self.store.layout.control_root
+            / "tasks"
+            / "task_config_recovery"
+            / "master"
+            / "config-snapshot.json"
+        )
+        legacy_task_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(legacy_task_path, legacy_task)
         task_config = TaskConfigService(self.store, snapshot)
-        legacy_task = task_config.pin("task_config_recovery")
-        materializer = ImageAgentConfigMaterializer(self.store, task_config)
-        materializer.materialize("task_config_recovery", "instance_config_recovery")
+        runtime_body = {
+            "question_preference": "proactive",
+            "max_auto_questions": 3,
+            "clarification_total_budget": 10,
+            "candidate_concurrency": 2,
+            "default_output_size": "1024x1024",
+            "response_format": "url",
+            "watermark": False,
+            "self_check": {"termination": "solo"},
+            "offline_mode": False,
+        }
+        routes = (
+            "intake_clarify",
+            "confirmation_build",
+            "initial_candidate_generation",
+            "self_check_inspection",
+            "self_check_rework",
+            "human_prompt_rework",
+        )
+        model_body = {
+            "model_config_id": "legacy-config",
+            "state_bindings": [
+                {"state": state, "model": "legacy-model"} for state in routes
+            ],
+        }
+        metadata = {
+            "source_config_revision": snapshot.revision,
+            "config_hash": digest_json(
+                {"runtime": runtime_body, "model_config": model_body}
+            ),
+            "generated_at": CREATED_AT,
+        }
+        runtime_root = self._instance_runtime_root()
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(
+            runtime_root / "runtime.yaml",
+            canonical_yaml_bytes({**runtime_body, **metadata}),
+            mode=0o400,
+        )
+        atomic_write_bytes(
+            runtime_root / "model_config.yaml",
+            canonical_yaml_bytes({**model_body, **metadata}),
+            mode=0o400,
+        )
 
         task_current = self.task_revisions.read_current("task_config_recovery")
         instance_current = self.instance_revisions.read_current(

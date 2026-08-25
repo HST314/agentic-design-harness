@@ -120,6 +120,44 @@ class TaskConfigRevisionStore:
         self._validate_revision_hash(document)
         return document
 
+    def lock_current(
+        self,
+        task_id: str,
+        *,
+        locked_at: str,
+        locked_reason: str,
+    ) -> dict[str, Any]:
+        """Freeze the current task baseline at the accepted-start boundary.
+
+        The caller owns the shared application task lock.  This store lock only
+        serializes the state-file CAS, so a system-default rebase and the first
+        durable launch intent cannot pass one another.
+        """
+
+        validate_identifier(task_id, "task_id")
+        with FileLock(self._lock_path(task_id), self.store.lock_timeout_seconds):
+            current = self.read_current(task_id)
+            if current is None:
+                raise HarnessError(
+                    "CONFIG_INTEGRITY_FAILED",
+                    "The task configuration cannot be locked before it is pinned.",
+                )
+            state = current["state"]
+            if state["locked_at"] is not None:
+                return deepcopy(state)
+            updated = {
+                **state,
+                "locked_at": locked_at,
+                "locked_reason": locked_reason,
+                "revision": int(state["revision"]) + 1,
+                "updated_at": locked_at,
+            }
+            self.store.contracts.validate("task-config-state", updated)
+            validate_public_config_tree(updated)
+            ensure_private_directory(self._config_root(task_id))
+            atomic_write_json(self._state_path(task_id), updated, mode=0o640)
+            return deepcopy(updated)
+
     def recover(self, task_id: str) -> dict[str, Any]:
         """Remove abandoned atomic-write artifacts without promoting orphan revisions."""
 

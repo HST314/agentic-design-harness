@@ -92,6 +92,87 @@ class ImageAdapterTests(unittest.TestCase):
         self.assertEqual(recovery.details["mode"], "idempotent_start_replay")
         get_status.assert_not_called()
 
+    def test_managed_runtime_apply_validates_and_forwards_the_frozen_receipt(self) -> None:
+        card = self._card([])
+        self.commands.save_plan(
+            "t_image_adapter",
+            stages=[
+                stage(
+                    "t_image_adapter",
+                    "s_image",
+                    "image",
+                    1,
+                    [],
+                    True,
+                    ["i_image_adapter"],
+                )
+            ],
+            instances=[
+                instance(
+                    "t_image_adapter", "i_image_adapter", "s_image", "image", True
+                )
+            ],
+            task_cards=[card],
+            envelope=envelope(
+                "save-managed-config-apply",
+                self.store.task.revision("t_image_adapter", "t_image_adapter"),
+            ),
+        )
+        control = (
+            self.store.layout.initialize_instance("t_image_adapter", "i_image_adapter")
+            / "runtime"
+            / "managed-control.json"
+        )
+        atomic_write_json(
+            control,
+            {
+                "instance_id": "i_image_adapter",
+                "request_key": "managed-adapter-key-for-tests-12345",
+            },
+        )
+        source = "checkpoint_0123456789abcdef01234567"
+        target = "checkpoint_89abcdef0123456701234567"
+        config_hash = "a" * 64
+        response = {
+            "status": "APPLIED_ON_BRANCH",
+            "runtime_config_revision_id": "cfg-inst-r000002",
+            "branch_id": "config_branch_1",
+            "checkpoint_id": target,
+            "from_checkpoint": source,
+            "effective_from_state": "confirmation_build",
+            "config_hash": config_hash,
+        }
+        with (
+            patch.object(
+                self.adapter, "_base_url", return_value="http://127.0.0.1:18101"
+            ),
+            patch.object(self.adapter, "_request", return_value=response) as request,
+        ):
+            receipt = self.adapter.apply_runtime_revision(
+                "i_image_adapter",
+                revision_id="cfg-inst-r000002",
+                from_checkpoint=source,
+                expected_config_hash=config_hash,
+                effective_from_state="confirmation_build",
+                idempotency_key="managed-apply-command",
+            )
+
+        self.assertEqual(
+            receipt,
+            {
+                "revision_id": "cfg-inst-r000002",
+                "branch_id": "config_branch_1",
+                "checkpoint_id": target,
+                "from_checkpoint": source,
+                "effective_from_state": "confirmation_build",
+                "config_hash": config_hash,
+            },
+        )
+        self.assertEqual(
+            request.call_args.kwargs["headers"],
+            {"X-Harness-Adapter-Key": "managed-adapter-key-for-tests-12345"},
+        )
+
     def tearDown(self) -> None:
         self.store.close()
         self.temporary.cleanup()
@@ -235,6 +316,7 @@ class ImageAdapterTests(unittest.TestCase):
                 "manifest": {"failed_step": None},
                 "snapshot": {"phase": "waiting_clarification", "waiting": True},
                 "capabilities": ["answer_clarification"],
+                "unknown_actions": [],
             },
             {"job_id": "job_123", "status": "succeeded"},
             7,
@@ -251,6 +333,7 @@ class ImageAdapterTests(unittest.TestCase):
                 "manifest": {"failed_step": None},
                 "snapshot": {"phase": "waiting_clarification", "waiting": False},
                 "capabilities": ["answer_clarification"],
+                "unknown_actions": [],
             },
             {"job_id": "job_123", "status": "succeeded"},
             4,
@@ -266,7 +349,12 @@ class ImageAdapterTests(unittest.TestCase):
 
     def test_succeeded_job_without_snapshot_fails_closed(self) -> None:
         observation = self.adapter._observation(
-            {"manifest": {"failed_step": None}, "snapshot": {}, "capabilities": []},
+            {
+                "manifest": {"failed_step": None},
+                "snapshot": {},
+                "capabilities": [],
+                "unknown_actions": [],
+            },
             {"job_id": "job_123", "status": "succeeded", "result": {}},
             8,
             None,
@@ -587,6 +675,7 @@ class ImageAdapterTests(unittest.TestCase):
                     "waiting": True,
                 },
                 "capabilities": ["review_calibration", "enter_human_tune"],
+                "unknown_actions": [],
             },
             None,
             8,

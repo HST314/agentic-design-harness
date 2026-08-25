@@ -250,6 +250,8 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 "startup_timeout_seconds": supervisor.startup_timeout_seconds,
                 "shutdown_grace_seconds": supervisor.shutdown_grace_seconds,
                 "source_config_revision": launch_config.source_config_revision,
+                "task_config_revision_id": launch_config.task_config_revision_id,
+                "runtime_config_revision_id": launch_config.runtime_config_revision_id,
                 "config_hash": launch_config.config_hash,
             }
             atomic_write_json(record_path, prepared)
@@ -435,6 +437,8 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 "HARNESS_CONFIG_REVISION": launch_config.source_config_revision,
             }
         )
+        if launch_config.config_root is not None:
+            environment["IMAGE_AGENT_CONFIG_ROOT"] = str(launch_config.config_root)
         return environment
 
     def _enforce_code_identity(

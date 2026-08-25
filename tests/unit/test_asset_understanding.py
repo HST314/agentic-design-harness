@@ -182,14 +182,17 @@ class AssetUnderstandingTests(unittest.TestCase):
             service.understand("task_understanding", scanned_pdf["asset_id"])
             self.assertEqual(len(factory.vision_calls), vision_count)
 
-            snapshot_path = (
+            snapshot_root = (
                 store.layout.control_root
                 / "tasks"
                 / "task_understanding"
                 / "master"
-                / "config-snapshot.json"
+                / "config"
             )
-            snapshot_text = snapshot_path.read_text(encoding="utf-8")
+            snapshot_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in snapshot_root.rglob("*.json")
+            )
             self.assertNotIn("test-provider-secret-value", snapshot_text)
             self.assertNotIn("api_key", snapshot_text)
             usage = store.usage.list("task_understanding")
