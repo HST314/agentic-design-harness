@@ -59,6 +59,8 @@ _DEFAULT_SELF_CHECK = {
     "max_rounds": 4,
     "stop_early_on_pass": False,
 }
+_DEFAULT_LIBRARY_RELEASE = {"release": "auto"}
+LIBRARY_RELEASE_FIELDS = ("category_constraint", "style_direction")
 _OUTPUT_SIZE = re.compile(r"^(?:[1-9][0-9]{1,4}x[1-9][0-9]{1,4}|[124]K)$")
 
 
@@ -318,6 +320,27 @@ class ImageAgentConfigMaterializer:
                 "FIELD_NOT_EDITABLE",
                 "The runtime configuration contains an unknown self-check field.",
             )
+        for field_name in LIBRARY_RELEASE_FIELDS:
+            boundary = candidate.get(field_name, {})
+            if not isinstance(boundary, dict):
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    f"The {field_name} override must be an object.",
+                )
+            if set(boundary) - {"release"}:
+                raise HarnessError(
+                    "FIELD_NOT_EDITABLE",
+                    f"The runtime configuration contains an unknown {field_name} field.",
+                )
+            if "release" in boundary and boundary["release"] not in {
+                "auto",
+                "manual",
+                "off",
+            }:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    f"The {field_name} release mode is invalid.",
+                )
         probe_runtime = self.effective_runtime(task_revision, candidate)
         self._validate_effective_runtime(probe_runtime)
         if probe_runtime["self_check"]["fixed_rounds"] > probe_runtime["self_check"]["max_rounds"]:
@@ -350,6 +373,16 @@ class ImageAgentConfigMaterializer:
                 raise HarnessError("VALIDATION_ERROR", f"{name} is outside its safe range.")
         if runtime.get("question_preference") not in {"proactive", "blocking_only"}:
             raise HarnessError("VALIDATION_ERROR", "question_preference is invalid.")
+        for field_name in LIBRARY_RELEASE_FIELDS:
+            boundary = runtime.get(field_name)
+            if (
+                not isinstance(boundary, dict)
+                or boundary.get("release") not in {"auto", "manual", "off"}
+                or set(boundary) != {"release"}
+            ):
+                raise HarnessError(
+                    "VALIDATION_ERROR", f"{field_name}.release is invalid."
+                )
         if runtime.get("response_format") not in {"url", "b64_json"}:
             raise HarnessError("VALIDATION_ERROR", "response_format is invalid.")
         if type(runtime.get("watermark")) is not bool:
@@ -373,7 +406,11 @@ class ImageAgentConfigMaterializer:
     def merge_overrides(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         merged = deepcopy(current)
         for field_name, value in patch.items():
-            if field_name in {"self_check", "advanced_model_overrides"}:
+            if field_name in {
+                *LIBRARY_RELEASE_FIELDS,
+                "self_check",
+                "advanced_model_overrides",
+            }:
                 if value is None:
                     merged.pop(field_name, None)
                     continue
@@ -439,6 +476,10 @@ class ImageAgentConfigMaterializer:
             }[image["question_preference"]],
             "max_auto_questions": 3,
             "clarification_total_budget": 10,
+            **{
+                field_name: deepcopy(_DEFAULT_LIBRARY_RELEASE)
+                for field_name in LIBRARY_RELEASE_FIELDS
+            },
             "candidate_concurrency": image["candidate_concurrency"],
             "default_output_size": image["default_output_size"],
             "response_format": image["response_format"],
@@ -448,8 +489,8 @@ class ImageAgentConfigMaterializer:
         for field_name, value in overrides.items():
             if field_name == "advanced_model_overrides":
                 continue
-            if field_name == "self_check":
-                effective["self_check"].update(value)
+            if field_name in {*LIBRARY_RELEASE_FIELDS, "self_check"}:
+                effective[field_name].update(value)
             else:
                 effective[field_name] = value
         return effective
@@ -554,6 +595,7 @@ RUNTIME_SETTING_FIELDS = (
     "question_preference",
     "max_auto_questions",
     "clarification_total_budget",
+    *LIBRARY_RELEASE_FIELDS,
     "candidate_concurrency",
     "default_output_size",
     "response_format",

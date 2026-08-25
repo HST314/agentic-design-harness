@@ -19,6 +19,7 @@ from ..storage.locks import FileLock
 from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 from .agent_config_materialization import (
+    LIBRARY_RELEASE_FIELDS,
     MODEL_STATES,
     RUNTIME_SETTING_FIELDS,
     ImageAgentConfigMaterializer,
@@ -42,6 +43,8 @@ _FIELD_CONSUMERS = {
     "question_preference": "future_clarification_questions",
     "max_auto_questions": "future_clarification_questions",
     "clarification_total_budget": "future_clarification_questions",
+    "category_constraint": "future_category_library_boundary",
+    "style_direction": "future_style_library_boundary",
     "candidate_concurrency": "future_candidate_generation",
     "default_output_size": "future_image_generation",
     "response_format": "future_image_generation",
@@ -92,7 +95,12 @@ class InstanceRuntimeSettingsService:
             and self._terminal_saga(task_id, instance_id, state="FAILED") is None
         )
         inherited = self.materializer.effective_runtime(task_revision, {})
-        effective = deepcopy(current["manifest"]["effective_runtime"])
+        effective = self.materializer.effective_runtime(task_revision, {})
+        for field, value in current["manifest"]["effective_runtime"].items():
+            if field in {*LIBRARY_RELEASE_FIELDS, "self_check"}:
+                effective[field].update(deepcopy(value))
+            else:
+                effective[field] = deepcopy(value)
         inherited_models = self._effective_model_ids(task_revision, {})
         effective_models = self._effective_model_ids(
             task_revision, current["manifest"]["overrides"]
@@ -1224,14 +1232,19 @@ class InstanceRuntimeSettingsService:
             before = (
                 current_model_ids
                 if field == "advanced_model_overrides"
-                else prior[field]
+                else prior.get(field, {"release": "auto"})
             )
             after = effective_models if field == "advanced_model_overrides" else effective[field]
             if before == after:
                 continue
+            diff_field = field
+            if field in LIBRARY_RELEASE_FIELDS:
+                diff_field = f"{field}.release"
+                before = before["release"]
+                after = after["release"]
             changes.append(
                 {
-                    "field": field,
+                    "field": diff_field,
                     "before": deepcopy(before),
                     "after": deepcopy(after),
                     "consumer_state": _FIELD_CONSUMERS[field],
@@ -1259,6 +1272,26 @@ class InstanceRuntimeSettingsService:
                     "type": ["integer", "null"],
                     "minimum": 0,
                     "maximum": 100,
+                },
+                "category_constraint": {
+                    "type": ["object", "null"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "release": {
+                            "type": ["string", "null"],
+                            "enum": ["auto", "manual", "off", None],
+                        }
+                    },
+                },
+                "style_direction": {
+                    "type": ["object", "null"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "release": {
+                            "type": ["string", "null"],
+                            "enum": ["auto", "manual", "off", None],
+                        }
+                    },
                 },
                 "candidate_concurrency": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
                 "default_output_size": {
@@ -1307,7 +1340,7 @@ class InstanceRuntimeSettingsService:
                 "The runtime settings patch contains a non-editable field.",
                 {"fields": sorted(unknown)},
             )
-        for nested in ("self_check", "advanced_model_overrides"):
+        for nested in (*LIBRARY_RELEASE_FIELDS, "self_check", "advanced_model_overrides"):
             value = patch.get(nested)
             if value is not None and not isinstance(value, dict):
                 raise HarnessError("VALIDATION_ERROR", f"{nested} must be an object or null.")
@@ -1317,11 +1350,19 @@ class InstanceRuntimeSettingsService:
         }
         advanced = patch.get("advanced_model_overrides") or {}
         unknown_models = set(advanced) - set(MODEL_STATES)
-        if unknown_self_check or unknown_models:
+        unknown_library_fields = set()
+        for nested in LIBRARY_RELEASE_FIELDS:
+            boundary = patch.get(nested) or {}
+            unknown_library_fields.update(set(boundary) - {"release"})
+        if unknown_self_check or unknown_models or unknown_library_fields:
             raise HarnessError(
                 "FIELD_NOT_EDITABLE",
                 "The runtime settings patch contains a non-editable nested field.",
-                {"fields": sorted(unknown_self_check | unknown_models)},
+                {
+                    "fields": sorted(
+                        unknown_self_check | unknown_models | unknown_library_fields
+                    )
+                },
             )
 
     @staticmethod
