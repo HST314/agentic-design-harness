@@ -75,6 +75,7 @@ test("embeds only the server-approved current Image instance with keyboard exits
   await expect(iframe).toHaveAttribute("sandbox", /allow-downloads/);
   await expect(iframe).toHaveAttribute("sandbox", /allow-scripts/);
   await expect(iframe).not.toHaveAttribute("sandbox", /allow-top-navigation/);
+  await expect(iframe).toHaveAttribute("referrerpolicy", "origin");
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "Image Agent Studio" })).toBeVisible();
   await expect(page.getByRole("textbox")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "新标签页" })).toHaveAttribute("rel", "noopener noreferrer");
@@ -88,6 +89,84 @@ test("embeds only the server-approved current Image instance with keyboard exits
     await page.setViewportSize({ width, height: 900 });
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth)).toBe(true);
   }
+});
+
+test("bridges managed settings through the verified parent with a rotating nonce", async ({ page }) => {
+  const item = workItem("image");
+  let proposalBody: Record<string, unknown> | null = null;
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_image", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ schema_version: "1.0", task, item, refresh_after_ms: 3000, projection_revision: "image-settings" }),
+  }));
+  await page.route("**/api/v1/instances/instance_image/ui-link?*", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      schema_version: "1.0",
+      task_id: task.task_id,
+      work_item_id: item.work_item_id,
+      instance_id: "instance_image",
+      agent_type: "image",
+      instance_status: "RUNNING",
+      task_revision: 9,
+      ui_url: "http://127.0.0.1:19093/",
+      link_status: "READY",
+      embeddable: true,
+      frame_policy: "FRAME_ANCESTORS_ALLOWED",
+      diagnostic: "Allowed.",
+    }),
+  }));
+  await page.route("**/api/v1/instances/instance_image/runtime-settings", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ schema_version: "2.0", revision: { current: 3 }, values: {} }),
+  }));
+  await page.route("**/api/v1/instances/instance_image/runtime-setting-proposals", async (route) => {
+    proposalBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "2.0", proposal_id: "proposal_e2e", diff: [] }),
+    });
+  });
+  await page.route("http://127.0.0.1:19093/", async (route) => route.fulfill({
+    status: 200,
+    contentType: "text/html",
+    body: `<!doctype html><html><body><main><h1>Image Agent Studio</h1><output id="bridge-result">等待桥接</output></main><script>
+      const parentOrigin = new URL(document.referrer).origin;
+      const base = { protocol: 'image-agent-runtime-settings', version: '1.0', instance_id: 'instance_image' };
+      let step = 'get';
+      addEventListener('message', (event) => {
+        if (event.source !== parent || event.origin !== parentOrigin || event.data.protocol !== base.protocol) return;
+        if (event.data.type === 'bridge.init') {
+          parent.postMessage({ ...base, type: 'bridge.request', request_id: 'bridge_settings_get_123', nonce: event.data.nonce, action: 'runtime_settings.get', payload: {} }, parentOrigin);
+        } else if (event.data.type === 'bridge.response' && event.data.ok && step === 'get') {
+          step = 'propose';
+          parent.postMessage({ ...base, type: 'bridge.request', request_id: 'bridge_settings_propose_456', nonce: event.data.next_nonce, action: 'runtime_settings.propose', payload: { base_revision: 3, overrides: { watermark: true }, sync_unstarted_image_work_items: false, expected_sync_instance_ids: [] } }, parentOrigin);
+        } else if (event.data.type === 'bridge.response' && event.data.ok && step === 'propose') {
+          document.querySelector('#bridge-result').textContent = event.data.payload.proposal_id;
+        }
+      });
+      parent.postMessage({ ...base, type: 'bridge.hello' }, parentOrigin);
+    </script></html>`,
+  }));
+
+  await page.goto("/tasks/task_workbench_e2e/work-items/work_image");
+  await expect(page.frameLocator("iframe").locator("#bridge-result")).toHaveText("proposal_e2e");
+  expect(proposalBody).toMatchObject({
+    base_revision: 3,
+    overrides: { watermark: true },
+    sync_unstarted_image_work_items: false,
+    expected_sync_instance_ids: [],
+    envelope: {
+      actor_type: "human",
+      actor_id: "human_operator",
+      expected_revision: 9,
+    },
+  });
+  expect(JSON.stringify(proposalBody)).not.toContain("Adapter");
+  expect(JSON.stringify(proposalBody)).not.toContain("request_key");
 });
 
 test("shows frame-policy failure with a controlled external fallback", async ({ page }) => {

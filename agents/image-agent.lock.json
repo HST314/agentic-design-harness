@@ -2,11 +2,11 @@
   "schema_version": "1.1",
   "agent": "image_agent_mvp",
   "repository": "https://github.com/HST314/image_agent_mvp.git",
-  "revision": "e11c7560eb99a81ccbe8b52378ea6cacc1b4278b",
-  "package_version": "1.8.2",
+  "revision": "4d51f4fbe487e68b3e5f888cd5b7ab70fbd1f10e",
+  "package_version": "1.8.3",
   "contract_version": "1.0",
   "embedded_path": "agents/image_agent_mvp",
-  "source_content_sha256": "e0954f44e985f26cfca3c4a4e2f12c8f93d8bb2cc01ebe099fa8bba8b764c163",
+  "source_content_sha256": "0d97e0aa7ee14cdc36cbe285e4bf4368450ef7d9ff639d2d1c14bbbf4d36524c",
   "dependencies": {
     "files": [
       {
@@ -17,7 +17,7 @@
       {
         "scope": "image_agent",
         "path": "pyproject.toml",
-        "sha256": "a2c1cb81691a4cc20fe95402d669b27f83200e03de3e79b318af111a56833c57"
+        "sha256": "d5277d4a297ee76abae01544bb5db2456887393dea48aa29815d84d140042b18"
       },
       {
         "scope": "image_agent",
@@ -30,6 +30,6 @@
         "sha256": "764db3e4fa6c35601886d0c5bcc15d29d00957627fdcd8aa556802dfffb51ece"
       }
     ],
-    "lock_set_sha256": "2a13971603ba9bbb823e96eebad7cde00f5d3f589921f448d3a584b24727d1a8"
+    "lock_set_sha256": "0815d00f8c700af5bd0751533a98f0a55a971a22161e16b755899aa0a6c2eced"
   }
 }

@@ -26,6 +26,10 @@ TaskCard 由 Master 生成并在主系统审阅。Image Agent 受管页面不显
 
 React 的 WorkItem 页面只请求 `GET /api/v1/instances/{instance_id}/ui-link`。服务端验证任务归属、当前实例、端口 allowlist、HTML 响应和 frame 策略；不合法 URL 返回稳定错误，不生成空白或任意 iframe。
 
+受管页面使用工作区、当前任务设置、状态三个顶级页签。它不再渲染工程目录或工程创建入口，直接打开 runtime context 绑定的唯一工程；独立运行模式仍保留目录、创建与切换能力。状态页只消费结构化健康、job、配置修订/摘要、待应用修订与异常投影；顶部仅在异常时显示提示点。
+
+当前任务设置的浏览器写入通过版本化父子消息桥完成：子页面从 `document.referrer` 推导精确父源，父页面同时校验 `event.origin`、`event.source`、protocol、instance ID 与一次性 nonce。父页面轮换 nonce 后才调用下方 Harness 设置 API，所有写入保持 proposal → 人工确认两步。iframe 消息不携带 Adapter Key、Provider 凭据、任务修订写权限或任意 URL；旧协议实例继续显示只读设置。iframe 使用 `referrerPolicy="origin"`，只披露完成源校验所需的父源，不披露任务路径。
+
 ## 运行配置控制面
 
 Harness 是实例运行配置的唯一控制面。任务创建时冻结无秘密的任务配置 revision；首个持久启动意图与系统默认 rebase 共用任务锁，意图一旦被接受便锁定任务基线。系统默认发布只 rebase 从未启动的任务，并为其未启动 Image 实例生成新 revision；实例覆盖原样保留。若模型已从当前批准列表移除，任务进入 `CONFIG_REVIEW_REQUIRED`，不得静默清除覆盖。
