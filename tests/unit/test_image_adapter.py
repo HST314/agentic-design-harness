@@ -92,6 +92,29 @@ class ImageAdapterTests(unittest.TestCase):
         self.assertEqual(recovery.details["mode"], "idempotent_start_replay")
         get_status.assert_not_called()
 
+    def test_prepare_exposes_only_managed_runtime_identity_and_capability(self) -> None:
+        artifact = self.root / "runtime-artifact"
+        artifact.mkdir()
+        (artifact / "main_front.py").write_text("# test entrypoint\n", encoding="utf-8")
+        self.adapter.runtime_artifact_root = artifact
+        self.adapter.runtime_attestation = object()  # type: ignore[assignment]
+
+        with (
+            patch.object(self.adapter, "_validate_runtime_source"),
+            patch.object(self.adapter.image_config, "materialize"),
+            patch.object(
+                self.adapter,
+                "map_task_card",
+                return_value={"task_id": "i_image_adapter", "project_id": "i_image_adapter"},
+            ),
+        ):
+            spec = self.adapter.prepare(self._request(self._card([])))
+
+        self.assertEqual(spec.public_environment["HARNESS_TASK_ID"], "t_image_adapter")
+        self.assertEqual(spec.public_environment["HARNESS_INSTANCE_ID"], "i_image_adapter")
+        self.assertEqual(spec.public_environment["INSTANCE_RUNTIME_SETTINGS_V2"], "1")
+        self.assertNotIn("request_key", " ".join(spec.public_environment))
+
     def test_managed_runtime_apply_validates_and_forwards_the_frozen_receipt(self) -> None:
         card = self._card([])
         self.commands.save_plan(
