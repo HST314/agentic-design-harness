@@ -36,6 +36,7 @@ _REQUIRED_ROUTES = frozenset(
         "/api/health",
         "/api/jobs/{job_id}",
         "/api/managed/projects",
+        "/api/managed/projects/{project_id}/config-revisions/apply",
         "/api/projects",
         "/api/projects/{project_id}",
         "/api/projects/{project_id}/delivery/candidates/finalize",
@@ -50,6 +51,7 @@ _REQUIRED_ROUTE_METHODS = (
     ("/api/jobs/{job_id}", "get"),
     ("/api/jobs/{job_id}/cancel", "post"),
     ("/api/managed/projects", "post"),
+    ("/api/managed/projects/{project_id}/config-revisions/apply", "post"),
     ("/api/projects", "post"),
     ("/api/projects/{project_id}", "get"),
     ("/api/projects/{project_id}/delivery/candidates/finalize", "post"),
@@ -141,6 +143,38 @@ class ImageObservationMixin:
             )
         else:
             normalized_capabilities = tuple(capabilities)
+        pointer = manifest.get("current_checkpoint")
+        if pointer is not None and not isinstance(pointer, dict):
+            return self._compatibility_failure(
+                details, "Image Agent returned a malformed checkpoint pointer."
+            )
+        unknown_actions = view.get("unknown_actions")
+        if not isinstance(unknown_actions, list):
+            return self._compatibility_failure(
+                details, "Image Agent returned a malformed unknown-action projection."
+            )
+        completed = bool(snapshot.get("completed", False))
+        safe_now = bool(
+            pointer
+            and job_status not in _ACTIVE_JOB_STATES
+            and not unknown_actions
+            and not completed
+        )
+        reason = None
+        if completed:
+            reason = "INSTANCE_CONFIG_LOCKED"
+        elif job_status in _ACTIVE_JOB_STATES:
+            reason = "ACTIVE_JOB"
+        elif unknown_actions:
+            reason = "MODEL_CALL_OUTCOME_UNKNOWN"
+        elif pointer is None:
+            reason = "CHECKPOINT_UNAVAILABLE"
+        details["workflow_boundary"] = {
+            "state": snapshot.get("state") or snapshot.get("phase") or "initial",
+            "checkpoint_id": None if pointer is None else pointer.get("checkpoint_id"),
+            "safe_now": safe_now,
+            "reason": reason,
+        }
         if job_status == "succeeded" and not snapshot:
             return self._compatibility_failure(
                 details,
@@ -258,6 +292,7 @@ class ImageObservationMixin:
         expected_statuses: tuple[int, ...] = (200,),
         allow_404: bool = False,
         headers: dict[str, str] | None = None,
+        forward_error_codes: frozenset[str] = frozenset(),
     ) -> dict[str, Any] | None:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request_headers = {
@@ -281,6 +316,20 @@ class ImageObservationMixin:
         except HTTPError as exc:
             if allow_404 and exc.code == 404:
                 return None
+            try:
+                error_body = json.loads(exc.read(64 * 1024))
+                detail = error_body.get("detail") if isinstance(error_body, dict) else None
+                code = detail.get("code") if isinstance(detail, dict) else None
+                message = detail.get("message") if isinstance(detail, dict) else None
+            except (OSError, UnicodeError, ValueError):
+                code = None
+                message = None
+            if code in forward_error_codes:
+                raise HarnessError(
+                    str(code),
+                    str(message or "Image Agent rejected the runtime configuration command."),
+                    {"http_status": exc.code},
+                ) from None
             raise HarnessError(
                 "PROCESS_START_FAILED",
                 "Image Agent rejected a local adapter request.",

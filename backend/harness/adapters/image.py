@@ -59,6 +59,18 @@ from .types import (
 
 _PACKAGE_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 _ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
+_CONFIG_REVISION = re.compile(r"^cfg-inst-r[0-9]{6}$")
+_CHECKPOINT = re.compile(r"^checkpoint_[0-9a-f]{24}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_APPLY_ERROR_CODES = frozenset(
+    {
+        "CONFIG_INTEGRITY_FAILED",
+        "IDEMPOTENCY_CONFLICT",
+        "INSTANCE_CONFIG_LOCKED",
+        "SAFE_CHECKPOINT_UNAVAILABLE",
+        "SETTINGS_REVISION_CONFLICT",
+    }
+)
 
 
 def image_dependency_pythonpath_entries(
@@ -555,6 +567,106 @@ class ImageAgentAdapter(ImageObservationMixin):
         }
         self._write_state(task_id, instance_id, state)
         return observation
+
+    def apply_runtime_revision(
+        self,
+        instance_id: str,
+        *,
+        revision_id: str,
+        from_checkpoint: str,
+        expected_config_hash: str,
+        effective_from_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Apply one registered revision through the authenticated loopback API."""
+
+        self._require_available(instance_id)
+        validate_identifier(instance_id, "instance_id")
+        validate_identifier(idempotency_key, "idempotency_key")
+        if _CONFIG_REVISION.fullmatch(revision_id) is None:
+            raise HarnessError("VALIDATION_ERROR", "The runtime revision ID is invalid.")
+        if _CHECKPOINT.fullmatch(from_checkpoint) is None:
+            raise HarnessError("SAFE_CHECKPOINT_UNAVAILABLE", "The safe checkpoint is invalid.")
+        if _SHA256.fullmatch(expected_config_hash) is None:
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "The runtime configuration hash is invalid.",
+            )
+        validate_identifier(effective_from_state, "effective_from_state")
+        task_id = self._task_id_for_instance(instance_id)
+        control_path = (
+            self.store.layout.initialize_instance(task_id, instance_id)
+            / "runtime"
+            / "managed-control.json"
+        )
+        if not control_path.is_file():
+            raise HarnessError(
+                "CONTROL_PLANE_NOT_READY",
+                "The Image instance managed control boundary is unavailable.",
+                {"instance_id": instance_id},
+            )
+        control = read_json(control_path)
+        request_key = control.get("request_key")
+        if (
+            control.get("instance_id") != instance_id
+            or not isinstance(request_key, str)
+            or len(request_key) < 32
+        ):
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "The Image instance managed control boundary failed validation.",
+                {"instance_id": instance_id},
+            )
+        response = self._request(
+            self._base_url(task_id, instance_id),
+            "POST",
+            f"/api/managed/projects/{instance_id}/config-revisions/apply",
+            {
+                "runtime_config_revision_id": revision_id,
+                "from_checkpoint": from_checkpoint,
+                "expected_config_hash": expected_config_hash,
+                "effective_from_state": effective_from_state,
+                "idempotency_key": idempotency_key,
+            },
+            headers={MANAGED_ADAPTER_HEADER: request_key},
+            forward_error_codes=_APPLY_ERROR_CODES,
+        )
+        if not isinstance(response, dict):
+            self._protocol_error("Image Agent returned an empty configuration receipt.")
+        expected = {
+            "status": "APPLIED_ON_BRANCH",
+            "runtime_config_revision_id": revision_id,
+            "from_checkpoint": from_checkpoint,
+            "effective_from_state": effective_from_state,
+            "config_hash": expected_config_hash,
+        }
+        if any(response.get(key) != value for key, value in expected.items()):
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "Image Agent returned a configuration receipt for another command.",
+                {"instance_id": instance_id, "revision_id": revision_id},
+            )
+        branch_id = response.get("branch_id")
+        checkpoint_id = response.get("checkpoint_id")
+        if (
+            not isinstance(branch_id, str)
+            or not isinstance(checkpoint_id, str)
+            or _CHECKPOINT.fullmatch(checkpoint_id) is None
+        ):
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "Image Agent returned an invalid configuration branch receipt.",
+                {"instance_id": instance_id, "revision_id": revision_id},
+            )
+        validate_identifier(branch_id, "branch_id")
+        return {
+            "revision_id": revision_id,
+            "branch_id": branch_id,
+            "checkpoint_id": checkpoint_id,
+            "from_checkpoint": from_checkpoint,
+            "effective_from_state": effective_from_state,
+            "config_hash": expected_config_hash,
+        }
 
     def request_advance(
         self,

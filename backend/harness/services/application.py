@@ -23,8 +23,10 @@ from .application_delivery import ApplicationDeliveryMixin
 from .application_planning import ApplicationPlanningMixin
 from .approvals import ApprovalInboxService
 from .assets import AssetService
+from .instance_runtime_settings import InstanceRuntimeSettingsService
 from .start_operations import StartOperationRunner
 from .supervisor import ProcessSupervisor
+from .task_config import TaskConfigService
 
 CrashHook = Callable[[str], None]
 
@@ -40,6 +42,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         approvals: ApprovalInboxService,
         supervisor: ProcessSupervisor,
         adapters: AdapterRegistry,
+        task_config: TaskConfigService,
+        runtime_settings: InstanceRuntimeSettingsService,
     ) -> None:
         self.store = store
         self.commands = commands
@@ -47,6 +51,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         self.approvals = approvals
         self.supervisor = supervisor
         self.adapters = adapters
+        self.task_config = task_config
+        self.runtime_settings = runtime_settings
         self.intent_root = store.layout.control_root / "application-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.start_operation_runner = StartOperationRunner(self._run_pending_starts)
@@ -256,8 +262,9 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     "result": None,
                 }
                 atomic_write_json(intent_path, intent)
-                if crash_hook:
-                    crash_hook("after_start_intent")
+            self.task_config.lock_for_start(task_id)
+            if crash_hook:
+                crash_hook("after_start_intent")
             self._confirm_start_intent(intent_path)
             if self.start_operation_runner.alive and crash_hook is None:
                 self.start_operation_runner.notify()
@@ -358,7 +365,11 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         if self.start_operation_runner.alive:
             self.start_operation_runner.notify()
             return self._start_operation_summary(intent)
-        return self._resume_start(path, None)
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
+        ):
+            return self._resume_start(path, None)
 
     def _run_pending_starts(self) -> None:
         for path in sorted(self.intent_root.glob("*.json")):
@@ -368,9 +379,13 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             intent = self._migrate_start_intent(path, intent)
             if intent["state"] not in {"QUEUED", "RUNNING"}:
                 continue
-            with FileLock(
-                self._intent_lock(intent["operation_id"]),
-                self.store.lock_timeout_seconds,
+            task_id = intent["request"]["task_id"]
+            with (
+                FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+                FileLock(
+                    self._intent_lock(intent["operation_id"]),
+                    self.store.lock_timeout_seconds,
+                ),
             ):
                 latest = read_json(path)
                 if latest["state"] in {"QUEUED", "RUNNING"}:
@@ -679,6 +694,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     "result": None,
                 }
                 atomic_write_json(intent_path, intent)
+                if kind == "START_INSTANCE":
+                    self.task_config.lock_for_start(task_id)
             return self._resume_instance_operation(intent_path)
 
     def _resume_instance_operation(self, intent_path: Path) -> dict[str, Any]:
@@ -687,6 +704,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         task_id = request["task_id"]
         instance_id = request["instance_id"]
         operation_id = intent["operation_id"]
+        if intent["kind"] == "START_INSTANCE":
+            self.task_config.lock_for_start(task_id)
         adapter, spec = self._prepare_instance(task_id, instance_id)
         launch_prefix = "launch" if intent["kind"] == "START_INSTANCE" else "restart"
         launch_id = self._derived_id(launch_prefix, operation_id, instance_id)
@@ -904,6 +923,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         adapter = self.adapters.get(instance["agent_type"])
         if not adapter.available:
             raise HarnessError("ADAPTER_UNAVAILABLE", "The instance adapter is not available.")
+        if instance["agent_type"] == "image":
+            self.runtime_settings.ensure_before_start_locked(task_id, instance_id)
         self._require_valid_card(adapter, card)
         task_root = self.store.layout.workspace_root / "tasks" / task_id
         return adapter, adapter.prepare(
