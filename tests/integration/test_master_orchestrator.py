@@ -217,6 +217,68 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                 factory.calls[0]["messages"][0]["content"],
             )
 
+    def test_master_splits_independent_deliverables_into_parallel_cards(self) -> None:
+        prompt = "做一个 A 海报和一个 B 文化墙"
+        poster = image_plan_response()["plan_draft"]["stages"][0]
+        poster.update(
+            {
+                "title": "北工大 A 海报",
+                "objective": "Create the A poster key visual.",
+                "parameters": {**poster["parameters"], "usage_context": "A poster"},
+            }
+        )
+        culture_wall = image_plan_response()["plan_draft"]["stages"][0]
+        culture_wall.update(
+            {
+                "title": "北工大 B 文化墙",
+                "objective": "Create the B culture wall key visual.",
+                "parameters": {**culture_wall["parameters"], "usage_context": "B culture wall"},
+            }
+        )
+        response = image_plan_response()
+        response["plan_draft"]["stages"] = [poster, culture_wall]
+        factory = ScriptedModelFactory([{"output": response}])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(self._settings(root), model_clients=factory)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/task-intakes",
+                    json={
+                        "prompt": prompt,
+                        "start_policy": "manual",
+                        "envelope": self._envelope("create-parallel-cards", 0),
+                    },
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                body = created.json()
+                task_id = body["task"]["task_id"]
+                self._submit_task(client, body, "submit-parallel-cards")
+                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+
+            self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
+            proposal = session["latest_proposal"]
+            self.assertEqual(proposal["status"], "PENDING_CONFIRMATION")
+            self.assertEqual(len(proposal["stages"]), 2)
+            self.assertEqual(len(proposal["work_items"]), 2)
+            self.assertEqual(len(proposal["execution_cards"]), 2)
+            self.assertEqual(
+                [item["title"] for item in proposal["work_items"]],
+                ["北工大 A 海报", "北工大 B 文化墙"],
+            )
+            for stage in proposal["stages"]:
+                self.assertEqual(stage["type"], "image")
+                self.assertEqual(stage["depends_on"], [])
+            system_prompt = factory.calls[0]["messages"][0]["content"]
+            self.assertIn("one image stage per deliverable", system_prompt)
+            self.assertIn("more than 6 image stages", system_prompt)
+            user_messages = [
+                item["content"]
+                for item in factory.calls[0]["messages"]
+                if item["role"] == "user"
+            ]
+            self.assertIn(prompt, user_messages)
+
     def test_invalid_plan_draft_is_repaired_once_before_materialization(self) -> None:
         invalid = image_plan_response()
         invalid["plan_draft"]["stages"][0]["parameters"]["unsupported_mode"] = "x"

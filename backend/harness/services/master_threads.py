@@ -502,6 +502,7 @@ class MasterThreadService:
                 instances=cast(list[AgentInstanceSnapshot], instances),
                 task_cards=cast(list[TaskCard], cards),
                 operation_id=self._identifier("master_plan", task_id, proposal["proposal_id"]),
+                mode="replace",
                 envelope=CommandEnvelope(
                     idempotency_key=self._identifier(
                         "save_master_plan", task_id, proposal["proposal_id"]

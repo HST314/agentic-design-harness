@@ -8,7 +8,7 @@ import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
@@ -67,6 +67,7 @@ class SavePlanRequest(StrictRequest):
     stages: list[dict[str, Any]]
     instances: list[dict[str, Any]]
     task_cards: list[dict[str, Any]]
+    mode: Literal["replace", "append"] = "replace"
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     envelope: CommandEnvelope
 
@@ -587,7 +588,11 @@ def build_v1_router(container: Container) -> APIRouter:
         return await run_in_threadpool(read_events)
 
     @router.put("/tasks/{task_id}/plan", tags=["tasks"])
-    async def save_plan(task_id: str, body: SavePlanRequest) -> dict[str, Any]:
+    async def save_plan(
+        task_id: str,
+        body: SavePlanRequest,
+        if_match: Annotated[int | None, Header()] = None,
+    ) -> dict[str, Any]:
         return await run_in_threadpool(
             container.application.save_plan_and_create_instances,
             task_id,
@@ -596,6 +601,8 @@ def build_v1_router(container: Container) -> APIRouter:
             task_cards=cast(list[TaskCard], body.task_cards),
             operation_id=body.operation_id,
             envelope=body.envelope,
+            mode=body.mode,
+            expected_plan_revision=if_match,
         )
 
     @router.post("/tasks/{task_id}/confirm-start", tags=["tasks"])

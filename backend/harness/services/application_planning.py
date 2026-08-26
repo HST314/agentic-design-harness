@@ -36,6 +36,8 @@ class ApplicationPlanningMixin:
                 instances=request["instances"],
                 task_cards=request["task_cards"],
                 envelope=CommandEnvelope.model_validate(request["envelope"]),
+                mode=request.get("mode", "replace"),
+                expected_plan_revision=request.get("expected_plan_revision"),
             )
         except HarnessError as exc:
             if exc.code == "REVISION_CONFLICT":
@@ -497,6 +499,8 @@ class ApplicationPlanningMixin:
             instances=request["instances"],
             task_cards=request["task_cards"],
             expected_revision=request["envelope"]["expected_revision"],
+            mode=request.get("mode", "replace"),
+            expected_plan_revision=request.get("expected_plan_revision"),
         )
         for card in request["task_cards"]:
             adapter = self.adapters.get_optional(card["agent_type"])

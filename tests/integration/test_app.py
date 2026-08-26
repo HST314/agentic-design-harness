@@ -421,6 +421,168 @@ class ApplicationTests(unittest.TestCase):
                 self.assertEqual(archived_replay.status_code, 200, archived_replay.text)
                 self.assertEqual(archived_replay.json(), archived.json())
 
+    def test_save_plan_http_carries_mode_and_if_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = HarnessSettings(
+                control_root=root / "control-data",
+                workspace_root=root / "workspace",
+                contracts_root=ROOT / "contracts" / "v1",
+            )
+            app = create_app(settings)
+            with TestClient(app) as client:
+                container = app.state.container
+                created = client.post(
+                    "/api/v1/tasks",
+                    json={
+                        "task_id": "t_api_mode",
+                        "title": "Plan mode API task",
+                        "goal": "Prove save_plan mode and If-Match plumbing.",
+                        "master_owner": "master_default",
+                        "start_policy": "manual",
+                        "input_manifest": "inputs/manifests/input.json",
+                        "envelope": self._envelope("create-api-mode", 0),
+                    },
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+
+                def plan_payload(suffix: str, position: int) -> dict[str, object]:
+                    return {
+                        "stages": [
+                            {
+                                "stage_id": f"s_image_{suffix}",
+                                "task_id": "t_api_mode",
+                                "type": "image",
+                                "position": position,
+                                "depends_on": [],
+                                "required": True,
+                                "instance_ids": [f"i_mode_{suffix}"],
+                            }
+                        ],
+                        "instances": [
+                            {
+                                "instance_id": f"i_mode_{suffix}",
+                                "task_id": "t_api_mode",
+                                "stage_id": f"s_image_{suffix}",
+                                "agent_type": "image",
+                                "required": True,
+                                "approval_mode": "human",
+                                "config_revision": 1,
+                                "workspace_relpath": f"instances/i_mode_{suffix}",
+                                "task_card_relpath": f"instances/i_mode_{suffix}/task-card.json",
+                            }
+                        ],
+                        "task_cards": [
+                            {
+                                "schema_version": "1.1",
+                                "card_id": f"card_mode_{suffix}",
+                                "revision": 1,
+                                "task_id": "t_api_mode",
+                                "stage_id": f"s_image_{suffix}",
+                                "instance_id": f"i_mode_{suffix}",
+                                "agent_type": "image",
+                                "objective": f"Create the {suffix} visual.",
+                                "instructions": ["Use the verified brief."],
+                                "input_assets": [],
+                                "expected_deliveries": [
+                                    {
+                                        "kind": "image",
+                                        "role": "final_artwork",
+                                        "required": True,
+                                        "accepted_mime_types": ["image/png"],
+                                    }
+                                ],
+                                "parameters": {
+                                    "variants": 1,
+                                    "usage_context": "API mode review",
+                                },
+                                "created_at": utc_now(),
+                            }
+                        ],
+                    }
+
+                def put_plan(
+                    suffix: str,
+                    position: int,
+                    key: str,
+                    expected: int,
+                    *,
+                    mode: str | None = None,
+                    if_match: int | None = None,
+                ):
+                    body: dict[str, object] = {
+                        **plan_payload(suffix, position),
+                        "operation_id": f"save_api_mode_{key}",
+                        "envelope": self._envelope(f"save-api-mode-{key}", expected),
+                    }
+                    if mode is not None:
+                        body["mode"] = mode
+                    headers = {}
+                    if if_match is not None:
+                        headers["If-Match"] = str(if_match)
+                    return client.put(
+                        "/api/v1/tasks/t_api_mode/plan", json=body, headers=headers
+                    )
+
+                initial_plan_revision = container.store.task.get(
+                    "t_api_mode", "t_api_mode"
+                )["plan_revision"]
+                first = put_plan("one", 1, "first", 1, if_match=initial_plan_revision)
+                self.assertEqual(first.status_code, 200, first.text)
+                landed_plan_revision = first.json()["task"]["plan_revision"]
+                self.assertEqual(landed_plan_revision, initial_plan_revision)
+
+                bad_mode = put_plan(
+                    "one", 1, "bad-mode", first.json()["task_revision"], mode="bogus"
+                )
+                self.assertEqual(bad_mode.status_code, 422, bad_mode.text)
+
+                current_revision = first.json()["task_revision"]
+                for index, status in enumerate(("STARTING", "RUNNING")):
+                    transition = container.commands.transition_instance(
+                        "t_api_mode",
+                        "i_mode_one",
+                        status,
+                        CommandEnvelope.model_validate(
+                            self._envelope(f"api-mode-transition-{index}", current_revision)
+                        ),
+                    )
+                    current_revision = transition["task_revision"]
+                self.assertEqual(
+                    container.store.task.get("t_api_mode", "t_api_mode")["status"], "RUNNING"
+                )
+
+                stale_match = put_plan(
+                    "two", 2, "stale-match", current_revision, mode="append", if_match=99
+                )
+                self.assertEqual(stale_match.status_code, 409, stale_match.text)
+                self.assertEqual(stale_match.json()["error"]["code"], "REVISION_CONFLICT")
+
+                appended = put_plan(
+                    "two",
+                    2,
+                    "append",
+                    current_revision,
+                    mode="append",
+                    if_match=landed_plan_revision,
+                )
+                self.assertEqual(appended.status_code, 200, appended.text)
+                self.assertEqual(
+                    appended.json()["task"]["plan_revision"], landed_plan_revision + 1
+                )
+                self.assertEqual(len(appended.json()["plan"]["stages"]), 2)
+
+                replaced = put_plan(
+                    "three",
+                    1,
+                    "replace-running",
+                    appended.json()["task_revision"],
+                )
+                self.assertEqual(replaced.status_code, 409, replaced.text)
+                self.assertEqual(
+                    replaced.json()["error"]["code"], "INVALID_STATE_TRANSITION"
+                )
+
     @staticmethod
     def _envelope(key: str, expected_revision: int) -> dict[str, object]:
         return {

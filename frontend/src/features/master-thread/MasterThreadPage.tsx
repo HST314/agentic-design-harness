@@ -541,7 +541,7 @@ function ProposalCard({
   );
 }
 
-function ConfirmDialog({
+export function ConfirmDialog({
   proposal,
   taskRevision,
   open,
@@ -560,6 +560,11 @@ function ConfirmDialog({
 }): React.JSX.Element | null {
   const ref = useRef<HTMLDialogElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const [uncheckedCards, setUncheckedCards] = useState<Set<string>>(() => new Set());
+  const proposalKey = proposal ? `${proposal.proposal_id}:${proposal.revision}` : null;
+  useEffect(() => {
+    setUncheckedCards(new Set());
+  }, [proposalKey]);
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
@@ -573,20 +578,48 @@ function ConfirmDialog({
     }
   }, [open]);
   if (!proposal || taskRevision === null) return null;
+  const titleByCardId = new Map(
+    proposal.work_items.flatMap((item) => item.task_card_ids.map((cardId) => [cardId, item.title] as const)),
+  );
+  const allChecked = uncheckedCards.size === 0;
+  const batch = proposal.execution_cards.length > 1;
   return (
     <dialog ref={ref} className="master-confirm-dialog" aria-labelledby="master-confirm-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}>
       <div className="workbench-drawer__header"><div><p className="workbench-eyebrow">最终确认</p><h2 id="master-confirm-title">启动计划 r{proposal.revision}</h2></div></div>
       <div className="master-confirm-dialog__body">
         <p>确认后将绑定当前计划、全部任务卡和主任务的准确修订，并启动满足业务门禁的实例。任一版本变化都会拒绝启动并要求重新审阅。</p>
         <dl><div><dt>主任务修订</dt><dd>r{taskRevision}</dd></div><div><dt>计划修订</dt><dd>r{proposal.revision}</dd></div><div><dt>任务卡</dt><dd>{proposal.execution_cards.length}</dd></div><div><dt>预计实例</dt><dd>{proposal.work_items.length}</dd></div></dl>
-        <ul className="master-confirm-dialog__cards" aria-label="确认的任务卡修订">
-          {proposal.execution_cards.map((card) => <li key={card.card_id}><span><code>{card.card_id}</code><small>实例 {card.instance_id}</small></span><strong>r{card.revision}</strong></li>)}
+        <ul className="master-confirm-dialog__cards" aria-label="勾选要启动的任务卡">
+          {proposal.execution_cards.map((card) => (
+            <li key={card.card_id}>
+              <label className="master-confirm-dialog__card-check">
+                <input
+                  type="checkbox"
+                  checked={!uncheckedCards.has(card.card_id)}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setUncheckedCards((current) => {
+                      const next = new Set(current);
+                      if (checked) next.delete(card.card_id); else next.add(card.card_id);
+                      return next;
+                    });
+                  }}
+                />
+                <span>
+                  <strong>{titleByCardId.get(card.card_id) ?? card.card_id}</strong>
+                  <small><code>{card.card_id}</code> · 实例 {card.instance_id}</small>
+                </span>
+                <strong>r{card.revision}</strong>
+              </label>
+            </li>
+          ))}
         </ul>
-        <p className="master-confirm-dialog__warning"><Icon name="status" />点击“确认并启动”表示你已知晓本次运行可能产生创作服务费用；启动仍受预算和服务可用性检查。</p>
+        {!allChecked ? <p className="master-confirm-dialog__hint">批量启动需勾选全部任务卡；要排除某张卡，请返回并用“要求调整”让 Master 修改计划。</p> : null}
+        <p className="master-confirm-dialog__warning"><Icon name="status" />点击“{batch ? "批量启动" : "确认并启动"}”表示你已知晓本次运行可能产生创作服务费用；启动仍受预算和服务可用性检查。</p>
         {error ? <p className="workbench-inline-error" role="alert">{error}</p> : null}
         <div className="workbench-dialog-actions">
           <button type="button" className="workbench-secondary-button" disabled={pending} onClick={onCancel}>返回审阅</button>
-          <button type="button" className="workbench-primary-button" disabled={pending} onClick={onConfirm}>{pending ? "正在启动…" : "确认并启动"}</button>
+          <button type="button" className="workbench-primary-button" disabled={pending || !allChecked} onClick={onConfirm}>{pending ? "正在启动…" : batch ? "批量启动" : "确认并启动"}</button>
         </div>
       </div>
     </dialog>
