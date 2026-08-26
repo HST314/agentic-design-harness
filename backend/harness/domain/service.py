@@ -192,13 +192,20 @@ class TaskCommandService:
         instances: list[dict[str, Any]],
         task_cards: list[dict[str, Any]],
         envelope: CommandEnvelope,
+        mode: str = "replace",
+        expected_plan_revision: int | None = None,
     ) -> dict[str, Any]:
+        if mode not in {"replace", "append"}:
+            raise HarnessError("VALIDATION_ERROR", "The plan save mode is invalid.", {"mode": mode})
         request = {
             "task_id": task_id,
+            "mode": mode,
             "stages": stages,
             "instances": instances,
             "task_cards": task_cards,
         }
+        if expected_plan_revision is not None:
+            request["expected_plan_revision"] = expected_plan_revision
         return self._idempotent(
             task_id,
             "save_plan",
@@ -215,23 +222,49 @@ class TaskCommandService:
         instances: list[dict[str, Any]],
         task_cards: list[dict[str, Any]],
         expected_revision: int,
+        mode: str = "replace",
+        expected_plan_revision: int | None = None,
     ) -> None:
         """Validate a plan without allocating credentials or committing projections."""
 
+        if mode not in {"replace", "append"}:
+            raise HarnessError("VALIDATION_ERROR", "The plan save mode is invalid.", {"mode": mode})
         task = self._task(task_id)
+        self._guard_plan_save_state(task, mode)
+        actual = self.store.task.revision(task_id, task_id)
+        if expected_revision != actual:
+            self._raise_revision(expected_revision, actual, "task", task_id)
+        if expected_plan_revision is not None and expected_plan_revision != task["plan_revision"]:
+            self._raise_revision(expected_plan_revision, task["plan_revision"], "plan", task_id)
+        plan_revision = task["plan_revision"]
+        existing = self.store.plan.get(task_id, task_id)
+        if existing is not None:
+            plan_revision += 1
+        if mode == "append":
+            if existing is None:
+                raise HarnessError("TASK_NOT_FOUND", "The task does not have a saved plan.")
+            self._normalize_append(task, existing, plan_revision, stages, instances, task_cards)
+        else:
+            self._normalize_plan(task, plan_revision, stages, instances, task_cards)
+
+    @staticmethod
+    def _guard_plan_save_state(task: dict[str, Any], mode: str) -> None:
+        """Gate plan saves by semantics: replace swaps the revision, append extends it."""
+
+        if mode == "append":
+            if task["status"] in {"RUNNING", "WAITING_APPROVAL"}:
+                return
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A plan can only be appended while this task is running or awaiting approval.",
+                {"current": task["status"]},
+            )
         if task["status"] not in {"DRAFT", "PLANNED", "BLOCKED_UNAVAILABLE", "FAILED"}:
             raise HarnessError(
                 "INVALID_STATE_TRANSITION",
                 "A plan cannot be replaced while this task state is active or terminal.",
                 {"current": task["status"]},
             )
-        actual = self.store.task.revision(task_id, task_id)
-        if expected_revision != actual:
-            self._raise_revision(expected_revision, actual, "task", task_id)
-        plan_revision = task["plan_revision"]
-        if self.store.plan.get(task_id, task_id) is not None:
-            plan_revision += 1
-        self._normalize_plan(task, plan_revision, stages, instances, task_cards)
 
     def validate_task_revision(self, task_id: str, expected_revision: int) -> None:
         """Fail if an application workflow no longer owns its task revision."""
@@ -244,19 +277,37 @@ class TaskCommandService:
 
     def _save_plan(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
         task_id = request["task_id"]
+        mode = request.get("mode", "replace")
         task = self._task(task_id)
-        if task["status"] not in {"DRAFT", "PLANNED", "BLOCKED_UNAVAILABLE", "FAILED"}:
-            raise HarnessError(
-                "INVALID_STATE_TRANSITION",
-                "A plan cannot be replaced while this task state is active or terminal.",
-                {"current": task["status"]},
-            )
+        self._guard_plan_save_state(task, mode)
         actual = self.store.task.revision(task_id, task_id)
         if envelope.expected_revision != actual:
             self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        expected_plan_revision = request.get("expected_plan_revision")
+        if expected_plan_revision is not None and expected_plan_revision != task["plan_revision"]:
+            self._raise_revision(expected_plan_revision, task["plan_revision"], "plan", task_id)
         business_revision = task["plan_revision"]
-        if self.store.plan.get(task_id, task_id) is not None:
+        existing = self.store.plan.get(task_id, task_id)
+        if existing is not None:
             business_revision += 1
+        if mode == "append":
+            if existing is None:
+                raise HarnessError("TASK_NOT_FOUND", "The task does not have a saved plan.")
+            plan = self._normalize_append(
+                task,
+                existing,
+                business_revision,
+                request["stages"],
+                request["instances"],
+                request["task_cards"],
+            )
+            self._activate_current_stages(plan, utc_now())
+            target = self._aggregate_task(plan, preserve_start_confirmation=False)
+            if target != plan["task"]["status"]:
+                self.machine.transition("main_task", plan["task"]["status"], target)
+                plan["task"]["status"] = target
+            plan["task"]["updated_at"] = utc_now()
+            return self._persist_aggregate(plan, envelope, "save_plan", request, actual)
         plan = self._normalize_plan(
             task,
             business_revision,
@@ -653,6 +704,110 @@ class TaskCommandService:
             "stages": normalized_stages,
             "instances": normalized_instances,
             "task_cards": normalized_cards,
+        }
+        self._refresh_stages(plan, now, activate_new=False)
+        validate_plan(self.contracts, plan)
+        return plan
+
+    def _normalize_append(
+        self,
+        task: dict[str, Any],
+        existing_plan: dict[str, Any],
+        plan_revision: int,
+        stages: list[dict[str, Any]],
+        instances: list[dict[str, Any]],
+        task_cards: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Merge new stages/instances/cards into the landed plan revision.
+
+        The payload must only carry new objects: referencing an already landed
+        stage, instance, or task card id is rejected so an append can never
+        mutate work that is already on the board. New stages keep the plan
+        topology rule (parallel same-type stages, Image-to-PPT chains only),
+        which validate_plan enforces on the merged revision.
+        """
+
+        landed_stage_ids = {item["stage_id"] for item in existing_plan["stages"]}
+        landed_instance_ids = {item["instance_id"] for item in existing_plan["instances"]}
+        landed_card_ids = {item["card_id"] for item in existing_plan["task_cards"]}
+        for raw in stages:
+            if raw["stage_id"] in landed_stage_ids:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "A plan append cannot reference or modify a landed stage.",
+                    {"stage_id": raw["stage_id"]},
+                )
+        for raw in instances:
+            if raw["instance_id"] in landed_instance_ids:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "A plan append cannot reference or modify a landed instance.",
+                    {"instance_id": raw["instance_id"]},
+                )
+        for raw in task_cards:
+            if raw["card_id"] in landed_card_ids:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "A plan append cannot reference or modify a landed task card.",
+                    {"card_id": raw["card_id"]},
+                )
+        now = utc_now()
+        normalized_stages = []
+        for raw in sorted(deepcopy(stages), key=lambda item: item["position"]):
+            required = bool(raw["required"])
+            normalized_stages.append(
+                {
+                    **raw,
+                    "schema_version": "1.0",
+                    "task_id": task["task_id"],
+                    "required": required,
+                    "requirement_lifecycle": {
+                        "original_required": required,
+                        "first_activated_at": None,
+                        "authorized_downgrade": None,
+                    },
+                    "status": "PENDING",
+                }
+            )
+        normalized_instances = []
+        for raw in deepcopy(instances):
+            required = bool(raw["required"])
+            normalized_instances.append(
+                {
+                    **raw,
+                    "schema_version": "1.0",
+                    "task_id": task["task_id"],
+                    "required": required,
+                    "requirement_lifecycle": {
+                        "original_required": required,
+                        "first_activated_at": None,
+                        "authorized_downgrade": None,
+                    },
+                    "status": "READY" if raw["agent_type"] == "image" else "UNAVAILABLE",
+                    "process": None,
+                    "ui_url": None,
+                    "created_at": now,
+                }
+            )
+        normalized_cards = [
+            {
+                **deepcopy(raw),
+                "schema_version": raw.get("schema_version", "1.0"),
+                "task_id": task["task_id"],
+                "created_at": now,
+            }
+            for raw in task_cards
+        ]
+        plan = {
+            "schema_version": "1.0",
+            "task": {
+                **deepcopy(task),
+                "plan_revision": plan_revision,
+                "updated_at": now,
+            },
+            "stages": [*deepcopy(existing_plan["stages"]), *normalized_stages],
+            "instances": [*deepcopy(existing_plan["instances"]), *normalized_instances],
+            "task_cards": [*deepcopy(existing_plan["task_cards"]), *normalized_cards],
         }
         self._refresh_stages(plan, now, activate_new=False)
         validate_plan(self.contracts, plan)
