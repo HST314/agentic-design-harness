@@ -548,6 +548,36 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "CONFIG_INTEGRITY_FAILED")
         current = self.materializer.revisions.read_current(task_id, "i_image_1")
         self.assertEqual(current["manifest"]["revision_id"], "cfg-inst-r000001")
+        self.assertIsNone(current["state"]["pending_revision_id"])
+
+        failed = self.settings.get(task_id, "i_image_1")
+        self.assertTrue(failed["editable"])
+        self.assertIsNone(failed["pending_application"])
+        self.assertEqual(
+            failed["last_application_failure"]["last_error"]["code"],
+            "CONFIG_INTEGRITY_FAILED",
+        )
+
+        self.adapter.receipt_from_checkpoint_override = None
+        retry = self.settings.propose(
+            task_id,
+            "i_image_1",
+            base_revision=failed["revision"]["current"],
+            patch={"watermark": True},
+            sync_unstarted_image_work_items=False,
+            expected_sync_instance_ids=[],
+            envelope=self._settings_envelope(task_id, "propose-after-bad-receipt"),
+        )
+        applied = self.settings.confirm(
+            task_id,
+            "i_image_1",
+            retry["proposal_id"],
+            envelope=self._settings_envelope(task_id, "confirm-after-bad-receipt"),
+        )
+        self.assertEqual(applied["status"], "APPLIED_ON_BRANCH")
+        self.assertEqual(applied["revision_id"], "cfg-inst-r000003")
+        recovered = self.settings.get(task_id, "i_image_1")
+        self.assertIsNone(recovered["last_application_failure"])
 
     def test_confirmation_recovers_an_intent_before_proposal_projection(self) -> None:
         task_id = self._planned_task("task_confirm_intent_recovery")

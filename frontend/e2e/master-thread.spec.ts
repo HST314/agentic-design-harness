@@ -114,6 +114,42 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page.route("**/readyz", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ready" }) }));
   await page.route("**/api/v1/tasks", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", items: [{ task_id: "task_master_e2e", status: confirmed ? "RUNNING" : "DRAFT", title: "秋季发布会主视觉", updated_at: "2026-08-22T10:02:00Z", revision: confirmed ? 4 : 2 }] }) }));
   await page.route("**/api/v1/task-intakes/task_master_e2e", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", intake: { schema_version: "1.0", task_id: "task_master_e2e", prompt: "为秋季发布会生成主视觉。", upload_session: { session_id: "upload_master", status: "LOCKED", accepted_mime_types: ["text/markdown"], max_files: 20, max_total_bytes: 209715200 }, asset_ids: ["asset_brief"], status: "SUBMITTED", start_policy: startPolicy, revision: 3, created_at: "2026-08-22T10:00:00Z", updated_at: "2026-08-22T10:01:00Z", submitted_at: "2026-08-22T10:01:00Z" }, intake_revision: 3, task: session().task, task_revision: session().task_revision, assets: [] }) }));
+  await page.route("**/api/v1/tasks/task_master_e2e/start-operations/latest", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      schema_version: "1.1",
+      operation: confirmed ? {
+        schema_version: "1.1",
+        operation_id: "start_master_e2e",
+        task_id: "task_master_e2e",
+        state: "RUNNING",
+        instance_progress: {
+          instance_direction_a: {
+            state: "PREPARING",
+            attempt: 1,
+            launch_id: null,
+            side_effect_stage: "NONE",
+            last_error: null,
+            updated_at: "2026-08-22T10:02:01Z",
+          },
+          instance_direction_b: {
+            state: "RUNNING",
+            attempt: 1,
+            launch_id: "launch_direction_b",
+            side_effect_stage: "AGENT_ACCEPTED",
+            last_error: null,
+            updated_at: "2026-08-22T10:02:01Z",
+          },
+        },
+        last_error: null,
+        retry_allowed: false,
+        created_at: "2026-08-22T10:02:00Z",
+        updated_at: "2026-08-22T10:02:01Z",
+        completed_at: null,
+      } : null,
+    }),
+  }));
   await page.route("**/api/v1/tasks/task_master_e2e/master/messages", async (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON() as { content: string; asset_refs: unknown[]; envelope: { expected_revision: number } };
@@ -182,6 +218,11 @@ test("requires an explicit final confirmation before starting the reviewed revis
   await dialog.getByRole("button", { name: "确认并启动" }).click();
   await expect(page.getByText("计划已确认，实例启动已排队；页面会持续同步结果。")).toBeVisible();
   await expect(page.getByText("已确认", { exact: true })).toBeVisible();
+  const progress = page.getByRole("progressbar", { name: "实例启动进度" });
+  await expect(progress).toBeVisible();
+  await expect(progress).toHaveAttribute("aria-valuenow", "2");
+  await expect(page.getByText("启动会在后台继续；你可以随时手动切换到任务看板查看进度。")).toBeVisible();
+  await expect(page.locator(".master-start-progress").getByRole("button")).toHaveCount(0);
 });
 
 test("shows concrete Chinese adapter validation details when confirmation fails", async ({ page }) => {

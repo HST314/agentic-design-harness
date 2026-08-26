@@ -34,6 +34,19 @@ export const masterSessionQuery = (taskId: string) => queryOptions({
   retry: false,
 });
 
+export const latestStartOperationQuery = (taskId: string) => queryOptions({
+  queryKey: ["start-operation", taskId, "latest"],
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.latestStartOperation(taskId, signal),
+  refetchInterval: (query) => (
+    query.state.data?.operation?.state === "QUEUED"
+    || query.state.data?.operation?.state === "RUNNING"
+      ? 1_000
+      : false
+  ),
+  refetchIntervalInBackground: false,
+  retry: false,
+});
+
 export function visiblePollInterval(
   interval: number | undefined,
   visibilityState: DocumentVisibilityState | undefined = (

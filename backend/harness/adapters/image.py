@@ -19,7 +19,12 @@ from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
 from ..services.agent_config_materialization import ImageAgentConfigMaterializer
 from ..services.assets import AssetService
-from ..services.process_runtime import AgentRuntimeArtifact, ProcessSpec
+from ..services.process_runtime import (
+    AgentRuntimeArtifact,
+    AgentRuntimeIdentity,
+    ProcessSpec,
+    runtime_artifact_identity,
+)
 from ..storage.atomic import atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
 from ..storage.paths import normalized_relative_path
@@ -132,6 +137,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.runtime_attestation: RuntimeAttestation | None = None
         self.runtime_artifact_root: Path | None = None
         self.runtime_builder: ImageRuntimeBuilder | None = None
+        self.runtime_identity: AgentRuntimeIdentity | None = None
 
     def prepare_runtime_artifact(
         self, *, harness_root: Path, cache_root: Path
@@ -165,6 +171,13 @@ class ImageAgentAdapter(ImageObservationMixin):
             )
             artifact_root = builder.prepare(cache_root)
             self._validate_runtime_source(artifact_root)
+            runtime_artifact = self._runtime_artifact(artifact_root)
+            runtime_identity = runtime_artifact_identity(
+                ProcessSpec(
+                    command=(str(self.interpreter), str(artifact_root / IMAGE_ENTRYPOINT)),
+                    runtime_artifact=runtime_artifact,
+                )
+            )
         except HarnessError as exc:
             if exc.code == "IMAGE_RUNTIME_ATTESTATION_FAILED":
                 raise
@@ -181,6 +194,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.runtime_builder = builder
         self.runtime_artifact_root = artifact_root
         self.runtime_attestation = attestation
+        self.runtime_identity = runtime_identity
         self.availability_error = None
         self.available = True
         return attestation
@@ -193,6 +207,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         self.runtime_attestation = None
         self.runtime_artifact_root = None
         self.runtime_builder = None
+        self.runtime_identity = None
 
     def validate_task_card(self, card: TaskCard) -> ValidationResult:
         try:
@@ -308,18 +323,8 @@ class ImageAgentAdapter(ImageObservationMixin):
                 "--port",
                 "{port}",
             ),
-            runtime_artifact=AgentRuntimeArtifact(
-                artifact_id="image-agent-mvp",
-                revision=self.revision,
-                source_root=artifact_root,
-                entrypoint_relpath=IMAGE_ENTRYPOINT,
-                dependency_lock_relpaths=(
-                    "pyproject.toml",
-                    "requirements.lock",
-                    IMAGE_WEB_REQUIREMENTS,
-                ),
-                environment_root=self.interpreter.parent.parent,
-            ),
+            runtime_artifact=self._runtime_artifact(artifact_root),
+            verified_runtime_identity=self.runtime_identity,
             public_environment={
                 "IMAGE_AGENT_FRONT_PROJECTS_ROOT": str(instance_root / "work"),
                 "IMAGE_AGENT_MANAGED_MODE": "1",
@@ -335,6 +340,20 @@ class ImageAgentAdapter(ImageObservationMixin):
             health_path="/api/health",
             readiness_path="/api/health",
             ui_path="/",
+        )
+
+    def _runtime_artifact(self, artifact_root: Path) -> AgentRuntimeArtifact:
+        return AgentRuntimeArtifact(
+            artifact_id="image-agent-mvp",
+            revision=self.revision,
+            source_root=artifact_root,
+            entrypoint_relpath=IMAGE_ENTRYPOINT,
+            dependency_lock_relpaths=(
+                "pyproject.toml",
+                "requirements.lock",
+                IMAGE_WEB_REQUIREMENTS,
+            ),
+            environment_root=self.interpreter.parent.parent,
         )
 
     def map_task_card(self, request: PrepareRequest) -> dict[str, Any]:

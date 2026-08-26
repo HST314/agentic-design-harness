@@ -92,7 +92,6 @@ class InstanceRuntimeSettingsService:
             not bool(current.get("legacy"))
             and baseline_is_current
             and self._pending_saga(task_id, instance_id, include_sync=True) is None
-            and self._terminal_saga(task_id, instance_id, state="FAILED") is None
         )
         inherited = self.materializer.effective_runtime(task_revision, {})
         effective = self.materializer.effective_runtime(task_revision, {})
@@ -144,6 +143,9 @@ class InstanceRuntimeSettingsService:
             "workflow_boundary": self._workflow_boundary(task_id, instance),
             "sync_candidates": self._sync_candidates(task_id, instance_id),
             "pending_application": self._pending_projection(task_id, instance_id),
+            "last_application_failure": self._last_failure_projection(
+                task_id, instance_id
+            ),
         }
 
     def propose(
@@ -191,11 +193,6 @@ class InstanceRuntimeSettingsService:
                 raise HarnessError(
                     "SETTINGS_REVISION_CONFLICT",
                     "The instance already has an unfinished runtime settings operation.",
-                )
-            if self._terminal_saga(task_id, instance_id, state="FAILED") is not None:
-                raise HarnessError(
-                    "INSTANCE_CONFIG_LOCKED",
-                    "A failed settings saga must be repaired before another proposal.",
                 )
             instance = self._image_instance(task_id, instance_id)
             current = self.materializer.revisions.read_current(task_id, instance_id)
@@ -435,7 +432,9 @@ class InstanceRuntimeSettingsService:
                         "The instance start boundary changed after preview.",
                     )
                 now = utc_now()
-                source_revision_id = self._next_revision_id(current)
+                source_revision_id = self.materializer.revisions.next_revision_id(
+                    task_id, instance_id
+                )
                 saga = {
                     "schema_version": "1.0",
                     "proposal_id": proposal_id,
@@ -461,8 +460,8 @@ class InstanceRuntimeSettingsService:
                         {
                             "instance_id": target_id,
                             "base": deepcopy(proposal["sync_bases"][target_id]),
-                            "revision_id": self._next_revision_id(
-                                self.materializer.revisions.read_current(task_id, target_id)
+                            "revision_id": self.materializer.revisions.next_revision_id(
+                                task_id, target_id
                             ),
                             "overrides": deepcopy(proposal["overrides"]),
                             "bundle": None,
@@ -921,6 +920,7 @@ class InstanceRuntimeSettingsService:
         return self._saga_response(saga)
 
     def _fail_saga(self, saga: dict[str, Any], error: HarnessError) -> NoReturn:
+        self._clear_failed_pending_revisions(saga)
         saga.update(
             {
                 "state": "FAILED",
@@ -943,6 +943,27 @@ class InstanceRuntimeSettingsService:
             },
         )
         raise error
+
+    def _clear_failed_pending_revisions(self, saga: dict[str, Any]) -> None:
+        """Release only this saga's pending pointers so a human can submit again."""
+
+        for target in (saga["source"], *saga["sync_targets"]):
+            current = self.materializer.revisions.read_current(
+                saga["task_id"], target["instance_id"]
+            )
+            if (
+                current is None
+                or current["state"].get("pending_revision_id")
+                != target["revision_id"]
+            ):
+                continue
+            self.materializer.revisions.clear_pending(
+                saga["task_id"],
+                target["instance_id"],
+                target["revision_id"],
+                expected_revision=int(current["state"]["revision"]),
+                updated_at=utc_now(),
+            )
 
     @staticmethod
     def _raise_saga_failure(saga: dict[str, Any]) -> NoReturn:
@@ -1189,15 +1210,6 @@ class InstanceRuntimeSettingsService:
                     "actual_revision": int(current["state"]["revision"]),
                 },
             )
-
-    @staticmethod
-    def _next_revision_id(current: dict[str, Any] | None) -> str:
-        sequence = (
-            1
-            if current is None
-            else int(current["manifest"]["revision_id"].rsplit("r", 1)[1]) + 1
-        )
-        return f"cfg-inst-r{sequence:06d}"
 
     @staticmethod
     def _effective_model_ids(
@@ -1469,6 +1481,12 @@ class InstanceRuntimeSettingsService:
             )
         return projection
 
+    def _last_failure_projection(
+        self, task_id: str, instance_id: str
+    ) -> dict[str, Any] | None:
+        saga = self._terminal_saga(task_id, instance_id, state="FAILED")
+        return None if saga is None else self._saga_response(saga)
+
     def _pending_saga(
         self, task_id: str, instance_id: str, *, include_sync: bool = False
     ) -> dict[str, Any] | None:
@@ -1493,9 +1511,11 @@ class InstanceRuntimeSettingsService:
             item
             for item in self._sagas_for_instance(task_id, instance_id)
             if item["state"] in _TERMINAL_SAGA_STATES
-            and (state is None or item["state"] == state)
         ]
-        return max(candidates, key=lambda item: item["updated_at"]) if candidates else None
+        if not candidates:
+            return None
+        latest = max(candidates, key=lambda item: item["updated_at"])
+        return latest if state is None or latest["state"] == state else None
 
     def _sagas_for_instance(
         self, task_id: str, instance_id: str, *, include_sync: bool = False

@@ -65,6 +65,10 @@ export function AppRouter(): React.JSX.Element {
           />
           <Route path="/settings" element={<Navigate replace to="/tasks/new" />} />
         </Route>
+        <Route
+          path="/tasks/:taskId/work-items/:workItemId/focus"
+          element={<AgentWorkbenchPage focusMode />}
+        />
         <Route path="*" element={<LegacyRoute />} />
       </Routes>
     </BrowserRouter>

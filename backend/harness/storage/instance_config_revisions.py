@@ -95,6 +95,24 @@ class InstanceConfigRevisionStore:
             "model_config": deepcopy(model_config),
         }
 
+    def next_revision_id(self, task_id: str, instance_id: str) -> str:
+        """Allocate after every published revision, including failed attempts."""
+
+        self._validate_scope(task_id, instance_id)
+        sequences = [
+            int(path.name.rsplit("r", 1)[1])
+            for path in self._revisions_root(task_id, instance_id).glob(
+                "cfg-inst-r[0-9][0-9][0-9][0-9][0-9][0-9]"
+            )
+            if path.is_dir()
+        ]
+        current = self.read_current(task_id, instance_id)
+        if current is not None:
+            sequences.append(
+                int(current["manifest"]["revision_id"].rsplit("r", 1)[1])
+            )
+        return f"cfg-inst-r{max(sequences, default=0) + 1:06d}"
+
     def set_current(
         self,
         task_id: str,
@@ -201,6 +219,56 @@ class InstanceConfigRevisionStore:
             updated = {
                 **state,
                 "pending_revision_id": revision_id,
+                "revision": expected_revision + 1,
+                "updated_at": updated_at,
+            }
+            self.store.contracts.validate("instance-runtime-config-state", updated)
+            validate_public_config_tree(updated)
+            atomic_write_json(self._state_path(task_id, instance_id), updated, mode=0o640)
+            return deepcopy(updated)
+
+    def clear_pending(
+        self,
+        task_id: str,
+        instance_id: str,
+        revision_id: str,
+        *,
+        expected_revision: int,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        """CAS-clear one failed pending revision without advancing the active pointer."""
+
+        self._validate_scope(task_id, instance_id)
+        validate_identifier(revision_id, "revision_id")
+        with FileLock(self._lock_path(task_id, instance_id), self.store.lock_timeout_seconds):
+            current = self.read_current(task_id, instance_id)
+            if current is None:
+                raise HarnessError(
+                    "CONFIG_INTEGRITY_FAILED",
+                    "A pending revision requires an active instance baseline.",
+                )
+            state = current["state"]
+            if int(state["revision"]) != expected_revision:
+                raise HarnessError(
+                    "SETTINGS_REVISION_CONFLICT",
+                    "The instance configuration state changed after it was read.",
+                    {
+                        "expected_revision": expected_revision,
+                        "actual_revision": int(state["revision"]),
+                    },
+                )
+            existing = state.get("pending_revision_id")
+            if existing is None:
+                return deepcopy(state)
+            if existing != revision_id:
+                raise HarnessError(
+                    "SETTINGS_REVISION_CONFLICT",
+                    "Another runtime configuration revision is already pending.",
+                    {"pending_revision_id": existing},
+                )
+            updated = {
+                **state,
+                "pending_revision_id": None,
                 "revision": expected_revision + 1,
                 "updated_at": updated_at,
             }
