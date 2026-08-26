@@ -6,13 +6,14 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from harness.runtime_identity import PythonInterpreterIdentity
 
 from scripts.dev import (
     DevelopmentLauncher,
     LauncherError,
+    StartupConfiguration,
     _console_safe,
     content_tree_digest,
     input_digest,
@@ -181,6 +182,38 @@ class DevelopmentLauncherTests(unittest.TestCase):
                 launcher.image_input_digest(runtime, second_installer),
             )
 
+    def test_runtime_preparation_preserves_structured_failure_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = root / "agents" / "image-agent.lock.json"
+            lock.parent.mkdir()
+            lock.write_text(
+                json.dumps({"embedded_path": "agents/image_agent_mvp"}),
+                encoding="utf-8",
+            )
+            failure = {
+                "message": "The runtime cache cannot be prepared.",
+                "details": {"action": "Retry after checking runtime permissions."},
+            }
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout="",
+                stderr=json.dumps(failure),
+            )
+            launcher = DevelopmentLauncher(root=root)
+            with (
+                patch("scripts.dev.subprocess.run", return_value=completed) as run,
+                self.assertRaisesRegex(
+                    LauncherError, "Retry after checking runtime permissions"
+                ),
+            ):
+                launcher.attest_image_runtime(prepare_artifact=True)
+
+            command = run.call_args.args[0]
+            self.assertIn("--cache-root", command)
+            self.assertIn(str(launcher.image_runtime_root), command)
+
     def test_doctor_can_continue_with_an_actionable_image_degradation(self) -> None:
         launcher = DevelopmentLauncher(root=Path("workspace"))
         with (
@@ -198,6 +231,77 @@ class DevelopmentLauncherTests(unittest.TestCase):
             patch.object(DevelopmentLauncher, "_check_writable_runtime"),
         ):
             launcher.doctor(check_ports=False, allow_image_degraded=True)
+
+    def test_doctor_prewarms_the_runtime_artifact_before_reporting_success(self) -> None:
+        launcher = DevelopmentLauncher(root=Path("workspace"))
+        runtime = PythonInterpreterIdentity(
+            "cpython", "cpython-313", "3.13.7", "/runtime/python", True
+        )
+        installer = PythonInterpreterIdentity(
+            "cpython", "cpython-313", "3.13.7", "/pip/python", True
+        )
+        attestation = {
+            "artifact_root": "/cache/image-runtime/artifact",
+            "artifact_cache_hit": False,
+            "package_name": "image-agent-mvp",
+            "package_version": "1.8.6",
+        }
+        with (
+            patch.object(DevelopmentLauncher, "config_check"),
+            patch.object(DevelopmentLauncher, "check_tools"),
+            patch.object(DevelopmentLauncher, "verify_image_lock"),
+            patch.object(DevelopmentLauncher, "backend_is_current", return_value=True),
+            patch.object(
+                DevelopmentLauncher,
+                "require_current_image_dependencies",
+                return_value=(runtime, installer),
+            ),
+            patch.object(
+                DevelopmentLauncher,
+                "attest_image_runtime",
+                return_value=attestation,
+            ) as attest,
+            patch.object(DevelopmentLauncher, "frontend_is_current", return_value=True),
+            patch.object(DevelopmentLauncher, "_check_configuration"),
+            patch.object(DevelopmentLauncher, "_check_writable_runtime"),
+        ):
+            launcher.doctor(check_ports=False)
+
+        attest.assert_called_once_with(prepare_artifact=True)
+
+    def test_start_finishes_runtime_preparation_before_health_timeout_begins(self) -> None:
+        launcher = DevelopmentLauncher(root=Path("workspace"))
+        events: list[str] = []
+        group = MagicMock()
+        group.start.side_effect = lambda: events.append("children_started")
+        group.wait_until_healthy.side_effect = lambda *_args, **_kwargs: events.append(
+            "health_timer_started"
+        )
+        with (
+            patch.object(
+                DevelopmentLauncher,
+                "config_check",
+                return_value=StartupConfiguration("cfg-test", 18080),
+            ),
+            patch.object(
+                DevelopmentLauncher,
+                "doctor",
+                side_effect=lambda **_kwargs: events.append("runtime_prepared"),
+            ),
+            patch.object(DevelopmentLauncher, "backend_environment", return_value={}),
+            patch.object(DevelopmentLauncher, "npm_environment", return_value={}),
+            patch("scripts.dev.executable", return_value="npm"),
+            patch("scripts.dev.ChildGroup", return_value=group),
+        ):
+            self.assertEqual(launcher.start(check_only=True), 0)
+
+        self.assertEqual(
+            events,
+            ["runtime_prepared", "children_started", "health_timer_started"],
+        )
+        self.assertEqual(
+            group.wait_until_healthy.call_args.kwargs["timeout_seconds"], 45.0
+        )
 
     def test_busy_port_is_reported_before_process_start(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:

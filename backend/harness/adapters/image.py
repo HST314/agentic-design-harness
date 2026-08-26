@@ -157,17 +157,10 @@ class ImageAgentAdapter(ImageObservationMixin):
                 harness_root=harness_root,
                 interpreter=self.interpreter,
             )
-            builder = ImageRuntimeBuilder(
-                self.source_root.resolve(strict=True),
-                self.dependency_root.resolve(strict=True),
-                revision=self.revision,
-                package_version=self.package_version,
-                source_content_sha256=attestation.source_sha256,
-                dependency_content_sha256=attestation.dependency_sha256,
-                identity_sha256=attestation.identity_sha256,
-                platform=attestation.platform,
-                python_implementation=attestation.python_implementation,
-                python_cache_tag=attestation.python_cache_tag,
+            builder = ImageRuntimeBuilder.from_attestation(
+                self.source_root,
+                self.dependency_root,
+                attestation,
             )
             artifact_root = builder.prepare(cache_root)
             self._validate_runtime_source(artifact_root)

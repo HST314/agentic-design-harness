@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from harness.adapters.image_attestation import attest_image_runtime  # noqa: E402
 from harness.adapters.image_lock import load_image_agent_lock  # noqa: E402
+from harness.adapters.image_runtime import ImageRuntimeBuilder  # noqa: E402
 from harness.core.errors import HarnessError  # noqa: E402
 
 
@@ -25,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dependencies", type=Path, required=True)
     parser.add_argument("--harness-root", type=Path, required=True)
     parser.add_argument("--interpreter", type=Path, required=True)
+    parser.add_argument("--cache-root", type=Path)
     args = parser.parse_args(argv)
     try:
         attestation = attest_image_runtime(
@@ -34,6 +37,24 @@ def main(argv: list[str] | None = None) -> int:
             harness_root=args.harness_root,
             interpreter=args.interpreter,
         )
+        result: dict[str, object] = attestation.as_dict()
+        if args.cache_root is not None:
+            started = time.monotonic()
+            builder = ImageRuntimeBuilder.from_attestation(
+                args.source,
+                args.dependencies,
+                attestation,
+            )
+            artifact_root = builder.prepare(args.cache_root)
+            result.update(
+                {
+                    "artifact_root": str(artifact_root),
+                    "artifact_cache_hit": builder.cache_hit,
+                    "artifact_prepare_duration_seconds": round(
+                        time.monotonic() - started, 3
+                    ),
+                }
+            )
     except HarnessError as exc:
         print(
             json.dumps(
@@ -48,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    print(json.dumps(attestation.as_dict(), ensure_ascii=False, sort_keys=True))
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
 

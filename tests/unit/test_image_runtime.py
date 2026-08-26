@@ -62,7 +62,9 @@ class ImageRuntimeBuilderTests(unittest.TestCase):
 
             artifact = builder.prepare(runtime)
             try:
+                self.assertFalse(builder.cache_hit)
                 self.assertEqual(builder.prepare(runtime), artifact)
+                self.assertTrue(builder.cache_hit)
                 self.assertTrue((artifact / IMAGE_ENTRYPOINT).is_file())
                 marker = read_json(artifact / ".harness-runtime-artifact.json")
                 self.assertEqual(marker["source_content_sha256"], source_sha256)
@@ -141,6 +143,47 @@ class ImageRuntimeBuilderTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(HarnessError, "not a safe directory"):
                 builder.prepare(symlink_runtime)
+
+    def test_interrupted_temporary_artifact_is_cleaned_before_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            dependencies = root / "dependencies"
+            runtime = root / "runtime"
+            source.mkdir()
+            dependencies.mkdir()
+            (source / "main_front.py").write_text(
+                "app = object()\n", encoding="utf-8"
+            )
+            (dependencies / "dependency.py").write_text(
+                "VALUE = 1\n", encoding="utf-8"
+            )
+            builder = ImageRuntimeBuilder(
+                source,
+                dependencies,
+                revision="revision_1",
+                package_version="1.0.0",
+                source_content_sha256=content_tree_sha256(source),
+                dependency_content_sha256=dependency_tree_sha256(dependencies),
+            )
+            artifacts = runtime / "image-artifacts"
+            artifacts.mkdir(parents=True)
+            interrupted = artifacts / f".{builder.identity_sha256}-{'f' * 32}"
+            interrupted.mkdir()
+            partial = interrupted / "partial.py"
+            partial.write_text("PARTIAL = True\n", encoding="utf-8")
+            partial.chmod(0o444)
+            interrupted.chmod(0o555)
+            unrelated = artifacts / ".operator-owned"
+            unrelated.mkdir()
+
+            artifact = builder.prepare(runtime)
+            try:
+                self.assertFalse(interrupted.exists())
+                self.assertTrue(unrelated.is_dir())
+                self.assertTrue(artifact.is_dir())
+            finally:
+                builder._make_removable(artifact)
 
     def test_mutated_source_or_dependency_fails_content_attestation(self) -> None:
         for mutated_tree in ("source", "dependency"):

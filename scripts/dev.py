@@ -248,6 +248,10 @@ class DevelopmentLauncher:
         return self.runtime_root / "image-agent-deps"
 
     @property
+    def image_runtime_root(self) -> Path:
+        return self.runtime_root / "image-runtime"
+
+    @property
     def image_python(self) -> Path:
         return self.venv_python
 
@@ -618,7 +622,12 @@ class DevelopmentLauncher:
             return False
         return True
 
-    def attest_image_runtime(self, dependency_root: Path | None = None) -> dict[str, Any]:
+    def attest_image_runtime(
+        self,
+        dependency_root: Path | None = None,
+        *,
+        prepare_artifact: bool = False,
+    ) -> dict[str, Any]:
         selected_dependencies = dependency_root or self.image_dependency_root
         command = [
             self.venv_python,
@@ -634,6 +643,8 @@ class DevelopmentLauncher:
             "--interpreter",
             self.image_python,
         ]
+        if prepare_artifact:
+            command.extend(("--cache-root", self.image_runtime_root))
         completed = subprocess.run(
             [str(item) for item in command],
             cwd=self.root,
@@ -663,9 +674,29 @@ class DevelopmentLauncher:
             _fail("Image Agent runtime attestation returned invalid output.")
         return result
 
+    def prepare_image_runtime(self) -> dict[str, Any]:
+        """Attest and prewarm the immutable artifact before health timing starts."""
+
+        print(
+            "[prepare] Verifying and warming the Image Agent runtime artifact...",
+            flush=True,
+        )
+        started = time.monotonic()
+        attestation = self.attest_image_runtime(prepare_artifact=True)
+        artifact_root = attestation.get("artifact_root")
+        cache_hit = attestation.get("artifact_cache_hit")
+        if not isinstance(artifact_root, str) or not isinstance(cache_hit, bool):
+            _fail("Image Agent runtime preparation returned invalid output.")
+        elapsed = time.monotonic() - started
+        disposition = "reused" if cache_hit else "prepared"
+        print(
+            f"[ok] Image Agent runtime artifact {disposition} in {elapsed:.1f}s",
+            flush=True,
+        )
+        return attestation
+
     def install_image_dependencies(self, *, force: bool = False) -> None:
         if not force and self.image_dependencies_are_current():
-            self.attest_image_runtime()
             print("[ok] Image Agent isolated dependencies match their locks.", flush=True)
             return
         self.runtime_root.mkdir(parents=True, exist_ok=True)
@@ -764,6 +795,7 @@ class DevelopmentLauncher:
         self.ensure_submodule()
         self.install_backend(force=force)
         self.install_image_dependencies(force=force)
+        self.prepare_image_runtime()
         self.install_frontend(force=force)
         print("[ok] Development environment is ready.", flush=True)
 
@@ -896,7 +928,7 @@ class DevelopmentLauncher:
             runtime_identity, installer_identity = (
                 self.require_current_image_dependencies()
             )
-            attestation = self.attest_image_runtime()
+            attestation = self.prepare_image_runtime()
         except LauncherError as exc:
             if not allow_image_degraded:
                 raise

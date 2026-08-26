@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -306,19 +307,26 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        startup_started = time.monotonic()
         image_adapter = container.adapters.get("image")
         if not isinstance(image_adapter, ImageAgentAdapter):
             raise HarnessError(
                 "IMAGE_RUNTIME_ATTESTATION_FAILED",
                 "The Image Agent adapter is not configured.",
             )
+        cache_root = (
+            container.settings.image_agent_dependency_root.resolve().parent
+            / "image-runtime"
+        )
+        runtime_started = time.monotonic()
+        logger.info(
+            "image_runtime_preparation_started",
+            extra={"fields": {"cache_root": str(cache_root)}},
+        )
         try:
             attestation = image_adapter.prepare_runtime_artifact(
                 harness_root=container.settings.image_agent_lock_path.resolve().parents[1],
-                cache_root=(
-                    container.settings.image_agent_dependency_root.resolve().parent
-                    / "image-runtime"
-                ),
+                cache_root=cache_root,
             )
         except HarnessError as exc:
             image_adapter.disable(exc)
@@ -332,6 +340,9 @@ def create_app(
                     "fields": {
                         "error_code": exc.code,
                         "message": exc.message,
+                        "duration_seconds": round(
+                            time.monotonic() - runtime_started, 3
+                        ),
                     }
                 },
             )
@@ -339,6 +350,20 @@ def create_app(
             container.runtime_attestation = attestation
             container.runtime_artifact = image_adapter.runtime_artifact_root
             container.image_runtime_error = None
+            logger.info(
+                "image_runtime_preparation_completed",
+                extra={
+                    "fields": {
+                        "cache_hit": bool(
+                            image_adapter.runtime_builder
+                            and image_adapter.runtime_builder.cache_hit
+                        ),
+                        "duration_seconds": round(
+                            time.monotonic() - runtime_started, 3
+                        ),
+                    }
+                },
+            )
         warnings = container.store.start()
         usage_recoveries = container.usage.recover()
         retry_budget_recoveries = container.retry_budgets.recover()
@@ -368,6 +393,9 @@ def create_app(
                     "adapter_recovery_count": len(adapter_recoveries),
                     "runtime_config_recovery_count": len(runtime_config_recoveries),
                     "control_plane_status": container.status,
+                    "startup_duration_seconds": round(
+                        time.monotonic() - startup_started, 3
+                    ),
                 }
             },
         )
