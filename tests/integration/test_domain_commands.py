@@ -321,5 +321,204 @@ class TaskCommandTests(unittest.TestCase):
         self.assertFalse((self.store.layout.control_root.parent / "escaped.lock").exists())
 
 
+class PlanAppendGateTests(unittest.TestCase):
+    """Save-plan mode gate: replace keeps the old whitelist, append extends live plans."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store, self.service = build_service(self.root)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temporary.cleanup()
+
+    def _save(
+        self,
+        task_id: str,
+        draft: dict[str, list[dict]],
+        expected: int = 1,
+        key: str = "save-plan",
+        mode: str = "replace",
+        plan_revision: int | None = None,
+    ) -> dict:
+        return self.service.save_plan(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            envelope=envelope(key, expected),
+            mode=mode,
+            expected_plan_revision=plan_revision,
+        )
+
+    def _transition(self, task_id: str, instance_id: str, status: str, key: str) -> dict:
+        revision = self.store.task.revision(task_id, task_id)
+        return self.service.transition_instance(
+            task_id,
+            instance_id,
+            status,
+            envelope(envelope_key(task_id, key), revision, "adapter"),
+        )
+
+    def _running_task(self, task_id: str) -> None:
+        create_task(self.service, task_id, "auto")
+        self._save(task_id, image_plan(task_id))
+        self._transition(task_id, "i_image_1", "STARTING", "starting")
+        self._transition(task_id, "i_image_1", "RUNNING", "running")
+
+    @staticmethod
+    def _append_draft(task_id: str) -> dict[str, list[dict]]:
+        return {
+            "stages": [stage(task_id, "s_image_2", "image", 2, [], True, ["i_image_2"])],
+            "instances": [instance(task_id, "i_image_2", "s_image_2", "image", True)],
+            "task_cards": [card(task_id, "i_image_2", "s_image_2", "image")],
+        }
+
+    def test_running_task_accepts_plan_append(self) -> None:
+        self._running_task("t_append_running")
+        revision = self.store.task.revision("t_append_running", "t_append_running")
+
+        result = self._save(
+            "t_append_running",
+            self._append_draft("t_append_running"),
+            expected=revision,
+            key="append-running",
+            mode="append",
+        )
+
+        plan = result["plan"]
+        self.assertEqual(result["task"]["status"], "RUNNING")
+        self.assertEqual(result["task"]["plan_revision"], 2)
+        self.assertEqual(len(plan["stages"]), 2)
+        self.assertEqual(len(plan["instances"]), 2)
+        self.assertEqual(len(plan["task_cards"]), 2)
+        landed_stage = plan["stages"][0]
+        self.assertEqual(landed_stage["stage_id"], "s_image")
+        self.assertEqual(landed_stage["status"], "RUNNING")
+        landed_instance = plan["instances"][0]
+        self.assertEqual(landed_instance["instance_id"], "i_image_1")
+        self.assertEqual(landed_instance["status"], "RUNNING")
+        appended_stage = plan["stages"][1]
+        self.assertEqual(appended_stage["stage_id"], "s_image_2")
+        self.assertEqual(appended_stage["status"], "READY")
+        self.assertEqual(appended_stage["depends_on"], [])
+        appended_instance = plan["instances"][1]
+        self.assertEqual(appended_instance["status"], "READY")
+        self.assertIsNotNone(
+            appended_instance["requirement_lifecycle"]["first_activated_at"]
+        )
+
+    def test_running_task_still_rejects_plan_replace(self) -> None:
+        self._running_task("t_replace_running")
+        revision = self.store.task.revision("t_replace_running", "t_replace_running")
+
+        with self.assertRaises(HarnessError) as captured:
+            self._save(
+                "t_replace_running",
+                image_plan("t_replace_running", 2),
+                expected=revision,
+                key="replace-running",
+                mode="replace",
+            )
+
+        self.assertEqual(captured.exception.code, "INVALID_STATE_TRANSITION")
+        self.assertEqual(
+            captured.exception.message,
+            "A plan cannot be replaced while this task state is active or terminal.",
+        )
+
+    def test_append_cannot_reference_a_landed_running_stage(self) -> None:
+        self._running_task("t_append_collision")
+        revision = self.store.task.revision("t_append_collision", "t_append_collision")
+        payload = {
+            "stages": [
+                stage("t_append_collision", "s_image", "image", 2, [], True, ["i_image_2"])
+            ],
+            "instances": [instance("t_append_collision", "i_image_2", "s_image", "image", True)],
+            "task_cards": [card("t_append_collision", "i_image_2", "s_image", "image")],
+        }
+
+        with self.assertRaises(HarnessError) as captured:
+            self._save(
+                "t_append_collision",
+                payload,
+                expected=revision,
+                key="append-collision",
+                mode="append",
+            )
+
+        self.assertEqual(captured.exception.code, "VALIDATION_ERROR")
+
+    def test_waiting_approval_task_accepts_plan_append(self) -> None:
+        create_task(self.service, "t_append_waiting", "auto")
+        self._save("t_append_waiting", image_plan("t_append_waiting"))
+        self._transition("t_append_waiting", "i_image_1", "STARTING", "starting")
+        self._transition("t_append_waiting", "i_image_1", "RUNNING", "running")
+        waiting = self._transition("t_append_waiting", "i_image_1", "WAITING_APPROVAL", "waiting")
+        self.assertEqual(waiting["task"]["status"], "WAITING_APPROVAL")
+        revision = self.store.task.revision("t_append_waiting", "t_append_waiting")
+
+        result = self._save(
+            "t_append_waiting",
+            self._append_draft("t_append_waiting"),
+            expected=revision,
+            key="append-waiting",
+            mode="append",
+        )
+
+        self.assertEqual(result["task"]["status"], "RUNNING")
+        self.assertEqual(result["plan"]["stages"][1]["status"], "READY")
+
+    def test_append_honors_expected_plan_revision(self) -> None:
+        self._running_task("t_append_ifmatch")
+        revision = self.store.task.revision("t_append_ifmatch", "t_append_ifmatch")
+
+        with self.assertRaises(HarnessError) as captured:
+            self._save(
+                "t_append_ifmatch",
+                self._append_draft("t_append_ifmatch"),
+                expected=revision,
+                key="append-ifmatch-stale",
+                mode="append",
+                plan_revision=99,
+            )
+        self.assertEqual(captured.exception.code, "REVISION_CONFLICT")
+
+        result = self._save(
+            "t_append_ifmatch",
+            self._append_draft("t_append_ifmatch"),
+            expected=revision,
+            key="append-ifmatch",
+            mode="append",
+            plan_revision=1,
+        )
+        self.assertEqual(result["task"]["plan_revision"], 2)
+
+    def test_append_can_chain_ppt_behind_a_running_image_stage(self) -> None:
+        self._running_task("t_append_ppt")
+        revision = self.store.task.revision("t_append_ppt", "t_append_ppt")
+        payload = {
+            "stages": [stage("t_append_ppt", "s_ppt", "ppt", 2, ["s_image"], True, ["i_ppt_1"])],
+            "instances": [instance("t_append_ppt", "i_ppt_1", "s_ppt", "ppt", True)],
+            "task_cards": [card("t_append_ppt", "i_ppt_1", "s_ppt", "ppt")],
+        }
+
+        result = self._save(
+            "t_append_ppt",
+            payload,
+            expected=revision,
+            key="append-ppt",
+            mode="append",
+        )
+
+        plan = result["plan"]
+        self.assertEqual(result["task"]["status"], "RUNNING")
+        appended_stage = plan["stages"][1]
+        self.assertEqual(appended_stage["type"], "ppt")
+        self.assertEqual(appended_stage["depends_on"], ["s_image"])
+        self.assertEqual(appended_stage["status"], "PENDING")
+
+
 def envelope_key(task_id: str, suffix: str) -> str:
     return f"{task_id}-{suffix}"
