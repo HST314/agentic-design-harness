@@ -230,6 +230,80 @@ class TaskCommandTests(unittest.TestCase):
             self._transition("t_failed_restart", "i_image_1", "RUNNING", "bypass-restart")
         self.assertEqual(direct_resume.exception.code, "INVALID_STATE_TRANSITION")
 
+    def test_same_type_parallel_stages_are_accepted(self) -> None:
+        create_task(self.service, "t_parallel", "auto")
+        parallel = {
+            "stages": [
+                stage("t_parallel", "s_image_1", "image", 1, [], True, ["i_image_1"]),
+                stage("t_parallel", "s_image_2", "image", 2, [], True, ["i_image_2"]),
+            ],
+            "instances": [
+                instance("t_parallel", "i_image_1", "s_image_1", "image", True),
+                instance("t_parallel", "i_image_2", "s_image_2", "image", True),
+            ],
+            "task_cards": [
+                card("t_parallel", "i_image_1", "s_image_1", "image"),
+                card("t_parallel", "i_image_2", "s_image_2", "image"),
+            ],
+        }
+        saved = self._save("t_parallel", parallel)
+        self.assertEqual(len(saved["plan"]["stages"]), 2)
+        self.assertEqual(len(saved["plan"]["instances"]), 2)
+        self.assertEqual(saved["plan"]["stages"][0]["status"], "READY")
+        self.assertEqual(saved["plan"]["stages"][1]["status"], "READY")
+
+    def test_parallel_images_can_feed_a_ppt_stage(self) -> None:
+        create_task(self.service, "t_fan_in", "auto")
+        fan_in = {
+            "stages": [
+                stage("t_fan_in", "s_image_1", "image", 1, [], True, ["i_image_1"]),
+                stage("t_fan_in", "s_image_2", "image", 2, [], True, ["i_image_2"]),
+                stage(
+                    "t_fan_in",
+                    "s_ppt",
+                    "ppt",
+                    3,
+                    ["s_image_1", "s_image_2"],
+                    True,
+                    ["i_ppt_1"],
+                ),
+            ],
+            "instances": [
+                instance("t_fan_in", "i_image_1", "s_image_1", "image", True),
+                instance("t_fan_in", "i_image_2", "s_image_2", "image", True),
+                instance("t_fan_in", "i_ppt_1", "s_ppt", "ppt", True),
+            ],
+            "task_cards": [
+                card("t_fan_in", "i_image_1", "s_image_1", "image"),
+                card("t_fan_in", "i_image_2", "s_image_2", "image"),
+                card("t_fan_in", "i_ppt_1", "s_ppt", "ppt"),
+            ],
+        }
+        saved = self._save("t_fan_in", fan_in)
+        self.assertEqual(len(saved["plan"]["stages"]), 3)
+
+    def test_same_type_stage_dependency_is_rejected(self) -> None:
+        create_task(self.service, "t_chained", "auto")
+        chained = {
+            "stages": [
+                stage("t_chained", "s_image_1", "image", 1, [], True, ["i_image_1"]),
+                stage(
+                    "t_chained", "s_image_2", "image", 2, ["s_image_1"], True, ["i_image_2"]
+                ),
+            ],
+            "instances": [
+                instance("t_chained", "i_image_1", "s_image_1", "image", True),
+                instance("t_chained", "i_image_2", "s_image_2", "image", True),
+            ],
+            "task_cards": [
+                card("t_chained", "i_image_1", "s_image_1", "image"),
+                card("t_chained", "i_image_2", "s_image_2", "image"),
+            ],
+        }
+        with self.assertRaises(HarnessError) as captured:
+            self._save("t_chained", chained)
+        self.assertEqual(captured.exception.code, "VALIDATION_ERROR")
+
     def test_cancel_is_a_domain_command_and_preserves_workspace(self) -> None:
         created = create_task(self.service, "t_cancel")
         cancelled = self.service.cancel_task(

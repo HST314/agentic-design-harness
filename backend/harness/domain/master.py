@@ -51,16 +51,18 @@ def validate_plan_proposal(
         range(1, len(stages) + 1)
     ):
         _invalid("Master plan stages require unique ids and contiguous positions.")
-    topology = tuple(item["type"] for item in stages)
-    if topology not in {("image",), ("ppt",), ("image", "ppt")}:
-        _invalid("Only Image-only, PPT-only and Image-to-PPT plans are supported.")
     stage_by_id = {item["stage_id"]: item for item in stages}
     for stage in stages:
         earlier = set(stage_ids[: stage["position"] - 1])
         if not set(stage["depends_on"]).issubset(earlier):
             _invalid("A Master stage dependency must reference an earlier stage.")
-    if topology == ("image", "ppt") and stages[1]["depends_on"] != [stages[0]["stage_id"]]:
-        _invalid("An Image-to-PPT plan requires the PPT stage to depend on Image.")
+        for dependency_id in stage["depends_on"]:
+            dependency = stage_by_id[dependency_id]
+            if dependency["type"] != "image" or stage["type"] != "ppt":
+                _invalid(
+                    "Same-type stages must be parallel and only Image-to-PPT "
+                    "dependencies are supported."
+                )
 
     items = proposal["work_items"]
     item_by_id = {item["work_item_id"]: item for item in items}
