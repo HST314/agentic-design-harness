@@ -597,6 +597,8 @@ class ImageAgentAdapter(ImageObservationMixin):
         revision_id: str,
         from_checkpoint: str,
         expected_config_hash: str,
+        expected_project_revision_id: str,
+        expected_project_config_hash: str,
         effective_from_state: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
@@ -613,6 +615,16 @@ class ImageAgentAdapter(ImageObservationMixin):
             raise HarnessError(
                 "CONFIG_INTEGRITY_FAILED",
                 "The runtime configuration hash is invalid.",
+            )
+        if _CONFIG_REVISION.fullmatch(expected_project_revision_id) is None:
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "The project runtime revision baseline is invalid.",
+            )
+        if _SHA256.fullmatch(expected_project_config_hash) is None:
+            raise HarnessError(
+                "CONFIG_INTEGRITY_FAILED",
+                "The project runtime configuration baseline is invalid.",
             )
         validate_identifier(effective_from_state, "effective_from_state")
         task_id = self._task_id_for_instance(instance_id)
@@ -647,6 +659,8 @@ class ImageAgentAdapter(ImageObservationMixin):
                 "runtime_config_revision_id": revision_id,
                 "from_checkpoint": from_checkpoint,
                 "expected_config_hash": expected_config_hash,
+                "expected_project_revision_id": expected_project_revision_id,
+                "expected_project_config_hash": expected_project_config_hash,
                 "effective_from_state": effective_from_state,
                 "idempotency_key": idempotency_key,
             },

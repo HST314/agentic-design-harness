@@ -287,6 +287,7 @@ export function AppShell(): React.JSX.Element {
           <nav className="workbench-utilities" aria-label="工作台工具">
             <Link to="/tasks"><Icon name="history" /><span className="workbench-label">已验收任务面板</span></Link>
             <Link to="/inbox"><Icon name="inbox" /><span className="workbench-label">收件箱</span></Link>
+            <NavLink to="/settings"><Icon name="settings" /><span className="workbench-label">全局设置</span></NavLink>
           </nav>
         </aside>
 
@@ -294,7 +295,7 @@ export function AppShell(): React.JSX.Element {
           <header className="workbench-topbar">
             <div>
               <p className="workbench-eyebrow">工作台框架</p>
-              <p className="workbench-context">{taskId ? `任务 ${taskId}` : "创建任务"}</p>
+              <p className="workbench-context">{location.pathname === "/settings" ? "全局设置" : taskId ? `任务 ${taskId}` : "创建任务"}</p>
             </div>
             <div className="workbench-topbar__actions">
               <span

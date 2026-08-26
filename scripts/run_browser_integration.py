@@ -391,7 +391,7 @@ def write_browser_configuration(
     image_model: str,
     vlm_model: str,
 ) -> None:
-    """Create one explicit root configuration for the isolated browser gate."""
+    """Create one explicit deployment configuration for the isolated browser gate."""
 
     root.mkdir(mode=0o700)
     environment_file = root / ".env"
@@ -436,7 +436,12 @@ def write_browser_configuration(
             }
         ],
     }
-    runtime = yaml.safe_load((ROOT / "runtime.yaml").read_text(encoding="utf-8"))
+    runtime = yaml.safe_load(
+        (ROOT / "config" / "runtime.yaml").read_text(encoding="utf-8")
+    )
+    image_runtime = yaml.safe_load(
+        (ROOT / "config" / "image_agent_runtime.yaml").read_text(encoding="utf-8")
+    )
     runtime["server"].update({"host": "127.0.0.1", "port": backend_port})
     runtime["models"] = {
         "master": "browser-text-primary",
@@ -444,12 +449,15 @@ def write_browser_configuration(
         "vision_understanding": "browser-vlm-primary",
         "image_generation": "browser-image-primary",
     }
+    config_root = root / "config"
+    config_root.mkdir(parents=True, exist_ok=True)
     for name, payload in (
         ("provider.yaml", provider),
         ("model_list.yaml", models),
         ("runtime.yaml", runtime),
+        ("image_agent_runtime.yaml", image_runtime),
     ):
-        (root / name).write_text(
+        (config_root / name).write_text(
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )

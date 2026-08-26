@@ -20,7 +20,7 @@ cd agentic-design-harness
 cp .env.example .env
 ```
 
-Windows 可使用 `Copy-Item .env.example .env`。在 `.env` 中替换真实秘密，并按部署需要审阅根目录 `provider.yaml`、`model_list.yaml`、`runtime.yaml`。四个文件的职责和字段见[配置指南](docs/configuration.md)。
+Windows 可使用 `Copy-Item .env.example .env`。在 `.env` 中替换真实秘密，并按部署需要审阅 `config/provider.yaml`、`config/model_list.yaml`、`config/runtime.yaml` 和 `config/image_agent_runtime.yaml`。五个配置事实源的职责和字段见[配置指南](docs/configuration.md)。
 
 ## 3. 安装锁定依赖
 
@@ -100,4 +100,4 @@ Windows 将每行开头的 `python3` 替换为 `py -3`。`setup --force` 可重�
 | <http://127.0.0.1:18080/readyz> | 后端可接受业务请求；`ready` 表示 Image 可用，`degraded` 表示仅 Image 被禁用 |
 | <http://127.0.0.1:18080/docs> | OpenAPI 文档 |
 
-根配置检查通过且服务健康启动后，控制面部署即完成；需要 Image 任务时还应确认 `/readyz` 为 `ready`。接下来从[创建第一个任务](docs/user-guide.md)开始；`degraded` 或启动失败按[故障排查](docs/troubleshooting.md)处理。
+配置检查通过且服务健康启动后，控制面部署即完成；需要 Image 任务时还应确认 `/readyz` 为 `ready`。启动后可从侧栏“全局设置”预览并发布无秘密的运行默认值。接下来从[创建第一个任务](docs/user-guide.md)开始；`degraded` 或启动失败按[故障排查](docs/troubleshooting.md)处理。

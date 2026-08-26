@@ -22,17 +22,27 @@ class FoundationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository_root = Path(__file__).resolve().parents[2]
-            for filename in ("provider.yaml", "model_list.yaml", "runtime.yaml"):
-                shutil.copyfile(repository_root / filename, root / filename)
+            (root / "config").mkdir()
+            for filename in (
+                "provider.yaml",
+                "model_list.yaml",
+                "runtime.yaml",
+                "image_agent_runtime.yaml",
+            ):
+                shutil.copyfile(
+                    repository_root / "config" / filename,
+                    root / "config" / filename,
+                )
             (root / ".env").write_text(
                 "ARK_API_KEY=test-secret\n"
                 "ARK_BASE_URL=https://ark.example.test/api/v3\n",
                 encoding="utf-8",
             )
-            runtime = yaml.safe_load((root / "runtime.yaml").read_text(encoding="utf-8"))
+            runtime_path = root / "config" / "runtime.yaml"
+            runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
             runtime["server"]["port"] = 19001
             runtime["server"]["log_level"] = "WARNING"
-            (root / "runtime.yaml").write_text(
+            runtime_path.write_text(
                 yaml.safe_dump(runtime, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )

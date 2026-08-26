@@ -94,11 +94,14 @@ health 成功但 ready 失败时，检查配置路径、契约目录、状态目
 - 重复点击确认：幂等请求应返回同一 batch。若客户端使用了相同幂等键但不同决议，会返回冲突，应重新读取审批状态。
 - 已退回候选仍存在：这是预期审计语义；退回不删除候选或私有文件。
 
-## 根配置与 Provider
+## 部署配置、全局发布与 Provider
 
-- 配置检查失败：确认 `.env`、`provider.yaml`、`model_list.yaml`、`runtime.yaml` 都位于仓库根目录，修正报告的第一条错误。
+- 配置检查失败：确认 `.env` 位于仓库根目录，四个 YAML 位于 `config/`，修正报告的第一条错误。根目录旧 YAML 不会被兼容读取。
 - 环境引用未解析：检查 `.env` 中变量名与 `${NAME}` 完全一致；不要把秘密直接写入 YAML。
-- 模型能力不匹配：核对模型所属分组、Provider ID 和 `runtime.yaml` 的模型引用。
+- 模型能力不匹配：核对模型所属分组、Provider ID 和 `config/runtime.yaml`、`config/image_agent_runtime.yaml` 的模型引用。
+- 全局发布冲突：点击“载入最新修订并保留未保存修改”，复核合并结果后重新预览；不要覆盖最新 revision。
+- 运行中实例显示等待：配置会在最近安全检查点自动建分支；若实例已结束则历史保持不变。
+- 历史阶段重建仍显示旧配置：确认实例已收到最新全局 revision；当前实现会强制为新业务分支绑定最新配置，若不一致请记录工程 revision、配置 revision 和分支 ID。
 - Provider 调用失败：检查 endpoint、配额和网络；系统不会自动执行新的付费 smoke。需要外部真实验证时，由开发者按[配置指南](configuration.md)重新明确授权。
 
 ## 提交诊断材料
