@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import errno
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import harness.storage.locks as locks
 from harness.core.errors import HarnessError
 from harness.runtime import validate_runtime_platform
 from harness.services.process_control import process_start_identity
@@ -25,6 +29,30 @@ class PortableSafeOpenTests(unittest.TestCase):
                 asset.resolve(strict=True), trusted_root=root
             )
             os.close(descriptor)
+
+    def test_windows_lock_retries_when_another_thread_initializes_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            lock = FileLock(Path(temporary) / "writer.lock", 0.1)
+            busy = PermissionError(
+                errno.EACCES, "the marker byte is already locked"
+            )
+            with (
+                patch.object(locks.os, "name", "nt"),
+                patch.object(locks.os, "open", return_value=42),
+                patch.object(locks.os, "close"),
+                patch.object(
+                    locks.os, "fstat", return_value=SimpleNamespace(st_size=0)
+                ),
+                patch.object(locks.os, "write", side_effect=[busy, 1]) as write,
+                patch.object(FileLock, "_lock") as native_lock,
+                patch.object(locks.time, "sleep"),
+            ):
+                lock.acquire()
+
+            self.assertTrue(lock.acquired)
+            self.assertEqual(write.call_count, 2)
+            native_lock.assert_called_once_with(42)
+            lock._descriptor = None
 
 
 @unittest.skipUnless(os.name == "nt", "requires a real Windows kernel")

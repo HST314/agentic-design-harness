@@ -65,7 +65,7 @@ make verify
 | 完整离线发布门禁 | `make g5-e2e` |
 | 真实 Provider | 先预检，再按[配置指南](docs/configuration.md)显式授权费用 |
 
-Windows 不要求 GNU Make；CI 会在 Windows/Linux 执行后端、前端和启动器矩阵。本机若只运行了部分命令或真实链路因环境跳过，必须在 PR 中如实说明，不能把 skip 描述为通过。
+Windows 不要求 GNU Make。日常 `quality` CI 按改动文件选择后端核心、前端核心、文档或 Windows 启动/设置/进程测试，同一分支的新提交会取消仍在运行的旧任务。完整 Python/操作系统矩阵、双系统浏览器与启动器、P6、真实 Image 工作台闭环、依赖审计和 SBOM 由每日及手动 `release quality` 工作流执行。发布前应在 GitHub Actions 手动确认一次该工作流；本机若只运行了部分命令或真实链路因环境跳过，必须在 PR 中如实说明，不能把 skip 描述为通过。
 
 ## 文档与安全
 

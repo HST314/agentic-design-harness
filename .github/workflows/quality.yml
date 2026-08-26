@@ -4,75 +4,94 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  backend_matrix:
-    name: backend (${{ matrix.os }}, ${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
-    env:
-      PYTHONPATH: backend
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.13"]
+  changes:
+    name: changed components
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.components.outputs.backend }}
+      frontend: ${{ steps.components.outputs.frontend }}
+      windows: ${{ steps.components.outputs.windows }}
+      documentation: ${{ steps.components.outputs.documentation }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          submodules: true
-      - uses: actions/setup-python@v5
+      - id: components
+        name: Select required jobs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            BASE_SHA="$HEAD_SHA"
+          fi
+          python3 scripts/ci_changed_components.py \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+  backend:
+    name: backend
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PYTHONPATH: backend
+    steps:
+      - uses: actions/checkout@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          submodules: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
           cache: pip
-      - name: Build the locked Image runtime dependencies used by startup tests
+          cache-dependency-path: requirements-dev.txt
+      - name: Build the locked Image runtime dependencies used by integration tests
         run: >-
           python -m pip install --disable-pip-version-check --upgrade
           --target .runtime/image-agent-deps
           -r agents/image_agent_mvp/requirements.lock
           -r requirements/image-agent-web.in
-      - run: python -m pip install --require-hashes -r requirements-dev.txt
-      - run: python -m unittest discover -s tests -v
-      - run: python -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash tests/e2e
-      - run: python -m pyright backend/harness
-      - run: python -m compileall -q backend/harness scripts tests
-      - run: python scripts/secret_scan.py .
-      - run: python scripts/check_agent_import_boundary.py backend/harness
-      - run: python scripts/verify_image_agent_lock.py
-      - run: python scripts/generate_frontend_contracts.py --check
-      - run: python scripts/benchmark_storage_recovery.py --profile ci
-      - run: python -m pip_audit -r requirements-runtime.txt --require-hashes --disable-pip --progress-spinner off
-
-  backend:
-    name: backend
-    needs: backend_matrix
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require every supported Python version to pass
-        env:
-          BACKEND_MATRIX_RESULT: ${{ needs.backend_matrix.result }}
-        run: test "$BACKEND_MATRIX_RESULT" = success
+      - name: Install locked development dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Run backend core tests
+        run: python -m unittest discover -s tests -v
+      - name: Run static, contract and security checks once
+        run: |
+          python -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash tests/e2e
+          python -m pyright backend/harness
+          python -m compileall -q backend/harness scripts tests
+          python scripts/secret_scan.py .
+          python scripts/check_agent_import_boundary.py backend/harness
+          python scripts/verify_image_agent_lock.py
+          python scripts/generate_frontend_contracts.py --check
 
   frontend:
-    name: frontend (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-        working-directory: frontend
-      - run: npm run check
         working-directory: frontend
       - run: npm run test:unit
         working-directory: frontend
@@ -80,179 +99,94 @@ jobs:
         working-directory: frontend
       - run: npm audit --omit=dev --audit-level=high
         working-directory: frontend
-      - name: Install Chromium and Linux browser dependencies
-        if: runner.os == 'Linux'
-        run: npx playwright install --with-deps chromium
-        working-directory: frontend
-      - name: Install Chromium
-        if: runner.os == 'Windows'
-        run: npx playwright install chromium
-        working-directory: frontend
-      - run: npm run test:e2e
-        working-directory: frontend
 
-  launcher:
-    name: launcher (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+  windows_runtime:
+    name: Windows runtime focus
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 8
+    env:
+      PYTHONPATH: "backend;tests"
+      PYTHONFAULTHANDLER: "1"
+      PYTHONUNBUFFERED: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
-          fetch-depth: 0
-          submodules: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+          python-version: "3.13"
           cache: pip
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Prepare zero-cost startup configuration
-        run: python -c "from pathlib import Path; Path('.env').write_bytes(Path('.env.example').read_bytes())"
-      - run: python scripts/dev.py setup
-      - run: python scripts/dev.py doctor
-      - run: python scripts/dev.py start --check --timeout 60
-
-  p6_platform_acceptance:
-    name: P6 acceptance (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: pip
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: python -m pip install --require-hashes -r requirements-dev.txt
-      - name: Prepare zero-cost startup configuration
-        run: python -c "from pathlib import Path; Path('.env').write_bytes(Path('.env.example').read_bytes())"
-      - run: python scripts/dev.py setup
-      - name: Run P6 platform acceptance without paid Provider calls
+          cache-dependency-path: requirements-dev.txt
+      - name: Install locked development dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Run Windows startup, settings and process tests
         run: >-
-          python scripts/run_p6_platform_acceptance.py
-          --output build/p6-platform-${{ runner.os }}.json
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
+          python -m unittest -v
+          tests.unit.test_windows_runtime
+          tests.unit.test_dev_launcher
+          tests.integration.test_image_agent_config
+          tests.integration.test_runtime_settings_control_plane
+          tests.integration.test_supervisor.ProcessSupervisorTests.test_three_isolated_processes_crash_cancel_and_archive_independently
+          tests.integration.test_supervisor.ProcessSupervisorTests.test_three_instances_start_concurrently_without_revision_conflicts
+          tests.integration.test_supervisor.ProcessSupervisorTests.test_reconcile_promotes_a_ready_start_interrupted_by_harness_crash
+          tests.integration.test_supervisor.ProcessSupervisorTests.test_health_timeout_fails_start_and_releases_port
+          tests.integration.test_supervisor.ProcessSupervisorTests.test_startup_verified_artifact_skips_per_instance_tree_scans
+          tests.integration.test_supervisor.ProcessSupervisorTests.test_port_conflict_and_stale_pid_do_not_target_unrelated_process
+      - name: Collect failure diagnostics
+        if: failure()
+        shell: pwsh
+        run: ./scripts/collect_windows_ci_diagnostics.ps1
+      - uses: actions/upload-artifact@v7
+        if: failure()
         with:
-          name: p6-platform-${{ runner.os }}
-          path: build/p6-platform-${{ runner.os }}.json
+          name: windows-runtime-diagnostics
+          path: build/windows-ci/diagnostics.json
           if-no-files-found: error
+          retention-days: 7
 
   documentation:
-    name: documentation and examples
+    name: documentation
+    needs: changes
+    if: needs.changes.outputs.documentation == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 4
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
           submodules: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Check document set, links, JSON, commands and versions
         run: python scripts/check_docs.py --report build/documentation-check.json
-      - name: Check documented launcher commands
-        run: |
-          python scripts/dev.py --help
-          python scripts/dev.py setup --help
-          python scripts/dev.py doctor --help
-          python scripts/dev.py start --help
-      - name: Check contracts and generated types
-        run: python scripts/generate_frontend_contracts.py --check
-      - name: Check pinned Image version and content
-        run: python scripts/verify_image_agent_lock.py
-      - name: Scan source and documentation for secrets
-        run: python scripts/secret_scan.py .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: documentation-evidence
           path: build/documentation-check.json
+          retention-days: 7
 
-  workbench-real-image:
-    name: workbench real Image closure
-    needs: [backend, frontend]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: pip
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Verify locked Image source and dependency manifests
-        run: python scripts/verify_image_agent_lock.py
-      - run: npm ci
-        working-directory: frontend
-      - run: npx playwright install --with-deps chromium
-        working-directory: frontend
-      - name: Run production workbench against pinned Image runtime
-        run: make frontend-integration
-
-  supply-chain:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: python -m pip install --require-hashes -r requirements-dev.txt
-      - run: npm ci
-        working-directory: frontend
-      - run: python scripts/generate_sbom.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cyclonedx-sbom
-          path: build/sbom/*.cdx.json
-
-  release-gate:
+  quality_gate:
     name: release gate
     if: ${{ always() }}
-    needs: [backend, frontend, launcher, p6_platform_acceptance, documentation, workbench-real-image, supply-chain]
+    needs: [changes, backend, frontend, windows_runtime, documentation]
     runs-on: ubuntu-latest
     steps:
-      - name: Require every release job to pass
+      - name: Require every selected job to pass
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           BACKEND_RESULT: ${{ needs.backend.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
-          LAUNCHER_RESULT: ${{ needs.launcher.result }}
-          P6_PLATFORM_RESULT: ${{ needs.p6_platform_acceptance.result }}
+          WINDOWS_RESULT: ${{ needs.windows_runtime.result }}
           DOCUMENTATION_RESULT: ${{ needs.documentation.result }}
-          REAL_IMAGE_RESULT: ${{ needs.workbench-real-image.result }}
-          SUPPLY_CHAIN_RESULT: ${{ needs.supply-chain.result }}
         run: |
-          test "$BACKEND_RESULT" = success
-          test "$FRONTEND_RESULT" = success
-          test "$LAUNCHER_RESULT" = success
-          test "$P6_PLATFORM_RESULT" = success
-          test "$DOCUMENTATION_RESULT" = success
-          test "$REAL_IMAGE_RESULT" = success
-          test "$SUPPLY_CHAIN_RESULT" = success
+          for result in \
+            "$CHANGES_RESULT" \
+            "$BACKEND_RESULT" \
+            "$FRONTEND_RESULT" \
+            "$WINDOWS_RESULT" \
+            "$DOCUMENTATION_RESULT"
+          do
+            if [ "$result" != success ] && [ "$result" != skipped ]; then
+              exit 1
+            fi
+          done
