@@ -342,7 +342,12 @@ class MasterOrchestrator:
             "asset_id/page/<page_number> or asset_id/block/<block_id>, and keep input_assets on "
             "authoritative catalog ids. Never invent asset contents, provider configuration, "
             "credentials, or supported Agent types. Return exactly the requested structured "
-            "response. "
+            "response. Plan one stage per independent deliverable: first list the standalone "
+            "deliverables the prompt asks for, then emit exactly one image stage per "
+            "deliverable, each with its own distinct title, inside a single PlanDraft "
+            "submitted at once. Merge deliverables into one stage only when they truly "
+            "cannot be delivered independently. Never emit more than 6 image stages in a "
+            "single plan. "
             + (
                 "This task has no assets: every input_asset_ids value must be an empty list, "
                 "and no instruction may claim or cite an asset. "

@@ -169,6 +169,50 @@ class ParallelStageMaterializationTests(unittest.TestCase):
             )
         self.assertEqual(captured.exception.reason, "unsupported_topology")
 
+    def test_six_parallel_image_stages_hit_the_plan_cap(self) -> None:
+        titles = [f"Deliverable {index}" for index in range(1, 7)]
+        proposal = self._materialize([image_stage_draft(title) for title in titles])
+
+        self.assertEqual(len(proposal["stages"]), 6)
+        self.assertEqual(len(proposal["work_items"]), 6)
+        self.assertEqual(len(proposal["execution_cards"]), 6)
+        self.assertEqual(
+            [item["title"] for item in proposal["work_items"]],
+            titles,
+        )
+        for stage in proposal["stages"]:
+            self.assertEqual(stage["depends_on"], [])
+        validate_plan_proposal(
+            self.contracts, proposal, task_id=TASK_ID, expected_revision=1
+        )
+
+    def test_seventh_image_stage_is_rejected_by_the_builder(self) -> None:
+        draft = {
+            "stages": [image_stage_draft(f"Deliverable {index}") for index in range(1, 8)]
+        }
+        validate_master_response(
+            master_response_schema([]), model_output(draft["stages"])
+        )
+
+        with self.assertRaises(PlanDraftValidationError) as captured:
+            materialize_plan_draft(
+                TASK_ID,
+                1,
+                draft,
+                created_at=CREATED_AT,
+                asset_ids=set(),
+            )
+        self.assertEqual(captured.exception.reason, "too_many_image_stages")
+
+    def test_eight_stages_exceed_the_schema_cap(self) -> None:
+        output = model_output(
+            [image_stage_draft(f"Deliverable {index}") for index in range(1, 9)]
+        )
+
+        with self.assertRaises(PlanDraftValidationError) as captured:
+            validate_master_response(master_response_schema([]), output)
+        self.assertEqual(captured.exception.schema, "master-response")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,11 @@ from typing import Any, NoReturn
 
 from jsonschema import Draft202012Validator
 
+# A single plan may fan out to at most six parallel image stages (one per
+# independent deliverable); the schema stage cap leaves room for one PPT tail.
+_MAX_IMAGE_STAGES = 6
+_MAX_STAGES = 7
+
 
 @dataclass(frozen=True, slots=True)
 class PlanDraftValidationError(ValueError):
@@ -196,7 +201,7 @@ def master_response_schema(asset_ids: list[str]) -> dict[str, Any]:
             "stages": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 2,
+                "maxItems": _MAX_STAGES,
                 "items": {"oneOf": [image_stage, ppt_stage]},
             }
         },
@@ -246,6 +251,8 @@ def materialize_plan_draft(
     stages = draft["stages"]
     if any(stage["type"] not in {"image", "ppt"} for stage in stages):
         _invalid("plan-draft", "stages", "unsupported_topology")
+    if sum(1 for stage in stages if stage["type"] == "image") > _MAX_IMAGE_STAGES:
+        _invalid("plan-draft", "stages", "too_many_image_stages")
 
     proposal_id = _identifier("proposal", task_id, revision)
     materialized_stages: list[dict[str, Any]] = []

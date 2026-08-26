@@ -77,17 +77,22 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         task_cards: list[TaskCard],
         operation_id: str,
         envelope: CommandEnvelope,
+        mode: str = "replace",
+        expected_plan_revision: int | None = None,
         crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
         validate_identifier(task_id, "task_id")
         validate_identifier(operation_id, "operation_id")
         request = {
             "task_id": task_id,
+            "mode": mode,
             "stages": deepcopy(stages),
             "instances": deepcopy(instances),
             "task_cards": deepcopy(task_cards),
             "envelope": envelope.model_dump(mode="json"),
         }
+        if expected_plan_revision is not None:
+            request["expected_plan_revision"] = expected_plan_revision
         request_sha256 = digest_json(request)
         intent_path = self._intent_path(operation_id)
         with (

@@ -997,11 +997,14 @@
 .master-confirm-dialog dt { color: var(--color-muted-foreground); font-size: 12px; }
 .master-confirm-dialog dd { margin: var(--space-1) 0 0; font-size: 18px; font-weight: 750; }
 .master-confirm-dialog__cards { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.master-confirm-dialog__cards li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--color-muted-surface); }
-.master-confirm-dialog__cards li > span { min-width: 0; }
+.master-confirm-dialog__cards li { padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--color-muted-surface); }
+.master-confirm-dialog__card-check { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); cursor: pointer; }
+.master-confirm-dialog__card-check input[type="checkbox"] { flex: 0 0 auto; }
+.master-confirm-dialog__card-check > span { min-width: 0; flex: 1 1 auto; }
 .master-confirm-dialog__cards code,
 .master-confirm-dialog__cards small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .master-confirm-dialog__cards small { margin-top: 2px; color: var(--color-muted-foreground); }
+.master-confirm-dialog__hint { margin: 0; color: var(--color-muted-foreground); font-size: 13px; }
 .master-confirm-dialog__warning { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--color-warning); border-radius: var(--radius-sm); color: var(--color-foreground) !important; background: var(--color-warning-soft); }
 .master-confirm-dialog__warning svg { width: 18px; height: 18px; flex: 0 0 auto; color: var(--color-warning); }
 
