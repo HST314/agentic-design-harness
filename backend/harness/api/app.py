@@ -39,6 +39,7 @@ from ..services.plan_proposals import PlanProposalValidationService
 from ..services.retry_budget import RetryBudgetService
 from ..services.runtime_config_observability import RuntimeConfigObservability
 from ..services.supervisor import ProcessSupervisor
+from ..services.system_settings import SystemSettingsService
 from ..services.task_config import TaskConfigService
 from ..services.task_config_rebase import TaskConfigRebaseService
 from ..services.task_intakes import TaskIntakeService
@@ -62,6 +63,7 @@ class Container:
     image_agent_config: ImageAgentConfigMaterializer
     runtime_settings: InstanceRuntimeSettingsService
     task_config_rebase: TaskConfigRebaseService
+    system_settings: SystemSettingsService
     approvals: ApprovalInboxService
     usage: UsageService
     retry_budgets: RetryBudgetService
@@ -180,6 +182,15 @@ def build_container(
         image_agent_config,
         runtime_config_observability,
     )
+    system_settings = SystemSettingsService(
+        settings.image_agent_lock_path.resolve().parents[1],
+        settings,
+        store,
+        task_config,
+        image_agent_config,
+        runtime_settings,
+        task_config_rebase,
+    )
 
     application = HarnessApplicationService(
         store,
@@ -230,6 +241,7 @@ def build_container(
         image_agent_config=image_agent_config,
         runtime_settings=runtime_settings,
         task_config_rebase=task_config_rebase,
+        system_settings=system_settings,
         approvals=approvals,
         usage=usage,
         retry_budgets=retry_budgets,
@@ -380,6 +392,7 @@ def create_app(
             {"name": "tasks", "description": "Main-task planning and lifecycle."},
             {"name": "master", "description": "Persistent Master threads and plan proposals."},
             {"name": "instances", "description": "Isolated Agent process lifecycle."},
+            {"name": "settings", "description": "Global runtime defaults and publication."},
             {"name": "assets", "description": "Controlled import, preview and delivery."},
             {"name": "approvals", "description": "Frozen-owner workflow decisions."},
             {"name": "inbox", "description": "FIFO notifications and handling state."},

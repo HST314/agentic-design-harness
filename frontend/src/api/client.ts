@@ -225,6 +225,93 @@ export interface RuntimeSettingsConfirmationResponse {
   last_error: Record<string, unknown> | null;
 }
 
+export interface HarnessSettingsDocument {
+  schema_version: "1.0";
+  server: { host: string; port: number; log_level: string };
+  models: {
+    master: string;
+    text_reasoning: string;
+    vision_understanding: string;
+    image_generation: string;
+  };
+  master: {
+    model_timeout_seconds: number;
+    max_tool_rounds: number;
+    max_clarification_questions: number;
+    require_plan_confirmation: boolean;
+  };
+  document_processing: {
+    max_files_per_task: number;
+    max_total_bytes: number;
+    max_pdf_pages: number;
+    text_chunk_chars: number;
+    visual_analysis: "auto" | "always" | "never";
+    require_source_citations: boolean;
+  };
+  supervisor: {
+    port_range_start: number;
+    port_range_end: number;
+    startup_timeout_seconds: number;
+    shutdown_grace_seconds: number;
+  };
+}
+
+export interface ImageAgentSettingsDocument {
+  schema_version: "1.0";
+  question_preference: "proactive" | "blocking_only" | "on_demand";
+  max_auto_questions: number;
+  clarification_total_budget: number;
+  category_constraint: { release: "auto" | "manual" | "off" };
+  style_direction: { release: "auto" | "manual" | "off" };
+  candidate_concurrency: number;
+  default_output_size: string;
+  response_format: "url" | "b64_json";
+  watermark: boolean;
+  self_check: {
+    termination: "fix" | "solo";
+    fixed_rounds: number;
+    max_rounds: number;
+    stop_early_on_pass: boolean;
+  };
+  advanced_model_overrides: Record<string, string | null>;
+}
+
+export interface SystemSettingsResponse {
+  schema_version: "1.0";
+  revision: string;
+  harness_settings: HarnessSettingsDocument;
+  image_agent_settings: ImageAgentSettingsDocument;
+  editable_schema: Record<string, unknown>;
+  model_options: Record<string, Array<{ id: string; label: string }>>;
+  last_publication: SystemSettingsPublication | null;
+}
+
+export interface SystemSettingsPreview {
+  schema_version: "1.0";
+  preview_id: string;
+  base_revision: string;
+  candidate_revision: string;
+  changes: Array<{ field: string; before: unknown; after: unknown }>;
+  harness_settings: HarnessSettingsDocument;
+  image_agent_settings: ImageAgentSettingsDocument;
+}
+
+export interface SystemSettingsPublication {
+  schema_version: "1.0";
+  status: "PUBLISHED" | "PARTIAL" | "UNCHANGED";
+  revision: string;
+  previous_revision?: string;
+  published_at?: string;
+  changes: Array<{ field: string; before: unknown; after: unknown }>;
+  distribution: {
+    updated: number;
+    waiting_safe_point: number;
+    failed: number;
+    completed_history_unchanged: number;
+    items: Array<Record<string, unknown>>;
+  };
+}
+
 export interface StartFailure {
   code: string;
   message: string;
@@ -727,6 +814,28 @@ export class ApiClient {
       `/api/v1/instances/${encodeURIComponent(instanceId)}/runtime-setting-proposals/${encodeURIComponent(proposalId)}/confirm`,
       { envelope },
     );
+  }
+
+  systemSettings(signal?: AbortSignal): Promise<SystemSettingsResponse> {
+    return this.get("/api/v1/system-settings", signal);
+  }
+
+  previewSystemSettings(body: {
+    base_revision: string;
+    harness_settings: HarnessSettingsDocument;
+    image_agent_settings: ImageAgentSettingsDocument;
+  }): Promise<SystemSettingsPreview> {
+    return this.send("POST", "/api/v1/system-settings/preview", body);
+  }
+
+  publishSystemSettings(body: {
+    preview_id: string;
+    base_revision: string;
+    harness_settings: HarnessSettingsDocument;
+    image_agent_settings: ImageAgentSettingsDocument;
+    actor_id: string;
+  }): Promise<SystemSettingsPublication> {
+    return this.send("POST", "/api/v1/system-settings/publish", body);
   }
 
   retryStartOperation(

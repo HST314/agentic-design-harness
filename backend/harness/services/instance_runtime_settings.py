@@ -100,8 +100,8 @@ class InstanceRuntimeSettingsService:
                 effective[field].update(deepcopy(value))
             else:
                 effective[field] = deepcopy(value)
-        inherited_models = self._effective_model_ids(task_revision, {})
-        effective_models = self._effective_model_ids(
+        inherited_models = self.effective_model_ids(task_revision, {})
+        effective_models = self.effective_model_ids(
             task_revision, current["manifest"]["overrides"]
         )
         values: dict[str, Any] = {}
@@ -260,7 +260,7 @@ class InstanceRuntimeSettingsService:
             mode = self._apply_mode(task_id, instance)
             boundary = self._proposal_boundary(mode, observed_boundary, instance)
             effective = self.materializer.effective_runtime(task_revision, overrides)
-            effective_models = self._effective_model_ids(task_revision, overrides)
+            effective_models = self.effective_model_ids(task_revision, overrides)
             proposal = {
                 "schema_version": "1.0",
                 "proposal_id": proposal_id,
@@ -277,7 +277,7 @@ class InstanceRuntimeSettingsService:
                 "effective_model_ids": effective_models,
                 "diff": self._diff(
                     current,
-                    self._effective_model_ids(
+                    self.effective_model_ids(
                         task_revision, current["manifest"]["overrides"]
                     ),
                     effective,
@@ -448,6 +448,15 @@ class InstanceRuntimeSettingsService:
                     "confirm_envelope": envelope.model_dump(mode="json"),
                     "confirmed_at": now,
                     "updated_at": now,
+                    "project_config_base": {
+                        "revision_id": proposal["workflow_boundary"].get(
+                            "runtime_config_revision_id"
+                        ),
+                        "config_hash": proposal["workflow_boundary"].get(
+                            "runtime_config_hash"
+                        ),
+                        "branch_id": proposal["workflow_boundary"].get("branch_id"),
+                    },
                     "source": {
                         "instance_id": instance_id,
                         "base": self._identity_from_current(current),
@@ -572,6 +581,29 @@ class InstanceRuntimeSettingsService:
                 )
             if not boundary["safe_now"]:
                 return self._wait_at_safe_point(saga, boundary)
+            project_base = saga.get("project_config_base") or {}
+            expected_project_revision = project_base.get("revision_id")
+            expected_project_hash = project_base.get("config_hash")
+            if expected_project_revision is None or expected_project_hash is None:
+                expected_project_revision = saga["source"]["base"]["revision_id"]
+                expected_project_hash = saga["source"]["base"]["config_hash"]
+            if (
+                boundary.get("runtime_config_revision_id") not in {
+                    None,
+                    expected_project_revision,
+                }
+                or boundary.get("runtime_config_hash") not in {
+                    None,
+                    expected_project_hash,
+                }
+            ):
+                return self._fail_saga(
+                    saga,
+                    HarnessError(
+                        "SETTINGS_REVISION_CONFLICT",
+                        "The active project configuration changed after preview.",
+                    ),
+                )
             if saga["source"]["bundle"] is None:
                 bundle = self.materializer.build_revision(
                     task_id,
@@ -630,6 +662,8 @@ class InstanceRuntimeSettingsService:
                         revision_id=bundle["manifest"]["revision_id"],
                         from_checkpoint=saga["from_checkpoint"],
                         expected_config_hash=bundle["manifest"]["config_hash"],
+                        expected_project_revision_id=expected_project_revision,
+                        expected_project_config_hash=expected_project_hash,
                         effective_from_state=saga["effective_from_state"],
                         idempotency_key=self._apply_idempotency_key(saga),
                     )
@@ -1088,6 +1122,9 @@ class InstanceRuntimeSettingsService:
         checkpoint_id = boundary.get("checkpoint_id")
         safe_now = boundary.get("safe_now")
         reason = boundary.get("reason")
+        runtime_config_revision_id = boundary.get("runtime_config_revision_id")
+        runtime_config_hash = boundary.get("runtime_config_hash")
+        branch_id = boundary.get("branch_id")
         identifiers_valid = True
         try:
             if isinstance(state, str):
@@ -1104,6 +1141,9 @@ class InstanceRuntimeSettingsService:
             and type(safe_now) is bool
             and (checkpoint_id is None or isinstance(checkpoint_id, str))
             and (reason is None or isinstance(reason, str))
+            and (runtime_config_revision_id is None or isinstance(runtime_config_revision_id, str))
+            and (runtime_config_hash is None or isinstance(runtime_config_hash, str))
+            and (branch_id is None or isinstance(branch_id, str))
             and (not safe_now or bool(checkpoint_id))
             and (not safe_now or reason is None)
         )
@@ -1119,6 +1159,9 @@ class InstanceRuntimeSettingsService:
             "checkpoint_id": checkpoint_id,
             "safe_now": safe_now,
             "reason": reason or (None if safe_now else "SAFE_CHECKPOINT_UNAVAILABLE"),
+            "runtime_config_revision_id": runtime_config_revision_id,
+            "runtime_config_hash": runtime_config_hash,
+            "branch_id": branch_id,
         }
 
     def _apply_mode(self, task_id: str, instance: dict[str, Any]) -> str:
@@ -1212,7 +1255,7 @@ class InstanceRuntimeSettingsService:
             )
 
     @staticmethod
-    def _effective_model_ids(
+    def effective_model_ids(
         task_revision: dict[str, Any], overrides: dict[str, Any]
     ) -> dict[str, str]:
         baseline = task_revision["runtime"]["image_agent"]["advanced_model_overrides"]
@@ -1244,7 +1287,7 @@ class InstanceRuntimeSettingsService:
             before = (
                 current_model_ids
                 if field == "advanced_model_overrides"
-                else prior.get(field, {"release": "auto"})
+                else prior.get(field, {"release": "off"})
             )
             after = effective_models if field == "advanced_model_overrides" else effective[field]
             if before == after:

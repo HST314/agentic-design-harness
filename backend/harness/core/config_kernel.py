@@ -1,4 +1,4 @@
-"""Strict, aggregated loading for the three-file deployment configuration."""
+"""Strict, aggregated loading for the deployment configuration bundle."""
 
 from __future__ import annotations
 
@@ -213,12 +213,34 @@ class AdvancedModelOverrides(StrictConfigModel):
     human_prompt_rework: str | None
 
 
+class LibraryReleaseConfig(StrictConfigModel):
+    release: Literal["auto", "manual", "off"]
+
+
+class ImageAgentSelfCheckConfig(StrictConfigModel):
+    termination: Literal["fix", "solo"]
+    fixed_rounds: int = Field(ge=1, le=20)
+    max_rounds: int = Field(ge=1, le=50)
+    stop_early_on_pass: bool
+
+    @model_validator(mode="after")
+    def ordered_rounds(self) -> ImageAgentSelfCheckConfig:
+        if self.fixed_rounds > self.max_rounds:
+            raise ValueError("fixed_rounds must not exceed max_rounds")
+        return self
+
+
 class ImageAgentConfig(StrictConfigModel):
-    question_preference: Literal["proactive", "on_demand"]
+    question_preference: Literal["proactive", "blocking_only", "on_demand"]
+    max_auto_questions: int = Field(ge=0, le=10)
+    clarification_total_budget: int = Field(ge=0, le=100)
+    category_constraint: LibraryReleaseConfig
+    style_direction: LibraryReleaseConfig
     candidate_concurrency: int = Field(ge=1, le=5)
     default_output_size: str
     response_format: Literal["url", "b64_json"]
     watermark: bool
+    self_check: ImageAgentSelfCheckConfig
     advanced_model_overrides: AdvancedModelOverrides
 
     @field_validator("default_output_size")
@@ -227,6 +249,10 @@ class ImageAgentConfig(StrictConfigModel):
         if _SIZE.fullmatch(value) is None:
             raise ValueError("must use WIDTHxHEIGHT with positive integer dimensions")
         return value
+
+
+class ImageAgentRuntimeFileConfig(ImageAgentConfig):
+    schema_version: Literal["1.0"]
 
 
 class SupervisorConfig(StrictConfigModel):
@@ -242,20 +268,25 @@ class SupervisorConfig(StrictConfigModel):
         return self
 
 
-class RuntimeConfig(StrictConfigModel):
+class RuntimeFileConfig(StrictConfigModel):
     schema_version: Literal["1.0"]
     server: ServerConfig
     models: RuntimeModelSelection
     master: MasterConfig
     document_processing: DocumentProcessingConfig
-    image_agent: ImageAgentConfig
     supervisor: SupervisorConfig
 
     @model_validator(mode="after")
-    def distinct_server_and_supervisor_ports(self) -> RuntimeConfig:
+    def distinct_server_and_supervisor_ports(self) -> RuntimeFileConfig:
         if self.supervisor.port_range_start <= self.server.port <= self.supervisor.port_range_end:
             raise ValueError("server.port must be outside supervisor.port_range_start/end")
         return self
+
+
+class RuntimeConfig(RuntimeFileConfig):
+    """Validated in-memory aggregate of Harness and Image Agent settings."""
+
+    image_agent: ImageAgentConfig
 
 
 class ConfigSnapshot(StrictConfigModel):
@@ -600,9 +631,13 @@ class ConfigLoader:
         problems: list[ConfigProblem] = []
         dotenv = _parse_env(self.project_root / ".env", problems)
         environment = {**dotenv, **self.environ}
-        raw_provider = _load_yaml(self.project_root / "provider.yaml", problems)
-        raw_models = _load_yaml(self.project_root / "model_list.yaml", problems)
-        raw_runtime = _load_yaml(self.project_root / "runtime.yaml", problems)
+        config_root = self.project_root / "config"
+        raw_provider = _load_yaml(config_root / "provider.yaml", problems)
+        raw_models = _load_yaml(config_root / "model_list.yaml", problems)
+        raw_runtime = _load_yaml(config_root / "runtime.yaml", problems)
+        raw_image_runtime = _load_yaml(
+            config_root / "image_agent_runtime.yaml", problems
+        )
 
         if isinstance(raw_provider, dict):
             api_key = raw_provider.get("providers", {}).get("ark", {}).get("api_key")
@@ -619,6 +654,7 @@ class ConfigLoader:
         for filename, value in (
             ("model_list.yaml", raw_models),
             ("runtime.yaml", raw_runtime),
+            ("image_agent_runtime.yaml", raw_image_runtime),
         ):
             if value is not None:
                 for field_path, _ in _find_env_references(value):
@@ -636,9 +672,25 @@ class ConfigLoader:
         model_config = self._validate_schema(
             "model_list.yaml", ModelListConfig, raw_models, problems
         )
-        runtime_config = self._validate_schema(
-            "runtime.yaml", RuntimeConfig, raw_runtime, problems
+        runtime_file_config = self._validate_schema(
+            "runtime.yaml", RuntimeFileConfig, raw_runtime, problems
         )
+        image_runtime_config = self._validate_schema(
+            "image_agent_runtime.yaml",
+            ImageAgentRuntimeFileConfig,
+            raw_image_runtime,
+            problems,
+        )
+        runtime_config = None
+        if runtime_file_config is not None and image_runtime_config is not None:
+            runtime_config = RuntimeConfig.model_validate(
+                {
+                    **runtime_file_config.model_dump(mode="json"),
+                    "image_agent": image_runtime_config.model_dump(
+                        mode="json", exclude={"schema_version"}
+                    ),
+                }
+            )
         if model_config and runtime_config:
             problems.extend(
                 ConfigValidator().validate(provider_config, model_config, runtime_config)
@@ -676,3 +728,54 @@ def load_config_snapshot(
     project_root: Path, environ: Mapping[str, str] | None = None
 ) -> ConfigSnapshot:
     return ConfigLoader(project_root, environ).load()
+
+
+def build_config_snapshot(
+    *,
+    providers: ProviderConfig,
+    model_list: ModelListConfig,
+    runtime: RuntimeFileConfig | Mapping[str, Any],
+    image_agent_runtime: ImageAgentRuntimeFileConfig | Mapping[str, Any],
+) -> ConfigSnapshot:
+    """Validate editable documents and build the same immutable process snapshot."""
+
+    problems: list[ConfigProblem] = []
+    try:
+        runtime_file = (
+            runtime
+            if isinstance(runtime, RuntimeFileConfig)
+            else RuntimeFileConfig.model_validate(runtime)
+        )
+    except ValidationError as exc:
+        problems.extend(_validation_problems("runtime.yaml", exc))
+        runtime_file = None
+    try:
+        image_file = (
+            image_agent_runtime
+            if isinstance(image_agent_runtime, ImageAgentRuntimeFileConfig)
+            else ImageAgentRuntimeFileConfig.model_validate(image_agent_runtime)
+        )
+    except ValidationError as exc:
+        problems.extend(_validation_problems("image_agent_runtime.yaml", exc))
+        image_file = None
+    aggregate = None
+    if runtime_file is not None and image_file is not None:
+        aggregate = RuntimeConfig.model_validate(
+            {
+                **runtime_file.model_dump(mode="json"),
+                "image_agent": image_file.model_dump(
+                    mode="json", exclude={"schema_version"}
+                ),
+            }
+        )
+        problems.extend(ConfigValidator().validate(providers, model_list, aggregate))
+    if problems:
+        raise ConfigurationError(problems)
+    assert aggregate is not None
+    return ConfigSnapshot(
+        schema_version=SCHEMA_VERSION,
+        revision=_snapshot_revision(providers, model_list, aggregate),
+        providers=providers,
+        model_list=model_list,
+        runtime=aggregate,
+    )

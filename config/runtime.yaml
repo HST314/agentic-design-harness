@@ -25,20 +25,6 @@ document_processing:
   visual_analysis: auto
   require_source_citations: true
 
-image_agent:
-  question_preference: proactive
-  candidate_concurrency: 5
-  default_output_size: 2560x1440
-  response_format: url
-  watermark: false
-  advanced_model_overrides:
-    intake_clarify: null
-    confirmation_build: null
-    initial_candidate_generation: null
-    self_check_inspection: null
-    self_check_rework: null
-    human_prompt_rework: null
-
 supervisor:
   port_range_start: 18100
   port_range_end: 18199

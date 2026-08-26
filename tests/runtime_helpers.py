@@ -97,10 +97,20 @@ def build_config_snapshot(
                 },
                 "image_agent": {
                     "question_preference": "proactive",
+                    "max_auto_questions": 3,
+                    "clarification_total_budget": 10,
+                    "category_constraint": {"release": "off"},
+                    "style_direction": {"release": "off"},
                     "candidate_concurrency": 5,
                     "default_output_size": "2560x1440",
                     "response_format": "url",
                     "watermark": False,
+                    "self_check": {
+                        "termination": "solo",
+                        "fixed_rounds": 2,
+                        "max_rounds": 4,
+                        "stop_early_on_pass": False,
+                    },
                     "advanced_model_overrides": {
                         "intake_clarify": None,
                         "confirmation_build": None,

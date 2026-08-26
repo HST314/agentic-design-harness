@@ -15,15 +15,21 @@ from pydantic import ValidationError
 from scripts.dev import ConfigCheckFailed, DevelopmentLauncher, main
 
 ROOT = Path(__file__).resolve().parents[2]
-CONFIG_FILES = ("provider.yaml", "model_list.yaml", "runtime.yaml")
+CONFIG_FILES = (
+    "provider.yaml",
+    "model_list.yaml",
+    "runtime.yaml",
+    "image_agent_runtime.yaml",
+)
 
 
 class ConfigKernelTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        (self.root / "config").mkdir()
         for filename in CONFIG_FILES:
-            shutil.copyfile(ROOT / filename, self.root / filename)
+            shutil.copyfile(ROOT / "config" / filename, self.root / "config" / filename)
         self.write_env()
 
     def tearDown(self) -> None:
@@ -41,10 +47,10 @@ class ConfigKernelTests(unittest.TestCase):
         )
 
     def read_yaml(self, filename: str) -> dict[str, object]:
-        return yaml.safe_load((self.root / filename).read_text(encoding="utf-8"))
+        return yaml.safe_load((self.root / "config" / filename).read_text(encoding="utf-8"))
 
     def write_yaml(self, filename: str, value: dict[str, object]) -> None:
-        (self.root / filename).write_text(
+        (self.root / "config" / filename).write_text(
             yaml.safe_dump(value, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
@@ -126,7 +132,7 @@ class ConfigKernelTests(unittest.TestCase):
         self.assertIn("runtime.yaml: server.unexpected", str(error))
 
     def test_yaml_parse_error_reports_line_and_column(self) -> None:
-        (self.root / "runtime.yaml").write_text(
+        (self.root / "config" / "runtime.yaml").write_text(
             "schema_version: '1.0'\nserver: [\n", encoding="utf-8"
         )
 
