@@ -86,6 +86,10 @@ class AgentRuntimeIdentity:
     dependency_locks_sha256: str
     interpreter: dict[str, Any]
     environment: dict[str, Any]
+    _digest: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_digest", digest_json(self.as_dict()))
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -103,7 +107,7 @@ class AgentRuntimeIdentity:
 
     @property
     def digest(self) -> str:
-        return digest_json(self.as_dict())
+        return self._digest
 
 
 @dataclass(slots=True)
@@ -115,11 +119,12 @@ class PinnedRuntimeArtifact:
     windows_root_handle: int | None
     source_root: Path
     entrypoint_relpath: str
+    verify_filesystem: bool = True
 
     def verify_current(self) -> None:
         """Fail before side effects if a portable path-backed pin has changed."""
 
-        if self.source_descriptor is None:
+        if self.verify_filesystem and self.source_descriptor is None:
             current_manifest = tuple(_artifact_manifest(self.source_root))
             if digest_json(list(current_manifest)) != self.identity.source_manifest_sha256:
                 _artifact_invalid("The runtime artifact changed before process creation.")
@@ -163,6 +168,7 @@ class PinnedRuntimeArtifact:
 class ProcessSpec:
     command: tuple[str, ...]
     runtime_artifact: AgentRuntimeArtifact
+    verified_runtime_identity: AgentRuntimeIdentity | None = None
     public_environment: dict[str, str] = field(default_factory=dict)
     health_path: str = "/healthz"
     readiness_path: str = "/readyz"
@@ -217,6 +223,11 @@ def process_spec_digest(spec: ProcessSpec) -> str:
                     else None
                 ),
             },
+            "verified_runtime_identity": (
+                None
+                if spec.verified_runtime_identity is None
+                else spec.verified_runtime_identity.digest
+            ),
             "public_environment": spec.public_environment,
             "health_path": spec.health_path,
             "readiness_path": spec.readiness_path,
@@ -241,6 +252,16 @@ def pin_runtime_artifact(spec: ProcessSpec) -> PinnedRuntimeArtifact:
 
     spec.validate()
     artifact = spec.runtime_artifact
+    if spec.verified_runtime_identity is not None:
+        _validate_verified_runtime_identity(spec, spec.verified_runtime_identity)
+        return PinnedRuntimeArtifact(
+            identity=spec.verified_runtime_identity,
+            source_descriptor=None,
+            windows_root_handle=None,
+            source_root=artifact.source_root,
+            entrypoint_relpath=artifact.entrypoint_relpath,
+            verify_filesystem=False,
+        )
     descriptor: int | None = None
     windows_root_handle: int | None = None
     try:
@@ -315,6 +336,26 @@ def pin_runtime_artifact(spec: ProcessSpec) -> PinnedRuntimeArtifact:
         if windows_root_handle is not None:
             _close_windows_handle(windows_root_handle)
         raise
+
+
+def _validate_verified_runtime_identity(
+    spec: ProcessSpec, identity: AgentRuntimeIdentity
+) -> None:
+    """Bind a startup-verified identity to its immutable in-process specification."""
+
+    artifact = spec.runtime_artifact
+    try:
+        executable = str(Path(spec.command[0]).resolve(strict=True))
+    except OSError:
+        _artifact_invalid("The verified runtime interpreter is unavailable.")
+    if (
+        identity.artifact_id != artifact.artifact_id
+        or identity.revision != artifact.revision
+        or identity.source_root != str(artifact.source_root)
+        or identity.entrypoint_relpath != artifact.entrypoint_relpath
+        or identity.interpreter.get("path") != executable
+    ):
+        _artifact_invalid("The startup-verified runtime identity does not match the process.")
 
 
 def _artifact_manifest(root: int | Path) -> list[dict[str, Any]]:

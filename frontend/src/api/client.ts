@@ -188,6 +188,7 @@ export interface InstanceRuntimeSettingsResponse {
   workflow_boundary: Record<string, unknown>;
   sync_candidates: Array<{ instance_id: string; work_item_id?: string }>;
   pending_application: Record<string, unknown> | null;
+  last_application_failure: Record<string, unknown> | null;
 }
 
 export interface RuntimeSettingsProposalResponse {
@@ -253,6 +254,11 @@ export interface StartOperation {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+}
+
+export interface LatestStartOperationResponse {
+  schema_version: "1.1";
+  operation: StartOperation | null;
 }
 
 export interface PageInfo {
@@ -731,6 +737,16 @@ export class ApiClient {
       "POST",
       `/api/v1/start-operations/${encodeURIComponent(operationId)}/retry`,
       { envelope },
+    );
+  }
+
+  latestStartOperation(
+    taskId: string,
+    signal?: AbortSignal,
+  ): Promise<LatestStartOperationResponse> {
+    return this.get(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/start-operations/latest`,
+      signal,
     );
   }
 

@@ -78,7 +78,12 @@ test("embeds only the server-approved current Image instance with keyboard exits
   await expect(iframe).toHaveAttribute("referrerpolicy", "origin");
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "Image Agent Studio" })).toBeVisible();
   await expect(page.getByRole("textbox")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "新标签页" })).toHaveAttribute("rel", "noopener noreferrer");
+  const focusLink = page.getByRole("link", { name: "新标签页" });
+  await expect(focusLink).toHaveAttribute(
+    "href",
+    "/tasks/task_workbench_e2e/work-items/work_image/focus",
+  );
+  await expect(focusLink).toHaveAttribute("rel", "noopener noreferrer");
 
   await page.getByRole("button", { name: "跳到 Image Agent 工作台" }).click();
   await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).toBe("IFRAME");
@@ -152,7 +157,9 @@ test("bridges managed settings through the verified parent with a rotating nonce
     </script></html>`,
   }));
 
-  await page.goto("/tasks/task_workbench_e2e/work-items/work_image");
+  await page.goto("/tasks/task_workbench_e2e/work-items/work_image/focus");
+  await expect(page.locator(".workbench-sidebar")).toHaveCount(0);
+  await expect(page.locator(".agent-workbench--focus")).toBeVisible();
   await expect(page.frameLocator("iframe").locator("#bridge-result")).toHaveText("proposal_e2e");
   expect(proposalBody).toMatchObject({
     base_revision: 3,
@@ -177,7 +184,7 @@ test("shows frame-policy failure with a controlled external fallback", async ({ 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_image");
   await expect(page.getByRole("heading", { name: "Image Agent 无法安全内嵌" })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
-  const fallback = page.getByRole("link", { name: "在新标签页中尝试" });
+  const fallback = page.getByRole("link", { name: "直接打开原始工作台" });
   await expect(fallback).toHaveAttribute("href", "http://127.0.0.1:19092/");
   await expect(fallback).toHaveAttribute("rel", "noopener noreferrer");
   await expect(page.getByRole("button", { name: "重新检查" })).toBeVisible();

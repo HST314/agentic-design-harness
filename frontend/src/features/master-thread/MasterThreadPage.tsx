@@ -11,10 +11,12 @@ import type {
 import { ApiError } from "../../api/client";
 import {
   api,
+  latestStartOperationQuery,
   masterSessionQuery,
   taskHistoryQuery,
   taskIntakeQuery,
 } from "../../api/queries";
+import type { StartOperation } from "../../api/client";
 import type {
   ContractMasterMessage,
   ContractPlanProposal,
@@ -91,6 +93,74 @@ function deliveryLabel(delivery: ExpectedDelivery): string {
     other: "其他",
   }[delivery.kind];
   return `${kind} · ${delivery.role} · ${delivery.accepted_mime_types.join("、")}`;
+}
+
+const startStageLabels = [
+  "已受理",
+  "准备运行环境",
+  "启动进程",
+  "健康检查",
+  "工作台就绪",
+] as const;
+
+function startStageIndex(operation: StartOperation | null | undefined): number {
+  if (!operation) return 0;
+  if (operation.state === "COMMITTED") return startStageLabels.length - 1;
+  const stageByState: Record<string, number> = {
+    PENDING: 0,
+    PREPARING: 1,
+    PROCESS_STARTING: 2,
+    AGENT_STARTING: 3,
+    RUNNING: 4,
+  };
+  const stages = Object.values(operation.instance_progress).map(
+    (item) => stageByState[item.state] ?? 0,
+  );
+  return stages.length ? Math.min(...stages) : 0;
+}
+
+function StartProgressBar({ operation }: { operation: StartOperation | null | undefined }): React.JSX.Element {
+  const failed = operation?.state === "RETRYABLE_FAILED" || operation?.state === "ABORTED";
+  const current = startStageIndex(operation);
+  return (
+    <section
+      className={`master-start-progress${failed ? " master-start-progress--failed" : ""}`}
+      aria-labelledby="master-start-progress-title"
+    >
+      <header>
+        <div>
+          <p className="workbench-eyebrow">实例启动</p>
+          <h2 id="master-start-progress-title">{failed ? "启动未完成" : current === 4 ? "专业工作台已就绪" : "正在启动专业工作台"}</h2>
+        </div>
+        <span role="status" aria-live="polite">{failed ? "需要重试" : `${current + 1} / ${startStageLabels.length}`}</span>
+      </header>
+      <ol
+        className="master-start-progress__steps"
+        role="progressbar"
+        aria-label="实例启动进度"
+        aria-valuemin={1}
+        aria-valuemax={startStageLabels.length}
+        aria-valuenow={current + 1}
+      >
+        {startStageLabels.map((label, index) => (
+          <li
+            key={label}
+            className={index < current ? "is-complete" : index === current ? "is-current" : ""}
+          >
+            <span aria-hidden="true">{index + 1}</span>
+            <strong>{label}</strong>
+          </li>
+        ))}
+      </ol>
+      {failed ? (
+        <p className="master-start-progress__message" role="alert">
+          {operation?.last_error?.message ?? "实例启动失败，请在任务看板中由用户手动重试。"}
+        </p>
+      ) : (
+        <p className="master-start-progress__message">启动会在后台继续；你可以随时手动切换到任务看板查看进度。</p>
+      )}
+    </section>
+  );
 }
 
 export function TaskTabs({ taskId }: { taskId: string }): React.JSX.Element {
@@ -530,6 +600,10 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
     ...masterSessionQuery(taskId),
     enabled: !pauseMasterPolling,
   });
+  const startOperation = useQuery({
+    ...latestStartOperationQuery(taskId),
+    enabled: session.data?.latest_proposal?.status === "CONFIRMED",
+  });
   const [content, setContent] = useState("");
   const [selectedAssets, setSelectedAssets] = useState<Set<string>>(() => new Set());
   const [confirmReview, setConfirmReview] = useState<{
@@ -587,6 +661,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
     onSuccess: (response) => {
       queryClient.setQueryData(masterSessionQuery(taskId).queryKey, response.session);
       void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
+      void queryClient.invalidateQueries({ queryKey: latestStartOperationQuery(taskId).queryKey });
       closeConfirmReview();
       setNotice("计划已确认，实例启动已排队；页面会持续同步结果。");
     },
@@ -647,6 +722,9 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         <span className={`master-task-status master-task-status--${data.task.status.toLowerCase()}`}><span aria-hidden="true" />{taskStatusLabel[data.task.status] ?? data.task.status}</span>
       </header>
       <TaskTabs taskId={taskId} />
+      {proposal?.status === "CONFIRMED" ? (
+        <StartProgressBar operation={startOperation.data?.operation} />
+      ) : null}
       {session.isError ? <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>后台同步暂时失败</strong><p>已保留当前页面数据，系统会继续重试；也可稍后手动刷新。</p></div></div> : null}
       {data.thread.last_error && !busy ? (
         <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>本次智能分析未完成</strong><p>任务内容和对话记录已保留。请稍后重新发送；若持续失败，请联系支持人员。</p></div></div>

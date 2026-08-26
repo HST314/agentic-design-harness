@@ -69,6 +69,8 @@ function WorkbenchFailure({
   retryLabel,
   retryPending,
   taskId,
+  workItemId,
+  focusMode,
 }: {
   link?: AgentWorkbenchLinkResponse;
   message: string;
@@ -76,6 +78,8 @@ function WorkbenchFailure({
   retryLabel: string;
   retryPending: boolean;
   taskId: string;
+  workItemId: string;
+  focusMode: boolean;
 }): React.JSX.Element {
   const heading = link?.link_status === "FRAME_BLOCKED"
     ? "Image Agent 无法安全内嵌"
@@ -97,10 +101,19 @@ function WorkbenchFailure({
           <button className="workbench-secondary-button" type="button" disabled={retryPending} onClick={onRetry}>
             <Icon name="retry" />{retryPending ? "正在恢复…" : retryLabel}
           </button>
-          {link?.ui_url ? (
+          {link?.ui_url && (!focusMode || link.link_status === "FRAME_BLOCKED") ? link.link_status === "FRAME_BLOCKED" ? (
             <a
               className="workbench-secondary-button"
               href={link.ui_url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <Icon name="external-link" />直接打开原始工作台
+            </a>
+          ) : (
+            <a
+              className="workbench-secondary-button"
+              href={`/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}/focus`}
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -116,7 +129,7 @@ function WorkbenchFailure({
   );
 }
 
-export function AgentWorkbenchPage(): React.JSX.Element {
+export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean }): React.JSX.Element {
   const queryClient = useQueryClient();
   const { taskId = "", workItemId = "" } = useParams();
   const detail = useQuery(workItemDetailQuery(taskId, workItemId));
@@ -244,11 +257,11 @@ export function AgentWorkbenchPage(): React.JSX.Element {
   const retryLabel = link.data?.link_status === "START_FAILED" ? "恢复启动" : "重新检查链接";
 
   if (detail.isPending) {
-    return <section className="workbench-page agent-workbench-state" role="status">正在读取 Image WorkItem…</section>;
+    return <section className={`workbench-page agent-workbench-state${focusMode ? " agent-workbench--focus" : ""}`} role="status">正在读取 Image WorkItem…</section>;
   }
   if (detail.isError || !item) {
     return (
-      <section className="workbench-page agent-workbench-state" role="alert">
+      <section className={`workbench-page agent-workbench-state${focusMode ? " agent-workbench--focus" : ""}`} role="alert">
         <strong>无法读取逻辑子任务</strong>
         <p>{detail.error?.message}</p>
         <button className="workbench-secondary-button" type="button" onClick={() => void detail.refetch()}>重新读取</button>
@@ -258,12 +271,12 @@ export function AgentWorkbenchPage(): React.JSX.Element {
 
   if (item.agent_type === "ppt" || !item.stage.available) {
     return (
-      <section className="workbench-page agent-workbench" aria-labelledby="agent-workbench-title">
+      <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-labelledby="agent-workbench-title">
         <header className="agent-workbench__context">
           <div><p className="workbench-eyebrow">{detail.data.task.title} / 阶段 {item.stage.position}</p><h1 id="agent-workbench-title">{item.title}</h1><p>当前任务需要的 PPT 创作能力尚未开放，任务不会被误标为完成。</p></div>
           <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}>返回看板</Link>
         </header>
-        <TaskTabs taskId={taskId} />
+        {focusMode ? null : <TaskTabs taskId={taskId} />}
         <div className="agent-workbench-boundary" role="note"><Icon name="status" /><div><h2>PPT 工作台暂不可用</h2><p>请返回看板调整计划，或选择当前已开放的创作能力。</p></div></div>
       </section>
     );
@@ -272,9 +285,9 @@ export function AgentWorkbenchPage(): React.JSX.Element {
   const readyLink = link.data?.embeddable && link.data.ui_url ? link.data : undefined;
   const statusText = businessStatusLabel[item.business_status];
   const failureMessage = frameState === "failed"
-    ? "工作台在 12 秒内未完成加载。可重新检查、返回看板，或使用已验证地址在新标签页中尝试。"
+    ? "工作台在 12 秒内未完成加载。可重新检查、返回看板，或在新标签页专注模式中尝试。"
     : link.data?.link_status === "FRAME_BLOCKED"
-      ? "当前工作台无法在此页面安全打开。请在新标签页中尝试，或返回看板。"
+      ? "当前工作台拒绝安全内嵌。可直接打开原始工作台，或返回看板。"
       : link.data?.link_status === "NO_UI_URL"
         ? "工作台仍在准备中，请稍后重新检查。"
         : link.data?.link_status === "STARTING"
@@ -285,8 +298,9 @@ export function AgentWorkbenchPage(): React.JSX.Element {
           ? "专业工作台暂时不可用，请稍后重新检查；当前任务进度已保留。"
           : link.error?.message ?? "当前专业工作台暂时不可用，请稍后重新检查。";
 
+  const focusPath = `/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}/focus`;
   return (
-    <section className="workbench-page agent-workbench" aria-labelledby="agent-workbench-title">
+    <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-labelledby="agent-workbench-title">
       <header className="agent-workbench__context">
         <div>
           <p className="workbench-eyebrow">{detail.data.task.title} / 阶段 {item.stage.position}</p>
@@ -296,12 +310,12 @@ export function AgentWorkbenchPage(): React.JSX.Element {
         <div className="agent-workbench__actions" ref={toolbarRef} tabIndex={-1}>
           <span className={`task-status task-status--${item.business_status.toLowerCase()}`}><span aria-hidden="true" />{statusText}</span>
           <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}><Icon name="board" />返回看板</Link>
-          {link.data?.ui_url ? (
-            <a className="workbench-secondary-button" href={link.data.ui_url} target="_blank" rel="noopener noreferrer"><Icon name="external-link" />新标签页</a>
+          {link.data?.ui_url && !focusMode ? (
+            <a className="workbench-secondary-button" href={focusPath} target="_blank" rel="noopener noreferrer"><Icon name="external-link" />新标签页</a>
           ) : null}
         </div>
       </header>
-      <TaskTabs taskId={taskId} />
+      {focusMode ? null : <TaskTabs taskId={taskId} />}
 
       <div className="agent-workbench__security" role="status" aria-live="polite">
         <Icon name="status" />
@@ -310,10 +324,10 @@ export function AgentWorkbenchPage(): React.JSX.Element {
 
       {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 Image Agent 工作台地址…</div> : null}
       {link.isError || (link.data && !readyLink) ? (
-        <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retryAction} retryLabel={retryLabel} retryPending={recoverStart.isPending} taskId={taskId} />
+        <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retryAction} retryLabel={retryLabel} retryPending={recoverStart.isPending} taskId={taskId} workItemId={workItemId} focusMode={focusMode} />
       ) : null}
       {readyLink && frameState === "failed" ? (
-        <WorkbenchFailure link={readyLink} message={failureMessage} onRetry={retry} retryLabel="重新检查链接" retryPending={false} taskId={taskId} />
+        <WorkbenchFailure link={readyLink} message={failureMessage} onRetry={retry} retryLabel="重新检查链接" retryPending={false} taskId={taskId} workItemId={workItemId} focusMode={focusMode} />
       ) : null}
       {readyLink && frameState !== "failed" ? (
         <div className="agent-workbench-frame">

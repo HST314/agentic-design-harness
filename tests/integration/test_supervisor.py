@@ -20,7 +20,7 @@ import harness.services.process_runtime as process_runtime
 from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.process_control import force_kill_process_tree
-from harness.services.process_runtime import AgentRuntimeArtifact
+from harness.services.process_runtime import AgentRuntimeArtifact, runtime_artifact_identity
 from harness.services.supervisor import ProcessSpec, ProcessSupervisor, process_start_identity
 from harness.services.task_config import TaskConfigService
 from harness.storage.atomic import atomic_write_json, read_json
@@ -478,6 +478,34 @@ class ProcessSupervisorTests(unittest.TestCase):
             )
         self.assertEqual(changed.exception.code, "PROCESS_START_FAILED")
         self.assertEqual(self._identity(launch["port"])["instance_id"], "i_image_1")
+        self.supervisor.cancel_instance("t_process", "i_image_1")
+
+    def test_startup_verified_artifact_skips_per_instance_tree_scans(self) -> None:
+        identity = runtime_artifact_identity(self.spec)
+        startup_digest = identity.digest
+        with patch.object(
+            process_runtime,
+            "digest_json",
+            side_effect=AssertionError("runtime identity digest was recalculated"),
+        ):
+            self.assertEqual(identity.digest, startup_digest)
+        cached_spec = ProcessSpec(
+            command=self.spec.command,
+            runtime_artifact=self.runtime_artifact,
+            verified_runtime_identity=identity,
+        )
+
+        with patch.object(
+            process_runtime,
+            "_artifact_manifest",
+            side_effect=AssertionError("runtime tree was rescanned"),
+        ):
+            launch = self._start(1, cached_spec)
+
+        self.assertEqual(
+            launch["runtime_artifact"]["source_manifest_sha256"],
+            identity.source_manifest_sha256,
+        )
         self.supervisor.cancel_instance("t_process", "i_image_1")
 
     def test_root_swap_during_restart_executes_the_pinned_artifact(self) -> None:
