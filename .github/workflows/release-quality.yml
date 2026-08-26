@@ -1,0 +1,311 @@
+name: release quality
+
+on:
+  schedule:
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend_matrix:
+    name: backend (${{ matrix.os }}, ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: backend
+      PYTHONFAULTHANDLER: "1"
+      PYTHONUNBUFFERED: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Build the locked Image runtime dependencies used by integration tests
+        run: >-
+          python -m pip install --disable-pip-version-check --upgrade
+          --target .runtime/image-agent-deps
+          -r agents/image_agent_mvp/requirements.lock
+          -r requirements/image-agent-web.in
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Collect Windows failure diagnostics
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/collect_windows_ci_diagnostics.ps1
+      - uses: actions/upload-artifact@v7
+        if: failure() && runner.os == 'Windows'
+        with:
+          name: windows-backend-${{ matrix.python-version }}-diagnostics
+          path: build/windows-ci/diagnostics.json
+          if-no-files-found: error
+          retention-days: 7
+
+  backend:
+    name: backend matrix
+    needs: backend_matrix
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every supported Python version to pass
+        env:
+          BACKEND_MATRIX_RESULT: ${{ needs.backend_matrix.result }}
+        run: test "$BACKEND_MATRIX_RESULT" = success
+
+  static_analysis:
+    name: static, contracts and security
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PYTHONPATH: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Run static checks once
+        run: |
+          python -m ruff check backend/harness scripts tests/unit tests/contract tests/integration tests/crash tests/e2e
+          python -m pyright backend/harness
+          python -m compileall -q backend/harness scripts tests
+          python scripts/secret_scan.py .
+          python scripts/check_agent_import_boundary.py backend/harness
+          python scripts/verify_image_agent_lock.py
+          python scripts/generate_frontend_contracts.py --check
+      - name: Check documentation and examples
+        run: python scripts/check_docs.py --report build/documentation-check.json
+      - name: Run recovery capacity benchmark
+        run: python scripts/benchmark_storage_recovery.py --profile ci --output build/capacity-benchmark.json
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: static-analysis-evidence
+          path: |
+            build/documentation-check.json
+            build/capacity-benchmark.json
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend_matrix:
+    name: frontend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run test:unit
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - name: Install Chromium and Linux browser dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Install Chromium
+        if: runner.os == 'Windows'
+        run: npx playwright install chromium
+        working-directory: frontend
+      - run: npm run test:e2e
+        working-directory: frontend
+
+  frontend:
+    name: frontend matrix
+    needs: frontend_matrix
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both operating systems to pass
+        env:
+          FRONTEND_MATRIX_RESULT: ${{ needs.frontend_matrix.result }}
+        run: test "$FRONTEND_MATRIX_RESULT" = success
+
+  launcher:
+    name: launcher (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Prepare zero-cost startup configuration
+        run: python -c "from pathlib import Path; Path('.env').write_bytes(Path('.env.example').read_bytes())"
+      - run: python scripts/dev.py setup
+      - run: python scripts/dev.py doctor
+      - run: python scripts/dev.py start --check --timeout 60
+
+  p6_platform_acceptance:
+    name: P6 acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Prepare zero-cost startup configuration
+        run: python -c "from pathlib import Path; Path('.env').write_bytes(Path('.env.example').read_bytes())"
+      - run: python scripts/dev.py setup
+      - name: Run P6 platform acceptance without paid Provider calls
+        run: >-
+          python scripts/run_p6_platform_acceptance.py
+          --output build/p6-platform-${{ runner.os }}.json
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: p6-platform-${{ runner.os }}
+          path: build/p6-platform-${{ runner.os }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  workbench_real_image:
+    name: workbench real Image closure
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Verify locked Image source and dependency manifests
+        run: python scripts/verify_image_agent_lock.py
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Run production workbench against pinned Image runtime
+        run: make frontend-integration
+
+  supply_chain:
+    name: supply chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: npm ci
+        working-directory: frontend
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: frontend
+      - run: python scripts/generate_sbom.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cyclonedx-sbom
+          path: build/sbom/*.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+  release_gate:
+    name: release gate
+    if: ${{ always() }}
+    needs:
+      - backend
+      - static_analysis
+      - frontend
+      - launcher
+      - p6_platform_acceptance
+      - workbench_real_image
+      - supply_chain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every release job to pass
+        env:
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          STATIC_RESULT: ${{ needs.static_analysis.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          LAUNCHER_RESULT: ${{ needs.launcher.result }}
+          P6_PLATFORM_RESULT: ${{ needs.p6_platform_acceptance.result }}
+          REAL_IMAGE_RESULT: ${{ needs.workbench_real_image.result }}
+          SUPPLY_CHAIN_RESULT: ${{ needs.supply_chain.result }}
+        run: |
+          for result in \
+            "$BACKEND_RESULT" \
+            "$STATIC_RESULT" \
+            "$FRONTEND_RESULT" \
+            "$LAUNCHER_RESULT" \
+            "$P6_PLATFORM_RESULT" \
+            "$REAL_IMAGE_RESULT" \
+            "$SUPPLY_CHAIN_RESULT"
+          do
+            test "$result" = success
+          done
