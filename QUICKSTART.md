@@ -80,7 +80,7 @@ Windows：
 py -3 scripts/dev.py
 ```
 
-启动器只有在 `/healthz`、`/readyz` 和 Web 首页都通过后才报告就绪。打开 <http://127.0.0.1:18180/>；按 `Ctrl+C` 联动关闭服务。
+启动器先显示 `[prepare]` 并验签、预热 Image Runtime，再启动后端与前端；冷缓存构建不占用后续健康检查的 45 秒窗口。只有 `/healthz`、`/readyz` 和 Web 首页都通过后才报告就绪。打开 <http://127.0.0.1:18180/>；按 `Ctrl+C` 联动关闭服务。
 
 ## 6. 分步诊断
 

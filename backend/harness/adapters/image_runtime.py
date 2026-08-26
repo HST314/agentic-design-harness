@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import uuid
 from collections.abc import Collection
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .image_attestation import RuntimeAttestation
 
 from ..core.errors import HarnessError
 from ..runtime_identity import (
@@ -44,6 +49,7 @@ _IGNORED_NAMES = frozenset(
 )
 _IGNORED_SUFFIXES = (".egg-info", ".pyc", ".pyo")
 _SHA256_LENGTH = 64
+_TEMPORARY_ARTIFACT = re.compile(r"^\.[0-9a-f]{64}-[0-9a-f]{32}$")
 _SERVER_SOURCE = """\
 from __future__ import annotations
 
@@ -108,6 +114,29 @@ class ImageRuntimeBuilder:
         self.platform = platform
         self.python_implementation = python_implementation
         self.python_cache_tag = python_cache_tag
+        self.cache_hit = False
+
+    @classmethod
+    def from_attestation(
+        cls,
+        source_root: Path,
+        dependency_root: Path,
+        attestation: RuntimeAttestation,
+    ) -> ImageRuntimeBuilder:
+        """Create the canonical builder for one verified runtime identity."""
+
+        return cls(
+            source_root.resolve(strict=True),
+            dependency_root.resolve(strict=True),
+            revision=attestation.revision,
+            package_version=attestation.package_version,
+            source_content_sha256=attestation.source_sha256,
+            dependency_content_sha256=attestation.dependency_sha256,
+            identity_sha256=attestation.identity_sha256,
+            platform=attestation.platform,
+            python_implementation=attestation.python_implementation,
+            python_cache_tag=attestation.python_cache_tag,
+        )
 
     def prepare(self, runtime_root: Path) -> Path:
         self._validate_attestation()
@@ -117,6 +146,8 @@ class ImageRuntimeBuilder:
         artifact_root = artifacts_root / self.identity_sha256
         lock_path = runtime_root.parent / f".{runtime_root.name}-image-artifacts.lock"
         with FileLock(lock_path, 60):
+            self.cache_hit = False
+            self._remove_incomplete_artifacts(artifacts_root)
             if artifact_root.is_symlink():
                 raise HarnessError(
                     "PROCESS_START_FAILED",
@@ -136,6 +167,7 @@ class ImageRuntimeBuilder:
                         "The existing Image runtime artifact has another identity.",
                     )
                 self._verify_artifact_content(artifact_root)
+                self.cache_hit = True
                 return artifact_root
             temporary = artifacts_root / f".{self.identity_sha256}-{uuid.uuid4().hex}"
             try:
@@ -168,6 +200,26 @@ class ImageRuntimeBuilder:
                     artifacts_root.rmdir()
                 raise
             return artifact_root
+
+    def _remove_incomplete_artifacts(self, artifacts_root: Path) -> None:
+        """Remove only builder-owned temporary roots left by an interrupted process."""
+
+        try:
+            entries = tuple(os.scandir(artifacts_root))
+            for entry in entries:
+                if _TEMPORARY_ARTIFACT.fullmatch(entry.name) is None:
+                    continue
+                path = Path(entry.path)
+                if entry.is_dir(follow_symlinks=False):
+                    self._make_removable(path)
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+        except OSError:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "An incomplete Image runtime artifact cannot be cleaned safely.",
+            ) from None
 
     def _verify_artifact_content(self, artifact_root: Path) -> None:
         actual_source_sha256 = content_tree_sha256(

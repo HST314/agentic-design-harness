@@ -9,9 +9,10 @@ Image Agent 的源码与 Harness 位于同一工作树，但运行边界保持�
 1. 初始化固定 submodule 并核对 `.gitmodules`、gitlink 与 lock revision。
 2. 校验 Image Agent 源码摘要和依赖清单摘要，并记录实际安装解释器与依赖内容身份。
 3. 为 Harness 创建 `.venv`，用实际执行 pip 的解释器为 Image Agent 准备独立依赖目录。
-4. 按 `frontend/package-lock.json` 准备前端依赖。
+4. 验签并预热内容寻址的只读 Image Runtime 制品；异常中断留下的临时目录会在下一次构建前清理。
+5. 按 `frontend/package-lock.json` 准备前端依赖。
 
-实例启动时，Harness 核对 Image 包名/版本、关键依赖版本、可导入性和导入路径，从锁定源码与本机合法依赖生成内容寻址的只读运行时副本，再以独立端口、工作目录和凭据环境启动子进程。Harness 控制面不直接调用 Image Agent 内部业务接口；所有运行调用通过 loopback HTTP Adapter，所有文件通过任务受控目录和摘要验证传递。Image 环境不可用时，控制面以 `degraded` 状态完成恢复，仅将 Image Adapter 标记为不可用。
+`doctor/start` 会在启动子进程和开始健康检查计时之前再次验签并复用或预热该制品。后端启动时复核同一制品，随后以独立端口、工作目录和凭据环境启动 Image Agent。Harness 控制面不直接调用 Image Agent 内部业务接口；所有运行调用通过 loopback HTTP Adapter，所有文件通过任务受控目录和摘要验证传递。Image 环境不可用时，控制面以 `degraded` 状态完成恢复，仅将 Image Adapter 标记为不可用。
 
 ## 受管模式
 
