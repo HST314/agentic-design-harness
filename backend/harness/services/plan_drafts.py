@@ -244,8 +244,7 @@ def materialize_plan_draft(
     """Convert a valid semantic draft into server-owned durable planning objects."""
 
     stages = draft["stages"]
-    topology = tuple(stage["type"] for stage in stages)
-    if topology not in {("image",), ("ppt",), ("image", "ppt")}:
+    if any(stage["type"] not in {"image", "ppt"} for stage in stages):
         _invalid("plan-draft", "stages", "unsupported_topology")
 
     proposal_id = _identifier("proposal", task_id, revision)
@@ -253,6 +252,7 @@ def materialize_plan_draft(
     work_items: list[dict[str, Any]] = []
     execution_cards: list[dict[str, Any]] = []
     previous_stage_id: str | None = None
+    previous_stage_type: str | None = None
     previous_work_item_id: str | None = None
     for position, stage in enumerate(stages, start=1):
         referenced_assets = stage["input_asset_ids"]
@@ -266,8 +266,16 @@ def materialize_plan_draft(
         work_item_id = _identifier("work", task_id, revision, position)
         instance_id = _identifier("instance", task_id, revision, position)
         card_id = _identifier("card", task_id, revision, position)
-        stage_dependencies = [] if previous_stage_id is None else [previous_stage_id]
-        work_dependencies = [] if previous_work_item_id is None else [previous_work_item_id]
+        stage_dependencies: list[str] = []
+        work_dependencies: list[str] = []
+        if (
+            previous_stage_id is not None
+            and previous_work_item_id is not None
+            and previous_stage_type == "image"
+            and stage["type"] == "ppt"
+        ):
+            stage_dependencies = [previous_stage_id]
+            work_dependencies = [previous_work_item_id]
         materialized_stages.append(
             {
                 "stage_id": stage_id,
@@ -320,6 +328,7 @@ def materialize_plan_draft(
             }
         )
         previous_stage_id = stage_id
+        previous_stage_type = stage["type"]
         previous_work_item_id = work_item_id
 
     return {

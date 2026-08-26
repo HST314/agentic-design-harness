@@ -1,4 +1,9 @@
-"""Cross-object validation for the three frozen Phase 1 task topologies."""
+"""Cross-object validation for task plans.
+
+Stage topology rule: stage types are image or ppt; same-type stages run in
+parallel (no dependency between them) and the only cross-type dependency is
+Image-to-PPT.
+"""
 
 from __future__ import annotations
 
@@ -25,17 +30,14 @@ def validate_plan(contracts: ContractRegistry, plan: dict[str, Any]) -> None:
         earlier = set(stage_ids[: stage["position"] - 1])
         if not set(stage["depends_on"]).issubset(earlier):
             _invalid("A stage dependency must reference an earlier stage in the task.")
-    topology = tuple(item["type"] for item in stages)
-    if topology == ("image",) or topology == ("ppt",):
-        valid_topology = stages[0]["depends_on"] == []
-    elif topology == ("image", "ppt"):
-        valid_topology = stages[0]["depends_on"] == [] and stages[1]["depends_on"] == [
-            stages[0]["stage_id"]
-        ]
-    else:
-        valid_topology = False
-    if not valid_topology:
-        _invalid("Only Image-only, PPT-only and Image-to-PPT plans are supported.")
+    for stage in stages:
+        for dependency_id in stage["depends_on"]:
+            dependency = stage_by_id[dependency_id]
+            if dependency["type"] != "image" or stage["type"] != "ppt":
+                _invalid(
+                    "Same-type stages must be parallel and only Image-to-PPT "
+                    "dependencies are supported."
+                )
 
     instance_by_id: dict[str, dict[str, Any]] = {}
     for instance in instances:
