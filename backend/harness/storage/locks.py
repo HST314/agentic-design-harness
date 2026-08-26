@@ -30,12 +30,12 @@ class FileLock:
             return self
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        if os.name == "nt" and os.fstat(descriptor).st_size == 0:
-            os.write(descriptor, b"\0")
         deadline = time.monotonic() + self.timeout_seconds
         try:
             while True:
                 try:
+                    if os.name == "nt" and os.fstat(descriptor).st_size == 0:
+                        os.write(descriptor, b"\0")
                     self._lock(descriptor)
                     self._descriptor = descriptor
                     return self
