@@ -5,19 +5,21 @@
 > 目标读者：开发者、部署管理员、后端与前端实现人员
 > 破坏性变更：是；不迁移、不兼容旧配置体系
 
+> 历史说明：本文保留最初的架构决策背景。当前实现已将四个 YAML 迁入 `config/`，新增 `config/image_agent_runtime.yaml` 与工作台全局设置发布/分发链路；现行操作契约以[配置指南](configuration.md)为准。
+
 ## 1. 结论先行
 
 本次重构采用以下最终方向：
 
-1. 仓库根目录的 `provider.yaml`、`runtime.yaml`、`model_list.yaml` 是唯一非敏感配置来源，`.env` 只保存秘密。
+1. `config/provider.yaml`、`config/runtime.yaml`、`config/image_agent_runtime.yaml`、`config/model_list.yaml` 是唯一非敏感配置来源，仓库根目录 `.env` 只保存秘密。
 2. 删除“必须另行部署 MasterGateway 才能使用”的产品前提。Master 编排器内置在 Harness 中，直接通过 OpenAI-compatible API 调用 `runtime.yaml` 选定的文本模型。
 3. Master 使用文本推理模型负责澄清、拆解、规划和生成结构化 PlanProposal；图片、扫描件和 PDF 视觉内容由资料理解工具链调用 VLM，解析结果再交给 Master。Gateway 与多模态转换没有因果关系。
 4. `model_list.yaml` 按 `text_models`、`vlm_models`、`image_models` 三类维护模型池；P0 只实现 Ark，三类接口均按 OpenAI-compatible 契约调用，其他供应商以后再扩展。
 5. `runtime.yaml` 只引用模型 ID。默认配置只有 Master、文本推理、视觉理解、图像生成四个选择，Image Agent 六状态映射放在高级覆盖中。
 6. 配置缺失或引用错误时进程拒绝启动，终端逐项输出文件、字段、缺失环境变量和修复提示；不得自动切换 fake/offline 模型。
 7. 旧控制面配置、凭据池、外部 Gateway 配置和双事实源全部删除，不提供迁移工具、兼容读取或长期双写。
-8. 普通设计师界面不出现 Provider、API Key、YAML、模型 endpoint、六状态路由、离线模式、诊断或真实出图 smoke。部署管理员一次配置后，设计师只使用任务、素材、计划、审批和交付能力。
-9. 管理员可选 Web 配置页只映射 `runtime.yaml`，必须有真实身份认证和管理员授权；在权限系统完成前不向产品界面开放。
+8. 全局设置不出现 Provider、API Key、YAML、模型 endpoint、离线模式、诊断或真实出图 smoke，只映射无秘密的 Harness 与 Image Agent 运行参数。
+9. 工作台提供 revision 化的预览、发布、冲突恢复和实例分发；部署仍保持 loopback、本地可信用户边界。
 10. 删除产品内“真实生成一张图”的测试功能。开发阶段使用单元测试、契约测试和 fake Provider；如确需真实供应商验收，应在产品外由开发者显式执行，不进入用户界面和正常部署流程。
 
 ## 2. Gateway、Master 与多模态到底是什么

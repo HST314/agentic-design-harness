@@ -26,6 +26,8 @@ from .image_workflow import (
 SUPPORTED_IMAGE_API_MAJOR = "1"
 MANAGED_ADAPTER_HEADER = "X-Harness-Adapter-Key"
 _JOB_ID = re.compile(r"^job_[A-Za-z0-9]+$")
+_CONFIG_REVISION_ID = re.compile(r"^cfg-inst-r[0-9]{6}$")
+_CONFIG_HASH = re.compile(r"^[0-9a-f]{64}$")
 _JOB_STATES = frozenset(
     {"queued", "running", "cancelling", "succeeded", "failed", "cancelled", "interrupted"}
 )
@@ -154,6 +156,22 @@ class ImageObservationMixin:
                 details, "Image Agent returned a malformed unknown-action projection."
             )
         completed = bool(snapshot.get("completed", False))
+        runtime_configuration = view.get("runtime_configuration")
+        if runtime_configuration is not None and (
+            not isinstance(runtime_configuration, dict)
+            or _CONFIG_REVISION_ID.fullmatch(
+                str(runtime_configuration.get("revision_id") or "")
+            )
+            is None
+            or _CONFIG_HASH.fullmatch(
+                str(runtime_configuration.get("config_hash") or "")
+            )
+            is None
+            or not isinstance(runtime_configuration.get("branch_id"), str)
+        ):
+            return self._compatibility_failure(
+                details, "Image Agent returned a malformed runtime configuration identity."
+            )
         safe_now = bool(
             pointer
             and job_status not in _ACTIVE_JOB_STATES
@@ -174,6 +192,15 @@ class ImageObservationMixin:
             "checkpoint_id": None if pointer is None else pointer.get("checkpoint_id"),
             "safe_now": safe_now,
             "reason": reason,
+            "runtime_config_revision_id": (
+                None if runtime_configuration is None else runtime_configuration["revision_id"]
+            ),
+            "runtime_config_hash": (
+                None if runtime_configuration is None else runtime_configuration["config_hash"]
+            ),
+            "branch_id": (
+                None if runtime_configuration is None else runtime_configuration["branch_id"]
+            ),
         }
         if job_status == "succeeded" and not snapshot:
             return self._compatibility_failure(

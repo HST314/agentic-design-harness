@@ -17,6 +17,12 @@ export const readinessQuery = queryOptions({
   refetchIntervalInBackground: false,
 });
 
+export const systemSettingsQuery = queryOptions({
+  queryKey: ["system-settings"],
+  queryFn: ({ signal }) => api.systemSettings(signal),
+  retry: false,
+});
+
 export const taskIntakeQuery = (taskId: string) => queryOptions({
   queryKey: ["task-intake", taskId],
   queryFn: ({ signal }: { signal: AbortSignal }) => api.taskIntake(taskId, signal),

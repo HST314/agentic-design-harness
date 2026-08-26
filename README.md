@@ -11,7 +11,7 @@
 - 同一 WorkItem 的多个分支可分别形成“最终图片 + Markdown 设计说明”候选。
 - 只有人工确认后的图片、说明和 BundleManifest 才会以同一 publication batch 原子发布。
 - React 工作台覆盖创建任务、Master 会话、任务卡、计划、Image 工作台、审批和交付。
-- 根目录 `.env`、`provider.yaml`、`model_list.yaml`、`runtime.yaml` 是唯一部署配置；业务 UI 不展示或修改基础设施配置。
+- 根目录 `.env` 与 `config/` 下四个 YAML 是唯一部署配置；全局设置可安全发布无秘密的 Harness 与 Image Agent 运行默认值。
 - 所有写操作使用 revision、Actor 和幂等键；事件、快照、索引与发布意图支持崩溃恢复。
 
 ## 总体架构
@@ -66,9 +66,7 @@ agents/             固定 Image Agent submodule 与 release lock
 backend/harness/    API、领域服务、Adapter、持久化与恢复
 frontend/           React/TypeScript 工作台与浏览器测试
 contracts/v1/       JSON Schema、Catalog 与有效业务示例
-provider.yaml       Provider 连接（秘密通过 .env 引用）
-model_list.yaml     可用模型与能力
-runtime.yaml        服务、Master、文档和 Agent 运行策略
+config/             Provider、模型清单、Harness 与 Image Agent 运行配置
 scripts/            启动、配置检查、质量门禁与证据生成
 tests/              单元、契约、集成、崩溃恢复与 E2E
 docs/               面向用户、集成、运维与契约的现行文档

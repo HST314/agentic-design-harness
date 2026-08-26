@@ -286,6 +286,17 @@ class TaskConfigRebaseRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class SystemSettingsPreviewRequest(StrictRequest):
+    base_revision: str = Field(pattern=r"^cfg_[A-Za-z0-9_-]{1,128}$")
+    harness_settings: dict[str, Any]
+    image_agent_settings: dict[str, Any]
+
+
+class SystemSettingsPublishRequest(SystemSettingsPreviewRequest):
+    preview_id: str = Field(pattern=r"^settings-preview-[0-9a-f]{24}$")
+    actor_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+
+
 def build_v1_router(container: Container) -> APIRouter:
     router = APIRouter(prefix="/api/v1")
 
@@ -675,6 +686,34 @@ def build_v1_router(container: Container) -> APIRouter:
             }
 
         return await run_in_threadpool(read_instance)
+
+    @router.get("/system-settings", tags=["settings"])
+    async def get_system_settings() -> dict[str, Any]:
+        return await run_in_threadpool(container.system_settings.get)
+
+    @router.post("/system-settings/preview", tags=["settings"])
+    async def preview_system_settings(
+        body: SystemSettingsPreviewRequest,
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.system_settings.preview,
+            base_revision=body.base_revision,
+            harness_settings=body.harness_settings,
+            image_agent_settings=body.image_agent_settings,
+        )
+
+    @router.post("/system-settings/publish", tags=["settings"])
+    async def publish_system_settings(
+        body: SystemSettingsPublishRequest,
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.system_settings.publish,
+            preview_id=body.preview_id,
+            base_revision=body.base_revision,
+            harness_settings=body.harness_settings,
+            image_agent_settings=body.image_agent_settings,
+            actor={"actor_type": "human", "actor_id": body.actor_id},
+        )
 
     @router.get("/instances/{instance_id}/runtime-settings", tags=["instances"])
     async def get_instance_runtime_settings(instance_id: str) -> dict[str, Any]:

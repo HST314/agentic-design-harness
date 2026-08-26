@@ -176,6 +176,8 @@ class ImageAdapterTests(unittest.TestCase):
                 revision_id="cfg-inst-r000002",
                 from_checkpoint=source,
                 expected_config_hash=config_hash,
+                expected_project_revision_id="cfg-inst-r000001",
+                expected_project_config_hash="b" * 64,
                 effective_from_state="confirmation_build",
                 idempotency_key="managed-apply-command",
             )

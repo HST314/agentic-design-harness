@@ -53,13 +53,6 @@ _STATE_ROUTES = (
 )
 _MODEL_STATES = tuple(item[0] for item in _STATE_ROUTES)
 _PROVIDER_ENVIRONMENT = {"ark": ("ARK_BASE_URL", "ARK_API_KEY")}
-_DEFAULT_SELF_CHECK = {
-    "termination": "solo",
-    "fixed_rounds": 2,
-    "max_rounds": 4,
-    "stop_early_on_pass": False,
-}
-_DEFAULT_LIBRARY_RELEASE = {"release": "auto"}
 LIBRARY_RELEASE_FIELDS = ("category_constraint", "style_direction")
 _OUTPUT_SIZE = re.compile(r"^(?:[1-9][0-9]{1,4}x[1-9][0-9]{1,4}|[124]K)$")
 
@@ -474,17 +467,17 @@ class ImageAgentConfigMaterializer:
                 "on_demand": "blocking_only",
                 "blocking_only": "blocking_only",
             }[image["question_preference"]],
-            "max_auto_questions": 3,
-            "clarification_total_budget": 10,
+            "max_auto_questions": image["max_auto_questions"],
+            "clarification_total_budget": image["clarification_total_budget"],
             **{
-                field_name: deepcopy(_DEFAULT_LIBRARY_RELEASE)
+                field_name: deepcopy(image[field_name])
                 for field_name in LIBRARY_RELEASE_FIELDS
             },
             "candidate_concurrency": image["candidate_concurrency"],
             "default_output_size": image["default_output_size"],
             "response_format": image["response_format"],
             "watermark": image["watermark"],
-            "self_check": deepcopy(_DEFAULT_SELF_CHECK),
+            "self_check": deepcopy(image["self_check"]),
         }
         for field_name, value in overrides.items():
             if field_name == "advanced_model_overrides":

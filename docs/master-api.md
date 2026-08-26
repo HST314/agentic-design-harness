@@ -21,7 +21,7 @@ Master 通过 Ark/OpenAI-compatible Chat Completions 客户端请求结构化输
 | `inspect_asset_region` | 让 VLM 检查图片或 PDF 页面中的归一化区域 |
 | `get_asset_warnings` | 返回加密、损坏、页数超限、扫描质量或截断警告 |
 
-TXT、Markdown 和数字型 PDF 由确定性解析器处理；图片与扫描型 PDF 按 `runtime.yaml` 的 `document_processing.visual_analysis` 策略使用 VLM。坏文件、加密 PDF 和页数超限均返回可审计业务警告，不会静默跳过。
+TXT、Markdown 和数字型 PDF 由确定性解析器处理；图片与扫描型 PDF 按 `config/runtime.yaml` 的 `document_processing.visual_analysis` 策略使用 VLM。坏文件、加密 PDF 和页数超限均返回可审计业务警告，不会静默跳过。
 
 每个主任务只有一个永久 Master 线程。控制面先持久化 `SUBMITTING`，进程内 run 由 `(task_id, message_id)` 确定并可安全重放；模型与 VLM 调用使用稳定的幂等键，并将 token、模型、Provider、请求 ID 和配置哈希写入用量审计。计划必须包含闭合、无环且 ID 唯一的 stages、work_items 和 execution_cards；每个活动 WorkItem 恰好映射一个当前实例与任务卡。
 

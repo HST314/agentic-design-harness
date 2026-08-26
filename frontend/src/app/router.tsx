@@ -9,6 +9,7 @@ import { TaskIntakePage } from "../features/task-intake/TaskIntakePage";
 import { AgentWorkbenchPage } from "../features/agent-workbench/AgentWorkbenchPage";
 import { DeliveryPage } from "../features/deliveries/DeliveryPage";
 import { MasterRoutePage } from "../features/master-thread/MasterThreadPage";
+import { SystemSettingsPage } from "../features/settings/SystemSettingsPage";
 import {
   TaskBoardPage,
   TaskPlanPage,
@@ -63,7 +64,7 @@ export function AppRouter(): React.JSX.Element {
             path="/tasks/:taskId/work-items/:workItemId"
             element={<AgentWorkbenchPage />}
           />
-          <Route path="/settings" element={<Navigate replace to="/tasks/new" />} />
+          <Route path="/settings" element={<SystemSettingsPage />} />
         </Route>
         <Route
           path="/tasks/:taskId/work-items/:workItemId/focus"

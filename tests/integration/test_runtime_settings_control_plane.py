@@ -21,6 +21,7 @@ from harness.domain.commands import CommandEnvelope
 from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.instance_runtime_settings import InstanceRuntimeSettingsService
 from harness.services.runtime_config_observability import RuntimeConfigObservability
+from harness.services.system_settings import SystemSettingsService
 from harness.services.task_config import TaskConfigService
 from harness.services.task_config_rebase import TaskConfigRebaseService
 from runtime_helpers import (
@@ -63,6 +64,8 @@ class SafePointImageAdapter:
         revision_id: str,
         from_checkpoint: str,
         expected_config_hash: str,
+        expected_project_revision_id: str,
+        expected_project_config_hash: str,
         effective_from_state: str,
         idempotency_key: str,
     ) -> dict:
@@ -76,6 +79,8 @@ class SafePointImageAdapter:
                 "from_checkpoint": self.receipt_from_checkpoint_override or from_checkpoint,
                 "effective_from_state": effective_from_state,
                 "config_hash": expected_config_hash,
+                "project_revision_id": expected_project_revision_id,
+                "project_config_hash": expected_project_config_hash,
             },
         )
         return deepcopy(receipt)
@@ -173,7 +178,6 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
             [item["field"] for item in proposal["diff"]],
             [
                 "category_constraint.release",
-                "style_direction.release",
                 "candidate_concurrency",
                 "watermark",
             ],
@@ -194,6 +198,133 @@ class RuntimeSettingsControlPlaneTests(unittest.TestCase):
             )
             self.assertTrue(current["manifest"]["overrides"]["watermark"])
             self.assertEqual(current["manifest"]["apply_status"], "APPLIED")
+
+    def test_global_distribution_rebases_unstarted_and_branches_running_instances(self) -> None:
+        unstarted_task = self._planned_task("task_global_unstarted")
+        running_task = self._planned_task("task_global_running")
+        initial_settings = self.settings.get(running_task, "i_image_1")
+        user_proposal = self.settings.propose(
+            running_task,
+            "i_image_1",
+            base_revision=initial_settings["revision"]["current"],
+            patch={"watermark": True},
+            sync_unstarted_image_work_items=False,
+            expected_sync_instance_ids=[],
+            envelope=self._settings_envelope(
+                running_task, "propose-user-watermark"
+            ),
+        )
+        self.settings.confirm(
+            running_task,
+            "i_image_1",
+            user_proposal["proposal_id"],
+            envelope=self._settings_envelope(
+                running_task, "confirm-user-watermark"
+            ),
+        )
+        self._start_instance_projection(running_task, "i_image_1")
+        current = build_config_snapshot()
+        image = current.runtime.image_agent.model_copy(
+            update={"candidate_concurrency": 2}
+        )
+        candidate = current.model_copy(
+            update={
+                "revision": "cfg_global_distribution",
+                "runtime": current.runtime.model_copy(update={"image_agent": image}),
+            }
+        )
+        self.task_config.process_snapshot = candidate
+        service = SystemSettingsService(
+            self.root,
+            HarnessSettings(config_snapshot=candidate),
+            self.store,
+            self.task_config,
+            self.materializer,
+            self.settings,
+            self.rebase,
+        )
+
+        distributed = service._distribute(
+            candidate,
+            {"actor_type": "human", "actor_id": "global_settings_test"},
+        )
+
+        self.assertEqual(distributed["updated"], 2)
+        self.assertEqual(distributed["waiting_safe_point"], 0)
+        self.assertEqual(distributed["failed"], 0)
+        self.assertEqual(self.adapter.apply_calls, 1)
+        running = self.materializer.revisions.read_current(
+            running_task, "i_image_1"
+        )
+        self.assertEqual(
+            running["manifest"]["effective_runtime"]["candidate_concurrency"], 2
+        )
+        self.assertTrue(running["manifest"]["effective_runtime"]["watermark"])
+        unstarted = self.task_config.revisions.read_current(unstarted_task)
+        self.assertEqual(unstarted["revision"]["source_system_revision"], candidate.revision)
+
+        next_image = current.runtime.image_agent.model_copy(
+            update={"candidate_concurrency": 3}
+        )
+        next_candidate = current.model_copy(
+            update={
+                "revision": "cfg_global_distribution_next",
+                "runtime": current.runtime.model_copy(
+                    update={"image_agent": next_image}
+                ),
+            }
+        )
+        self.task_config.process_snapshot = next_candidate
+        repeated = service._distribute(
+            next_candidate,
+            {"actor_type": "human", "actor_id": "global_settings_test"},
+        )
+
+        self.assertEqual(repeated["updated"], 2, repeated)
+        self.assertEqual(self.adapter.apply_calls, 2)
+        running = self.materializer.revisions.read_current(
+            running_task, "i_image_1"
+        )
+        self.assertEqual(
+            running["manifest"]["effective_runtime"]["candidate_concurrency"], 3
+        )
+        self.assertTrue(running["manifest"]["effective_runtime"]["watermark"])
+
+    def test_global_distribution_preserves_completed_instance_history(self) -> None:
+        task_id = self._planned_task("task_global_completed")
+        self._start_instance_projection(task_id, "i_image_1")
+        current_revision = self.store.task.revision(task_id, task_id)
+        self.commands.transition_instance(
+            task_id,
+            "i_image_1",
+            "SUCCEEDED",
+            envelope(
+                "complete-global-history",
+                current_revision,
+                actor_type="adapter",
+            ),
+        )
+        candidate = build_config_snapshot().model_copy(
+            update={"revision": "cfg_global_completed"}
+        )
+        self.task_config.process_snapshot = candidate
+        service = SystemSettingsService(
+            self.root,
+            HarnessSettings(config_snapshot=candidate),
+            self.store,
+            self.task_config,
+            self.materializer,
+            self.settings,
+            self.rebase,
+        )
+
+        distributed = service._distribute(
+            candidate,
+            {"actor_type": "human", "actor_id": "global_settings_test"},
+        )
+
+        self.assertEqual(distributed["completed_history_unchanged"], 1)
+        self.assertEqual(self.adapter.apply_calls, 0)
 
     def test_runtime_settings_report_catalog_model_ids_without_false_diff(self) -> None:
         task_id = self._planned_task("task_model_id_projection")
