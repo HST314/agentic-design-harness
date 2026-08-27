@@ -5,6 +5,7 @@ import {
   agentWorkbenchLinkQuery,
   api,
   workItemDetailQuery,
+  workItemsQuery,
 } from "../../api/queries";
 import { ApiError, type AgentWorkbenchLinkResponse } from "../../api/client";
 import { Icon } from "../../components/Icon";
@@ -20,6 +21,13 @@ import {
 } from "./runtimeSettingsBridge";
 
 type FrameState = "loading" | "ready" | "failed";
+
+function operationId(prefix: string): string {
+  const suffix = typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().replaceAll("-", "")
+    : `${Date.now()}${Math.random().toString(16).slice(2)}`;
+  return `${prefix}_${suffix}`.slice(0, 128);
+}
 
 async function executeBridgeRequest(
   request: RuntimeSettingsBridgeRequest,
@@ -70,6 +78,7 @@ function WorkbenchFailure({
   taskId,
   workItemId,
   focusMode,
+  agentType,
 }: {
   link?: AgentWorkbenchLinkResponse;
   message: string;
@@ -79,16 +88,18 @@ function WorkbenchFailure({
   taskId: string;
   workItemId: string;
   focusMode: boolean;
+  agentType: "image" | "ppt";
 }): React.JSX.Element {
+  const agentLabel = agentType === "image" ? "Image Agent" : "PPT Agent";
   const heading = link?.link_status === "FRAME_BLOCKED"
-    ? "Image Agent 无法安全内嵌"
+    ? `${agentLabel} 无法安全内嵌`
     : link?.link_status === "START_FAILED"
-      ? "Image Agent 启动未完成"
+      ? `${agentLabel} 启动未完成`
       : link?.link_status === "STARTING"
-        ? "Image Agent 正在启动"
+        ? `${agentLabel} 正在启动`
     : link?.link_status === "NO_UI_URL"
-      ? "Image Agent 尚未提供工作台"
-      : "Image Agent 工作台加载失败";
+      ? `${agentLabel} 尚未提供工作台`
+      : `${agentLabel} 工作台加载失败`;
   return (
     <div className="agent-workbench-error" role="alert">
       <Icon name="status" />
@@ -132,17 +143,51 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
   const queryClient = useQueryClient();
   const { taskId = "", workItemId = "" } = useParams();
   const detail = useQuery(workItemDetailQuery(taskId, workItemId));
+  const workItems = useQuery({ ...workItemsQuery(taskId), enabled: Boolean(taskId) });
   const item = detail.data?.item;
   const instanceId = item?.current_instance?.instance_id ?? "";
   const link = useQuery({
     ...agentWorkbenchLinkQuery(taskId, workItemId, instanceId),
-    enabled: Boolean(item?.agent_type === "image" && instanceId),
+    enabled: Boolean(item?.stage.available && instanceId),
   });
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const enterWorkbenchRef = useRef<HTMLButtonElement>(null);
   const loadTimeoutRef = useRef<number | undefined>(undefined);
   const announceBridgeRef = useRef<() => void>(() => undefined);
   const [frameKey, setFrameKey] = useState(0);
   const [frameState, setFrameState] = useState<FrameState>("loading");
+  const refreshWorkbench = (): void => {
+    void queryClient.invalidateQueries({ queryKey: workItemDetailQuery(taskId, workItemId).queryKey });
+    void queryClient.invalidateQueries({ queryKey: workItemsQuery(taskId).queryKey });
+    void queryClient.invalidateQueries({ queryKey: agentWorkbenchLinkQuery(taskId, workItemId, instanceId).queryKey });
+  };
+  const setManualFinished = useMutation({
+    mutationFn: (manualFinished: boolean) => {
+      const taskRevision = link.data?.task_revision;
+      if (taskRevision === undefined) throw new Error("当前任务修订尚未就绪，请重新检查工作台链接。");
+      return api.setManualFinished(instanceId, manualFinished, {
+        idempotency_key: operationId(manualFinished ? "finish_image" : "resume_image"),
+        actor_type: "human",
+        actor_id: "human_operator",
+        expected_revision: taskRevision,
+      });
+    },
+    onSuccess: refreshWorkbench,
+  });
+  const startPpt = useMutation({
+    mutationFn: () => {
+      const taskRevision = link.data?.task_revision;
+      if (taskRevision === undefined) throw new Error("当前任务修订尚未就绪，请重新检查工作台链接。");
+      const operation = operationId("start_ppt");
+      return api.startInstance(instanceId, operation, {
+        idempotency_key: operation,
+        actor_type: "human",
+        actor_id: "human_operator",
+        expected_revision: taskRevision,
+      });
+    },
+    onSuccess: refreshWorkbench,
+  });
   const recoverStart = useMutation({
     mutationFn: () => {
       const operation = link.data?.start_operation;
@@ -174,7 +219,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
   }, [frameKey, link.data?.embeddable, link.data?.ui_url]);
 
   useEffect(() => {
-    const uiUrl = link.data?.embeddable ? link.data.ui_url : null;
+    const uiUrl = item?.agent_type === "image" && link.data?.embeddable ? link.data.ui_url : null;
     if (!uiUrl || !instanceId) return undefined;
     let targetOrigin: string;
     try {
@@ -242,7 +287,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
       announceBridgeRef.current = () => undefined;
       window.removeEventListener("message", onMessage);
     };
-  }, [instanceId, link.data?.embeddable, link.data?.task_revision, link.data?.ui_url]);
+  }, [instanceId, item?.agent_type, link.data?.embeddable, link.data?.task_revision, link.data?.ui_url]);
 
   const retry = (): void => {
     setFrameState("loading");
@@ -255,7 +300,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
   const retryLabel = link.data?.link_status === "START_FAILED" ? "恢复启动" : "重新检查链接";
 
   if (detail.isPending) {
-    return <section className={`workbench-page agent-workbench-state${focusMode ? " agent-workbench--focus" : ""}`} role="status">正在读取 Image WorkItem…</section>;
+    return <section className={`workbench-page agent-workbench-state${focusMode ? " agent-workbench--focus" : ""}`} role="status">正在读取专业 WorkItem…</section>;
   }
   if (detail.isError || !item) {
     return (
@@ -267,20 +312,34 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
     );
   }
 
-  if (item.agent_type === "ppt" || !item.stage.available) {
+  const agentLabel = item.agent_type === "image" ? "Image Agent" : "PPT Agent";
+  if (!item.stage.available) {
     return (
       <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-labelledby="agent-workbench-title">
         <header className="agent-workbench__context">
-          <div><p className="workbench-eyebrow">阶段 {item.stage.position}</p><h1 id="agent-workbench-title">{item.title}</h1><p>当前任务需要的 PPT 创作能力尚未开放，任务不会被误标为完成。</p></div>
+          <div><p className="workbench-eyebrow">阶段 {item.stage.position}</p><h1 id="agent-workbench-title">{item.title}</h1><p>当前任务需要的 {agentLabel} 创作能力尚未开放，任务不会被误标为完成。</p></div>
           <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}>返回看板</Link>
         </header>
         {focusMode ? null : <TaskTabs taskId={taskId} />}
-        <div className="agent-workbench-boundary" role="note"><Icon name="status" /><div><h2>PPT 工作台暂不可用</h2><p>请返回看板调整计划，或选择当前已开放的创作能力。</p></div></div>
+        <div className="agent-workbench-boundary" role="note"><Icon name="status" /><div><h2>{agentLabel} 工作台暂不可用</h2><p>请返回看板调整计划，或选择当前已开放的创作能力。</p></div></div>
       </section>
     );
   }
 
   const readyLink = link.data?.embeddable && link.data.ui_url ? link.data : undefined;
+  const imageManuallyFinished = Boolean(item.current_instance?.manual_finished);
+  const unfinishedImages = (workItems.data?.items ?? [])
+    .filter((workItem) => workItem.agent_type === "image" && !workItem.current_instance?.manual_finished)
+    .map((workItem) => workItem.current_instance?.instance_id)
+    .filter((value): value is string => Boolean(value));
+  const taskConfirmed = detail.data.task.status === "RUNNING" || detail.data.task.status === "FAILED";
+  const pptReady = item.agent_type === "ppt" && item.current_instance?.status === "READY";
+  const canStartPpt = pptReady && taskConfirmed && workItems.isSuccess && unfinishedImages.length === 0;
+  const gateDetails = startPpt.error instanceof ApiError
+    && Array.isArray(startPpt.error.details?.unfinished_instance_ids)
+      ? startPpt.error.details.unfinished_instance_ids.filter((value): value is string => typeof value === "string")
+      : unfinishedImages;
+  const showPptStart = pptReady && (!link.data || link.data.link_status === "NO_UI_URL");
   const failureMessage = frameState === "failed"
     ? "工作台在 12 秒内未完成加载。可重新检查、返回看板，或在新标签页专注模式中尝试。"
     : link.data?.link_status === "FRAME_BLOCKED"
@@ -288,9 +347,9 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
       : link.data?.link_status === "NO_UI_URL"
         ? "工作台仍在准备中，请稍后重新检查。"
         : link.data?.link_status === "STARTING"
-          ? "启动请求已保存，系统正在准备制品并启动 Image Agent。"
+          ? `启动请求已保存，系统正在准备制品并启动 ${agentLabel}。`
           : link.data?.link_status === "START_FAILED"
-            ? link.data.start_operation?.last_error?.message ?? "Image Agent 启动失败，可安全恢复启动。"
+            ? link.data.start_operation?.last_error?.message ?? `${agentLabel} 启动失败，可安全恢复启动。`
         : link.data?.link_status === "ADAPTER_UNAVAILABLE"
           ? "专业工作台暂时不可用，请稍后重新检查；当前任务进度已保留。"
           : link.error?.message ?? "当前专业工作台暂时不可用，请稍后重新检查。";
@@ -306,33 +365,74 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
           ) : null}
         />
       )}
-      {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 Image Agent 工作台地址…</div> : null}
-      {link.isError || (link.data && !readyLink) ? (
-        <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retryAction} retryLabel={retryLabel} retryPending={recoverStart.isPending} taskId={taskId} workItemId={workItemId} focusMode={focusMode} />
+      {item.agent_type === "image" && item.current_instance ? (
+        <div className="agent-workbench-gate" aria-live="polite">
+          <div>
+            <strong>{imageManuallyFinished ? "已允许 PPT 阶段启动" : "PPT 阶段仍在等待"}</strong>
+            <span>此标记只控制 PPT 启动门禁，不会停止 Image Agent 或改变交付状态。</span>
+          </div>
+          <button
+            className="workbench-secondary-button"
+            type="button"
+            disabled={setManualFinished.isPending || link.data?.task_revision === undefined}
+            onClick={() => setManualFinished.mutate(!imageManuallyFinished)}
+          >
+            {setManualFinished.isPending ? "正在保存…" : imageManuallyFinished ? "改回进行中" : "标记人工结束"}
+          </button>
+          {setManualFinished.isError ? <p className="workbench-inline-error" role="alert">{setManualFinished.error.message}</p> : null}
+        </div>
+      ) : null}
+      {showPptStart ? (
+        <div className="agent-workbench-gate" aria-live="polite">
+          <div>
+            <strong>PPT 工作台待启动</strong>
+            <span>{!taskConfirmed ? "请先确认任务启动。" : gateDetails.length ? `仍有 ${gateDetails.length} 个 Image 实例未标记人工结束。` : "门禁已满足，可以启动 PPT Agent。"}</span>
+            {gateDetails.length ? <code>{gateDetails.join("、")}</code> : null}
+          </div>
+          <button className="workbench-primary-button" type="button" disabled={!canStartPpt || startPpt.isPending} onClick={() => startPpt.mutate()}>
+            {startPpt.isPending ? "正在启动…" : "启动 PPT 工作台"}
+          </button>
+          {startPpt.isError ? <p className="workbench-inline-error" role="alert">{startPpt.error.message}</p> : null}
+        </div>
+      ) : null}
+      {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 {agentLabel} 工作台地址…</div> : null}
+      {link.isError || (link.data && !readyLink && !showPptStart) ? (
+        <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retryAction} retryLabel={retryLabel} retryPending={recoverStart.isPending} taskId={taskId} workItemId={workItemId} focusMode={focusMode} agentType={item.agent_type} />
       ) : null}
       {readyLink && frameState === "failed" ? (
-        <WorkbenchFailure link={readyLink} message={failureMessage} onRetry={retry} retryLabel="重新检查链接" retryPending={false} taskId={taskId} workItemId={workItemId} focusMode={focusMode} />
+        <WorkbenchFailure link={readyLink} message={failureMessage} onRetry={retry} retryLabel="重新检查链接" retryPending={false} taskId={taskId} workItemId={workItemId} focusMode={focusMode} agentType={item.agent_type} />
       ) : null}
       {readyLink && frameState !== "failed" ? (
-        <div className="agent-workbench-frame">
-          {frameState === "loading" ? <div className="agent-workbench-frame__overlay" role="status">Image Agent 工作台正在加载…</div> : null}
-          <iframe
-            key={`${readyLink.instance_id}-${frameKey}`}
-            ref={iframeRef}
-            className="agent-workbench-frame__iframe"
-            src={readyLink.ui_url ?? undefined}
-            title={`Image Agent 工作台：${item.title}`}
-            sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
-            allow="clipboard-read; clipboard-write"
-            referrerPolicy="origin"
-            onLoad={() => {
-              window.clearTimeout(loadTimeoutRef.current);
-              setFrameState("ready");
-              announceBridgeRef.current();
-            }}
-            onError={() => { window.clearTimeout(loadTimeoutRef.current); setFrameState("failed"); }}
-          />
-        </div>
+        <>
+          <div className="agent-workbench__actions">
+            <button ref={enterWorkbenchRef} className="workbench-secondary-button" type="button" onClick={() => iframeRef.current?.focus()}>
+              跳到 {agentLabel} 工作台
+            </button>
+            <span role="status" aria-live="polite">{frameState === "ready" ? `${agentLabel} 已连接` : `${agentLabel} 正在连接`}</span>
+          </div>
+          <div className="agent-workbench-frame">
+            {frameState === "loading" ? <div className="agent-workbench-frame__overlay" role="status">{agentLabel} 工作台正在加载…</div> : null}
+            <iframe
+              key={`${readyLink.instance_id}-${frameKey}`}
+              ref={iframeRef}
+              className="agent-workbench-frame__iframe"
+              src={readyLink.ui_url ?? undefined}
+              title={`${agentLabel} 工作台：${item.title}`}
+              sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+              allow="clipboard-read; clipboard-write"
+              referrerPolicy="origin"
+              onLoad={() => {
+                window.clearTimeout(loadTimeoutRef.current);
+                setFrameState("ready");
+                announceBridgeRef.current();
+              }}
+              onError={() => { window.clearTimeout(loadTimeoutRef.current); setFrameState("failed"); }}
+            />
+            <div className="agent-workbench-frame__footer">
+              <button className="workbench-secondary-button" type="button" onClick={() => enterWorkbenchRef.current?.focus()}>返回工作台操作栏</button>
+            </div>
+          </div>
+        </>
       ) : null}
     </section>
   );

@@ -27,6 +27,7 @@ function runningWorkItem(index: number, title: string): ContractWorkItemProjecti
       instance_id: `instance_${index}`,
       status: "RUNNING",
       approval_mode: "human",
+      manual_finished: false,
       process_state: "RUNNING",
       restart_required: false,
       created_at: "2026-08-27T00:00:00Z",

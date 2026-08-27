@@ -133,6 +133,7 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                 self.assertEqual(item["business_status"], "RUNNING")
                 self.assertEqual(item["raw_status"], "RUNNING")
                 self.assertEqual(item["current_instance"]["status"], "WAITING_APPROVAL")
+                self.assertFalse(item["current_instance"]["manual_finished"])
                 self.assertEqual(len(item["pending_approvals"]), 1)
 
                 unchanged = client.get(

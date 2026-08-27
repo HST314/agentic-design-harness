@@ -109,21 +109,15 @@ export const deliveryBundlesQuery = (taskId: string) => queryOptions({
 
 export const inboxQuery = queryOptions({
   queryKey: ["inbox", "human"],
-  queryFn: async ({ signal }) => {
-    const response = await api.inbox(signal);
-    const entries = await Promise.all(
-      response.items.map(async (item): Promise<readonly [string, ApprovalDetailResponse | null]> => {
-        if (!item.approval_id) return [item.inbox_id, null] as const;
-        try {
-          return [item.inbox_id, await api.approval(item.approval_id, signal)] as const;
-        } catch {
-          return [item.inbox_id, null] as const;
-        }
-      }),
-    );
-    return { items: response.items, approvals: new Map(entries) };
-  },
+  queryFn: ({ signal }) => api.inbox(signal),
   refetchInterval: 10_000,
   refetchIntervalInBackground: false,
+  retry: false,
+});
+
+export const approvalDetailQuery = (approvalId: string) => queryOptions<ApprovalDetailResponse>({
+  queryKey: ["approvals", approvalId],
+  queryFn: ({ signal }) => api.approval(approvalId, signal),
+  staleTime: 30_000,
   retry: false,
 });

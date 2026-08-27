@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import type { ApprovalDetailResponse, InboxItem } from "../../api/client";
-import { api, inboxQuery } from "../../api/queries";
+import { ApiError, type ApprovalDetailResponse, type InboxItem } from "../../api/client";
+import { api, approvalDetailQuery, inboxQuery } from "../../api/queries";
 import { Icon } from "../../components/Icon";
 import { actionLabel } from "../../ui";
 
@@ -141,17 +141,22 @@ function ApprovalForm({
 
 function InboxCard({
   item,
-  details,
   selected,
   onChanged,
 }: {
   item: InboxItem;
-  details: ApprovalDetailResponse | null;
   selected: boolean;
   onChanged: () => void;
 }): React.JSX.Element {
   const cardRef = useRef<HTMLElement>(null);
   const queryClient = useQueryClient();
+  const [detailsOpen, setDetailsOpen] = useState(selected);
+  const approvalId = item.approval_id ?? "";
+  const approval = useQuery({
+    ...approvalDetailQuery(approvalId),
+    enabled: Boolean(approvalId && (selected || detailsOpen)),
+  });
+  const details = approval.data ?? null;
   const markRead = useMutation({
     mutationFn: () => api.updateInboxStatus(item.inbox_id, {
       status: "READ",
@@ -165,6 +170,8 @@ function InboxCard({
     if (selected) cardRef.current?.scrollIntoView({ block: "center" });
   }, [selected]);
   const pending = details?.approval.status === "PENDING";
+  const missingApproval = approval.error instanceof ApiError
+    && [404, 410].includes(approval.error.status);
   return (
     <article ref={cardRef} className={`inbox-card${selected ? " inbox-card--selected" : ""}`}>
       <header className="inbox-card__head">
@@ -181,12 +188,6 @@ function InboxCard({
         <div><dt>实例</dt><dd>{item.instance_id ?? "—"}</dd></div>
         <div><dt>队列序号</dt><dd>{item.sequence}</dd></div>
       </dl>
-      {details ? (
-        <details className="inbox-card__context">
-          <summary>查看审批上下文</summary>
-          <pre>{JSON.stringify(details.payload.context, null, 2)}</pre>
-        </details>
-      ) : null}
       <div className="inbox-card__actions">
         {item.status === "UNREAD" ? (
           <button className="workbench-secondary-button" type="button" disabled={markRead.isPending} onClick={() => markRead.mutate()}>
@@ -197,10 +198,39 @@ function InboxCard({
           <Link className="workbench-secondary-button" to={`/instances/${encodeURIComponent(item.instance_id)}`}>查看实例</Link>
         ) : null}
       </div>
-      {details && pending ? (
-        <ApprovalForm details={details} onResolved={onChanged} />
-      ) : item.approval_id ? (
-        <p className="inbox-card__handled">{details ? "该审批已完成处理。" : "审批详情暂时不可用，请刷新重试。"}</p>
+      {item.approval_id ? (
+        <details
+          className="inbox-card__context"
+          open={selected || detailsOpen}
+          onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
+        >
+          <summary>{pending ? "查看并处理审批" : "查看审批详情"}</summary>
+          {approval.isPending ? <p role="status">正在读取审批详情…</p> : null}
+          {approval.isError ? (
+            <div className="workbench-inline-error" role="alert">
+              <p>{missingApproval ? "该审批已不存在或已失效。" : approval.error.message}</p>
+              {missingApproval ? null : (
+                <button className="workbench-secondary-button" type="button" onClick={() => void approval.refetch()}>
+                  重试读取审批
+                </button>
+              )}
+            </div>
+          ) : null}
+          {details ? (
+            <>
+              <pre>{JSON.stringify(details.payload.context, null, 2)}</pre>
+              {pending ? (
+                <ApprovalForm
+                  details={details}
+                  onResolved={() => {
+                    void queryClient.invalidateQueries({ queryKey: approvalDetailQuery(approvalId).queryKey });
+                    onChanged();
+                  }}
+                />
+              ) : <p className="inbox-card__handled">该审批已完成处理。</p>}
+            </>
+          ) : null}
+        </details>
       ) : null}
     </article>
   );
@@ -245,7 +275,6 @@ export function InboxPage(): React.JSX.Element {
                 <InboxCard
                   key={item.inbox_id}
                   item={item}
-                  details={inbox.data.approvals.get(item.inbox_id) ?? null}
                   selected={selectedApproval !== null && selectedApproval === item.approval_id}
                   onChanged={refresh}
                 />

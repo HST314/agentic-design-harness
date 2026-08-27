@@ -73,9 +73,14 @@ const fixture = `<!doctype html>
           values,
           model_bindings: modelBindings,
           model_options: modelOptions,
-          sync_candidates: [{ instance_id: 'instance_image_2' }],
+          sync_peers: [{ instance_id: 'instance_image_2' }],
+          sync_to_peers: false,
           editable: true,
         }),
+        syncToggle: async (payload) => {
+          window.syncTogglePayload = payload;
+          return { sync_to_peers: payload.sync_to_peers };
+        },
         propose: async (payload) => {
           window.proposalPayload = payload;
           return {
@@ -128,6 +133,9 @@ test("renders the task settings layout with six accessible tabs and a save scope
   await expect(page.getByLabel("候选图并发数")).toHaveValue("3");
   await page.getByLabel("候选图并发数").fill("4");
   await page.getByLabel("同步到本任务其他 Image Agent").check();
+  await expect.poll(() => page.evaluate(
+    () => (window as typeof window & { syncTogglePayload?: unknown }).syncTogglePayload,
+  )).toEqual({ sync_to_peers: true });
   await page.getByRole("button", { name: "预览设置变更" }).click();
   await expect(page.getByRole("heading", { name: "变更预览" })).toBeVisible();
   expect(await page.evaluate(
@@ -135,8 +143,8 @@ test("renders the task settings layout with six accessible tabs and a save scope
   )).toEqual({
     base_revision: 3,
     overrides: { candidate_concurrency: 4 },
-    sync_unstarted_image_work_items: true,
-    expected_sync_instance_ids: ["instance_image_2"],
+    sync_unstarted_image_work_items: false,
+    expected_sync_instance_ids: [],
   });
   await page.getByRole("tab", { name: "数据库与放行" }).click();
   await expect(page.getByLabel("品类约束放行方式")).toHaveValue("manual");

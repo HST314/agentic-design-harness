@@ -28,16 +28,17 @@ function workItem(agentType: "image" | "ppt") {
       stage_id: ppt ? "stage_ppt" : "stage_image",
       position: ppt ? 2 : 1,
       type: agentType,
-      status: ppt ? "UNAVAILABLE" : "RUNNING",
+      status: ppt ? "READY" : "RUNNING",
       depends_on: [],
-      available: !ppt,
+      available: true,
     },
-    business_status: ppt ? "EXCEPTION" : "RUNNING",
-    raw_status: ppt ? "UNAVAILABLE" : "RUNNING",
+    business_status: ppt ? "TODO" : "RUNNING",
+    raw_status: ppt ? "READY" : "RUNNING",
     current_instance: {
       instance_id: ppt ? "instance_ppt" : "instance_image",
-      status: ppt ? "UNAVAILABLE" : "RUNNING",
+      status: ppt ? "READY" : "RUNNING",
       approval_mode: "human",
+      manual_finished: false,
       process_state: ppt ? null : "RUNNING",
       restart_required: false,
       created_at: "2026-08-22T10:00:00Z",
@@ -46,7 +47,7 @@ function workItem(agentType: "image" | "ppt") {
     attempts: [],
     pending_approvals: [],
     delivery_count: 0,
-    alerts: ppt ? [{ code: "ADAPTER_UNAVAILABLE", severity: "error", message: "PPT 能力尚未接入。" }] : [],
+    alerts: [],
     updated_at: "2026-08-22T10:05:00Z",
   };
 }
@@ -184,14 +185,75 @@ test("shows frame-policy failure with a controlled external fallback", async ({ 
   await expect(page.getByRole("button", { name: "重新检查" })).toBeVisible();
 });
 
-test("keeps PPT as a truthful unavailable boundary without requesting a UI link", async ({ page }) => {
+test("embeds a server-approved READY PPT workbench", async ({ page }) => {
   const item = workItem("ppt");
-  let linkRequests = 0;
+  item.current_instance.status = "RUNNING";
+  item.raw_status = "RUNNING";
+  item.business_status = "RUNNING";
   await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_ppt", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, item, refresh_after_ms: 5000, projection_revision: "ppt-unavailable" }) }));
-  await page.route("**/api/v1/instances/*/ui-link?*", async (route) => { linkRequests += 1; await route.abort(); });
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, stages: [item.stage], items: [item], summary: { TODO: 0, RUNNING: 1, WAITING_APPROVAL: 0, COMPLETED: 0, EXCEPTION: 0 }, refresh_after_ms: 5000, projection_revision: "ppt-list" }) }));
+  await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "RUNNING", task_revision: 8, ui_url: "http://127.0.0.1:19094/", link_status: "READY", embeddable: true, frame_policy: "FRAME_ANCESTORS_ALLOWED", diagnostic: "Allowed." }) }));
+  await page.route("http://127.0.0.1:19094/", async (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><html><body><main><h1>PPT Agent Studio</h1></main></body></html>" }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
-  await expect(page.getByRole("heading", { name: "PPT 工作台暂不可用" })).toBeVisible();
-  await expect(page.getByText(/返回看板调整计划/)).toBeVisible();
-  expect(linkRequests).toBe(0);
+  await expect(page.locator("iframe[title='PPT Agent 工作台：发布会演示文稿']")).toHaveAttribute("src", "http://127.0.0.1:19094/");
+  await expect(page.frameLocator("iframe").getByRole("heading", { name: "PPT Agent Studio" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "跳到 PPT Agent 工作台" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "返回工作台操作栏" })).toBeVisible();
+});
+
+test("shows PPT STARTING without creating an iframe", async ({ page }) => {
+  const item = workItem("ppt");
+  item.current_instance.status = "STARTING";
+  item.raw_status = "STARTING";
+  item.business_status = "RUNNING";
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_ppt", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, item, refresh_after_ms: 3000, projection_revision: "ppt-starting" }) }));
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, stages: [item.stage], items: [item], summary: { TODO: 0, RUNNING: 1, WAITING_APPROVAL: 0, COMPLETED: 0, EXCEPTION: 0 }, refresh_after_ms: 3000, projection_revision: "ppt-starting-list" }) }));
+  await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "STARTING", task_revision: 8, ui_url: null, link_status: "STARTING", start_operation: { operation_id: "start_ppt", state: "RUNNING" }, embeddable: false, frame_policy: "NOT_CHECKED", diagnostic: "Starting." }) }));
+
+  await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
+  await expect(page.getByRole("heading", { name: "PPT Agent 正在启动" })).toBeVisible();
+  await expect(page.locator("iframe")).toHaveCount(0);
+});
+
+test("keeps PPT start disabled and lists unfinished Image instances", async ({ page }) => {
+  const ppt = workItem("ppt");
+  const image = workItem("image");
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_ppt", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, item: ppt, refresh_after_ms: 5000, projection_revision: "ppt-gated" }) }));
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, stages: [image.stage, ppt.stage], items: [image, ppt], summary: { TODO: 1, RUNNING: 1, WAITING_APPROVAL: 0, COMPLETED: 0, EXCEPTION: 0 }, refresh_after_ms: 5000, projection_revision: "ppt-gated-list" }) }));
+  await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: ppt.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "READY", task_revision: 9, ui_url: null, link_status: "NO_UI_URL", start_operation: null, embeddable: false, frame_policy: "NOT_CHECKED", diagnostic: "Not started." }) }));
+
+  await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
+  await expect(page.getByText("instance_image")).toBeVisible();
+  await expect(page.getByRole("button", { name: "启动 PPT 工作台" })).toBeDisabled();
+});
+
+test("shows PPT FRAME_BLOCKED with a controlled external fallback", async ({ page }) => {
+  const item = workItem("ppt");
+  item.current_instance.status = "RUNNING";
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_ppt", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, item, refresh_after_ms: 5000, projection_revision: "ppt-blocked" }) }));
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, stages: [item.stage], items: [item], summary: { TODO: 0, RUNNING: 1, WAITING_APPROVAL: 0, COMPLETED: 0, EXCEPTION: 0 }, refresh_after_ms: 5000, projection_revision: "ppt-blocked-list" }) }));
+  await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "RUNNING", task_revision: 9, ui_url: "http://127.0.0.1:19095/", link_status: "FRAME_BLOCKED", start_operation: null, embeddable: false, frame_policy: "X_FRAME_OPTIONS_BLOCKED", diagnostic: "Blocked." }) }));
+
+  await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
+  await expect(page.getByRole("heading", { name: "PPT Agent 无法安全内嵌" })).toBeVisible();
+  await expect(page.locator("iframe")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "直接打开原始工作台" })).toHaveAttribute("href", "http://127.0.0.1:19095/");
+});
+
+test("starts a PPT-only task without an Image gate", async ({ page }) => {
+  const item = workItem("ppt");
+  let startBody: Record<string, unknown> | null = null;
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_ppt", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, item, refresh_after_ms: 5000, projection_revision: "ppt-only" }) }));
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, stages: [item.stage], items: [item], summary: { TODO: 1, RUNNING: 0, WAITING_APPROVAL: 0, COMPLETED: 0, EXCEPTION: 0 }, refresh_after_ms: 5000, projection_revision: "ppt-only-list" }) }));
+  await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "READY", task_revision: 10, ui_url: null, link_status: "NO_UI_URL", start_operation: null, embeddable: false, frame_policy: "NOT_CHECKED", diagnostic: "Not started." }) }));
+  await page.route("**/api/v1/instances/instance_ppt/start", async (route) => {
+    startBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", instance: { ...item.current_instance, agent_type: "ppt" }, launch: {}, adapter: {} }) });
+  });
+
+  await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
+  await page.getByRole("button", { name: "启动 PPT 工作台" }).click();
+  await expect.poll(() => startBody).not.toBeNull();
+  expect(startBody).toMatchObject({ envelope: { actor_type: "human", expected_revision: 10 } });
 });
