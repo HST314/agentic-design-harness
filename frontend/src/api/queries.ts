@@ -40,6 +40,20 @@ export const masterSessionQuery = (taskId: string) => queryOptions({
   retry: false,
 });
 
+export const instanceStartQuery = (instanceId: string, enabled: boolean) => queryOptions({
+  queryKey: ["instance-start", instanceId],
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.instanceStartProgress(instanceId, signal),
+  enabled,
+  refetchInterval: (query) => {
+    const data = query.state.data;
+    if (data?.start_in_progress) return 1_000;
+    if (data?.instance.status === "UNAVAILABLE") return 5_000;
+    return false;
+  },
+  refetchIntervalInBackground: false,
+  retry: false,
+});
+
 export const latestStartOperationQuery = (taskId: string) => queryOptions({
   queryKey: ["start-operation", taskId, "latest"],
   queryFn: ({ signal }: { signal: AbortSignal }) => api.latestStartOperation(taskId, signal),

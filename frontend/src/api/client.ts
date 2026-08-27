@@ -95,12 +95,17 @@ export interface MasterSessionAsset extends MasterAssetReference {
   description: string;
 }
 
+export type MasterSessionProposal = ContractPlanProposal & {
+  message_id: string | null;
+};
+
 export interface MasterSessionResponse {
   schema_version: string;
   thread: ContractMasterThread;
   thread_revision: number;
   messages: ContractMasterMessage[];
   latest_proposal: ContractPlanProposal | null;
+  proposals: MasterSessionProposal[];
   task: ContractMainTask;
   task_revision: number;
   gateway_available: boolean;
@@ -289,6 +294,7 @@ export interface HarnessSettingsDocument {
     max_tool_rounds: number;
     max_clarification_questions: number;
     require_plan_confirmation: boolean;
+    default_start_policy: "manual" | "auto";
   };
   document_processing: {
     max_files_per_task: number;
@@ -433,6 +439,15 @@ export interface AdapterObservation {
   };
 }
 
+export interface InstanceStartProgress {
+  state: "PENDING" | "PREPARING" | "PROCESS_STARTING" | "AGENT_STARTING" | "RUNNING";
+  attempt: number;
+  launch_id: string | null;
+  side_effect_stage: string;
+  last_error: { code?: string; message?: string } | null;
+  updated_at: string;
+}
+
 export interface InstanceDetailResponse {
   schema_version: string;
   task_id: string;
@@ -440,6 +455,10 @@ export interface InstanceDetailResponse {
   instance: AgentInstance;
   observation: AdapterObservation | null;
   pending_approval: Approval | null;
+  start_operation_id: string | null;
+  start_progress: InstanceStartProgress | null;
+  start_in_progress: boolean;
+  start_retry_allowed: boolean;
 }
 
 export interface AuditEvent {
@@ -705,7 +724,7 @@ export class ApiClient {
 
   createTaskIntake(body: {
     prompt: string;
-    start_policy: "manual" | "auto";
+    start_policy?: "manual" | "auto";
     envelope: CommandEnvelope;
   }): Promise<TaskIntakeResponse> {
     return this.send("POST", "/api/v1/task-intakes", body);
@@ -773,6 +792,7 @@ export class ApiClient {
       task_expected_revision: number;
       expected_card_revisions: Record<string, number>;
       envelope: CommandEnvelope;
+      instance_ids?: string[];
     },
   ): Promise<ConfirmPlanResponse> {
     return this.send(
@@ -998,6 +1018,13 @@ export class ApiClient {
     return this.get(`/api/v1/instances/${encodeURIComponent(instanceId)}`, signal);
   }
 
+  instanceStartProgress(instanceId: string, signal?: AbortSignal): Promise<InstanceDetailResponse> {
+    return this.get(
+      `/api/v1/instances/${encodeURIComponent(instanceId)}?refresh=false`,
+      signal,
+    );
+  }
+
   approval(approvalId: string, signal?: AbortSignal): Promise<ApprovalDetailResponse> {
     return this.get(`/api/v1/approvals/${encodeURIComponent(approvalId)}`, signal);
   }
@@ -1094,7 +1121,14 @@ export class ApiClient {
     );
   }
 
-  confirmTaskStart(taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  confirmTaskStart(
+    taskId: string,
+    body: {
+      operation_id: string;
+      envelope: CommandEnvelope;
+      instance_ids?: string[];
+    },
+  ): Promise<Record<string, unknown>> {
     return this.send("POST", `/api/v1/tasks/${encodeURIComponent(taskId)}/confirm-start`, body);
   }
 

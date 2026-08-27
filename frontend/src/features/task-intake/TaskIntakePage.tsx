@@ -48,6 +48,7 @@ interface LocalUpload {
 
 interface IntakeLocationState {
   pendingUploads?: LocalUpload[];
+  autoSubmit?: boolean;
 }
 
 function operationId(prefix: string): string {
@@ -242,14 +243,11 @@ function NewTaskIntakePage(): React.JSX.Element {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [prompt, setPrompt] = useState("");
-  const [promptTouched, setPromptTouched] = useState(false);
-  const [startPolicy, setStartPolicy] = useState<"manual" | "auto">("manual");
   const [uploads, setUploads] = useState<LocalUpload[]>([]);
   const [fileError, setFileError] = useState<string | null>(null);
   const create = useMutation({
     mutationFn: () => api.createTaskIntake({
       prompt: prompt.trim(),
-      start_policy: startPolicy,
       envelope: envelope(operationId("create_intake"), 0),
     }),
     onSuccess: (response) => {
@@ -257,11 +255,11 @@ function NewTaskIntakePage(): React.JSX.Element {
       void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
       navigate(`/tasks/${encodeURIComponent(response.task.task_id)}/master`, {
         replace: true,
-        state: { pendingUploads: uploads } satisfies IntakeLocationState,
+        state: { pendingUploads: uploads, autoSubmit: true } satisfies IntakeLocationState,
       });
     },
   });
-  const promptError = promptTouched && !prompt.trim() ? "请输入设计目标与交付要求。" : null;
+  const sent = create.isPending || create.isSuccess;
   const localBytes = uploads.reduce((sum, item) => sum + item.file.size, 0);
 
   const addFiles = (files: File[]): void => {
@@ -270,60 +268,87 @@ function NewTaskIntakePage(): React.JSX.Element {
     if (result.uploads.length) setUploads((current) => [...current, ...result.uploads]);
   };
 
+  const send = (): void => {
+    if (!prompt.trim() || sent) return;
+    create.mutate();
+  };
+
   return (
-    <TaskIntakeFrame badge="F1 创建入口">
+    <section className="workbench-page intake-chat" aria-labelledby="task-intake-title">
+      <h1 id="task-intake-title" className="sr-only">创建新的设计任务</h1>
+      <div className="master-thread intake-chat__thread" role="log" aria-label="新任务对话">
+        <p className="master-thread__empty">描述你的设计目标与交付要求，Master 会在对话中为你生成执行计划。</p>
+      </div>
       <form
-        className="workbench-intake-card"
+        className="master-composer intake-chat__composer"
         onSubmit={(event) => {
           event.preventDefault();
-          setPromptTouched(true);
-          if (!prompt.trim()) return;
-          create.mutate();
+          send();
         }}
       >
-        <label className="workbench-field" htmlFor="task-prompt">
-          <span>Prompt</span>
+        {uploads.length ? (
+          <ul className="intake-chat__files" aria-label="待随首条消息上传的附件">
+            {uploads.map((item) => (
+              <li key={item.id}>
+                <Icon name="file" />
+                <span>{item.file.name}</span>
+                <small>{formatBytes(item.file.size)}</small>
+                <button
+                  type="button"
+                  aria-label={`移除 ${item.file.name}`}
+                  disabled={sent}
+                  onClick={() => setUploads((current) => current.filter((entry) => entry.id !== item.id))}
+                >
+                  <Icon name="close" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="intake-chat__row">
+          {!sent ? (
+            <label className="workbench-icon-button intake-chat__attach" title="图片 20 MiB、PDF 50 MiB、文本 5 MiB；仅创建时可添加">
+              <Icon name="upload" />
+              <input
+                type="file"
+                multiple
+                className="sr-only"
+                aria-label="添加附件（图片 / PDF / TXT / MD）"
+                accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.md,.markdown,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown"
+                onChange={(event) => {
+                  addFiles(Array.from(event.currentTarget.files ?? []));
+                  event.currentTarget.value = "";
+                }}
+              />
+            </label>
+          ) : null}
           <textarea
             id="task-prompt"
-            rows={7}
+            aria-label="发送给 Master 的首条消息"
+            rows={3}
             value={prompt}
             maxLength={20_000}
-            aria-invalid={Boolean(promptError)}
-            aria-describedby={promptError ? "task-prompt-error" : "task-prompt-help"}
-            placeholder="例如：为秋季发布会生成三套主视觉方向，需适配官网头图与社交媒体……"
-            onBlur={() => setPromptTouched(true)}
+            placeholder="描述你的设计任务，例如：为秋季发布会生成三套主视觉方向…"
+            disabled={sent}
             onChange={(event) => setPrompt(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                send();
+              }
+            }}
           />
-          {promptError ? <small id="task-prompt-error" className="workbench-inline-error" role="alert">{promptError}</small> : <small id="task-prompt-help">创建后将生成可恢复草稿；Prompt 最多 20,000 字。</small>}
-        </label>
-
-        <section className="workbench-upload-section" aria-labelledby="new-upload-title">
-          <div className="workbench-upload-section__heading">
-            <div><p className="workbench-eyebrow">首次材料</p><h2 id="new-upload-title">上传参考文件</h2><p>图片 20 MiB、PDF 50 MiB、文本 5 MiB；总计不超过 20 个 / 200 MiB。</p></div>
-            <FilePicker onFiles={addFiles} />
-          </div>
-          {fileError ? <p className="workbench-inline-error" role="alert">{fileError}</p> : null}
-          <LocalUploadList
-            items={uploads}
-            onDescription={(id, value) => setUploads((current) => current.map((item) => item.id === id ? { ...item, description: value } : item))}
-            onCancel={(id) => setUploads((current) => current.filter((item) => item.id !== id))}
-            onRetry={() => undefined}
-          />
-        </section>
-
-        <div className="workbench-intake-footer">
-          <fieldset>
-            <legend>启动方式</legend>
-            <label><input type="radio" name="start-policy" value="manual" checked={startPolicy === "manual"} onChange={() => setStartPolicy("manual")} />人工确认计划后运行</label>
-            <label><input type="radio" name="start-policy" value="auto" checked={startPolicy === "auto"} onChange={() => setStartPolicy("auto")} />自动生成计划，人工确认后运行</label>
-          </fieldset>
-          <button type="submit" className="workbench-primary-button" disabled={create.isPending || !prompt.trim()}>
-            {create.isPending ? "正在创建草稿…" : uploads.length ? `创建草稿并上传 ${uploads.length} 个文件` : "创建草稿"}
+          <button type="submit" className="workbench-primary-button" aria-label="发送并创建任务" disabled={!prompt.trim() || sent}>
+            {create.isPending ? "正在创建…" : "发送"}
           </button>
         </div>
+        <footer className="intake-chat__footer">
+          <span>{prompt.length.toLocaleString("zh-CN")} / 20,000{uploads.length ? ` · ${uploads.length} 个附件将随首条消息上传` : " · 附件仅可在创建时添加"}</span>
+        </footer>
+        {fileError ? <p className="workbench-inline-error" role="alert">{fileError}</p> : null}
         {create.isError ? <p className="workbench-inline-error" role="alert">{create.error.message}</p> : null}
       </form>
-    </TaskIntakeFrame>
+    </section>
   );
 }
 
@@ -333,9 +358,11 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
   const queryClient = useQueryClient();
   const initialState = location.state as IntakeLocationState | null;
   const [uploads, setUploads] = useState<LocalUpload[]>(() => initialState?.pendingUploads ?? []);
+  const [autoSubmit, setAutoSubmit] = useState<boolean>(() => Boolean(initialState?.autoSubmit));
   const [fileError, setFileError] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const controllers = useRef(new Map<string, AbortController>());
+  const autoSubmitFired = useRef(false);
   const intake = useQuery(taskIntakeQuery(taskId));
   const revisionRef = useRef(0);
 
@@ -441,7 +468,21 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
       } : current);
       void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
     },
+    onError: () => setAutoSubmit(false),
   });
+
+  useEffect(() => {
+    if (!autoSubmit || autoSubmitFired.current) return;
+    if (!intake.data || intake.data.intake.status !== "DRAFT") return;
+    const active = uploads.some((item) => item.status === "queued" || item.status === "uploading");
+    if (active) return;
+    if (uploads.some((item) => item.status === "failed")) {
+      setAutoSubmit(false);
+      return;
+    }
+    autoSubmitFired.current = true;
+    submit.mutate();
+  }, [autoSubmit, intake.data, uploads, submit]);
 
   if (intake.isPending) {
     return <TaskIntakeFrame badge="正在恢复"><div className="workbench-intake-card" role="status">正在从服务端恢复草稿与已上传材料…</div></TaskIntakeFrame>;
@@ -455,6 +496,18 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
 
   const data = intake.data;
   const locked = data.intake.status !== "DRAFT";
+  if (autoSubmit && !locked) {
+    const total = data.assets.length + uploads.length;
+    return (
+      <TaskIntakeFrame badge="正在创建">
+        <div className="workbench-intake-card intake-chat__progress" role="status">
+          <strong>正在上传并提交首次材料…</strong>
+          <p>{total ? `已完成 ${data.assets.length} / ${total} 个文件；` : ""}提交后自动进入与 Master 的对话。</p>
+          {submit.isError ? <p className="workbench-inline-error" role="alert">{submit.error.message}</p> : null}
+        </div>
+      </TaskIntakeFrame>
+    );
+  }
   const activeUploads = uploads.some((item) => item.status === "queued" || item.status === "uploading");
   const failedUploads = uploads.some((item) => item.status === "failed");
   const serverBytes = data.assets.reduce((sum, asset) => sum + asset.size_bytes, 0);

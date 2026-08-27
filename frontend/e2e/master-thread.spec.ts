@@ -10,6 +10,8 @@ test.beforeEach(async ({ page }, testInfo) => {
   let cardRevision = 1;
   let cardObjective = "生成自然光主视觉方向。";
   let cardInstructions = ["保持品牌安全区。"];
+  let instancePhase: "idle" | "starting" | "running" = "idle";
+  let startPolls = 0;
   const messages = [
     {
       schema_version: "1.0",
@@ -34,49 +36,62 @@ test.beforeEach(async ({ page }, testInfo) => {
       created_at: "2026-08-22T10:01:00Z",
     },
   ];
-  const proposal = () => ({
-    schema_version: "1.0",
-    proposal_id: `proposal_master_e2e_${proposalRevision}`,
-    task_id: "task_master_e2e",
-    revision: proposalRevision,
-    status: confirmed ? "CONFIRMED" : "PENDING_CONFIRMATION",
-    stages: [{ stage_id: "stage_image", type: "image", position: 1, depends_on: [], required: true }],
-    work_items: [
-      {
-        schema_version: "1.0",
-        work_item_id: "work_direction_a",
-        task_id: "task_master_e2e",
-        stage_id: "stage_image",
-        title: "自然光主视觉方向",
-        agent_type: "image",
-        required: true,
-        depends_on: [],
-        current_instance_id: "instance_direction_a",
-        instance_ids: ["instance_direction_a"],
-        task_card_ids: ["card_direction_a"],
-      },
-    ],
-    execution_cards: [
-      {
-        schema_version: "1.1",
-        card_id: "card_direction_a",
-        revision: cardRevision,
-        task_id: "task_master_e2e",
-        stage_id: "stage_image",
-        instance_id: "instance_direction_a",
-        agent_type: "image",
-        objective: cardObjective,
-        instructions: cardInstructions,
-        input_assets: [{ asset_id: "asset_brief", manifest_relpath: "inputs/manifests/asset_brief.json" }],
-        expected_deliveries: [{ kind: "image", role: "key_visual", required: true, accepted_mime_types: ["image/png"] }],
-        parameters: { usage_context: "发布会主屏", variants: 3 },
-        created_at: "2026-08-22T10:01:00Z",
-      },
-    ],
-    created_at: "2026-08-22T10:01:00Z",
-    updated_at: "2026-08-22T10:02:00Z",
-    confirmed_at: confirmed ? "2026-08-22T10:02:00Z" : null,
-  });
+  const proposal = (overrides: { revision?: number; cardRev?: number; status?: string } = {}) => {
+    const rev = overrides.revision ?? proposalRevision;
+    const cardRev = overrides.cardRev ?? cardRevision;
+    const status = overrides.status ?? (confirmed ? "CONFIRMED" : "PENDING_CONFIRMATION");
+    return {
+      schema_version: "1.0",
+      proposal_id: `proposal_master_e2e_${rev}`,
+      task_id: "task_master_e2e",
+      revision: rev,
+      status,
+      stages: [{ stage_id: "stage_image", type: "image", position: 1, depends_on: [], required: true }],
+      work_items: [
+        {
+          schema_version: "1.0",
+          work_item_id: "work_direction_a",
+          task_id: "task_master_e2e",
+          stage_id: "stage_image",
+          title: "自然光主视觉方向",
+          agent_type: "image",
+          required: true,
+          depends_on: [],
+          current_instance_id: "instance_direction_a",
+          instance_ids: ["instance_direction_a"],
+          task_card_ids: ["card_direction_a"],
+        },
+      ],
+      execution_cards: [
+        {
+          schema_version: "1.1",
+          card_id: "card_direction_a",
+          revision: cardRev,
+          task_id: "task_master_e2e",
+          stage_id: "stage_image",
+          instance_id: "instance_direction_a",
+          agent_type: "image",
+          objective: cardObjective,
+          instructions: cardInstructions,
+          input_assets: [{ asset_id: "asset_brief", manifest_relpath: "inputs/manifests/asset_brief.json" }],
+          expected_deliveries: [{ kind: "image", role: "key_visual", required: true, accepted_mime_types: ["image/png"] }],
+          parameters: { usage_context: "发布会主屏", variants: 3 },
+          created_at: "2026-08-22T10:01:00Z",
+        },
+      ],
+      created_at: "2026-08-22T10:01:00Z",
+      updated_at: "2026-08-22T10:02:00Z",
+      confirmed_at: status === "CONFIRMED" ? "2026-08-22T10:02:00Z" : null,
+    };
+  };
+  const proposals = () => {
+    const list = [];
+    if (proposalRevision > 1) {
+      list.push({ ...proposal({ revision: 1, cardRev: 1, status: "SUPERSEDED" }), message_id: "message_plan" });
+    }
+    list.push({ ...proposal(), message_id: proposalRevision > 1 ? "message_card_revision" : "message_plan" });
+    return list;
+  };
   const session = () => ({
     schema_version: "1.0",
     thread: {
@@ -93,6 +108,7 @@ test.beforeEach(async ({ page }, testInfo) => {
     thread_revision: threadRevision,
     messages,
     latest_proposal: proposal(),
+    proposals: proposals(),
     task: {
       schema_version: "1.0",
       task_id: "task_master_e2e",
@@ -114,42 +130,44 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page.route("**/readyz", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ready" }) }));
   await page.route("**/api/v1/tasks", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", items: [{ task_id: "task_master_e2e", status: confirmed ? "RUNNING" : "DRAFT", title: "秋季发布会主视觉", updated_at: "2026-08-22T10:02:00Z", revision: confirmed ? 4 : 2 }] }) }));
   await page.route("**/api/v1/task-intakes/task_master_e2e", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", intake: { schema_version: "1.0", task_id: "task_master_e2e", prompt: "为秋季发布会生成主视觉。", upload_session: { session_id: "upload_master", status: "LOCKED", accepted_mime_types: ["text/markdown"], max_files: 20, max_total_bytes: 209715200 }, asset_ids: ["asset_brief"], status: "SUBMITTED", start_policy: startPolicy, revision: 3, created_at: "2026-08-22T10:00:00Z", updated_at: "2026-08-22T10:01:00Z", submitted_at: "2026-08-22T10:01:00Z" }, intake_revision: 3, task: session().task, task_revision: session().task_revision, assets: [] }) }));
-  await page.route("**/api/v1/tasks/task_master_e2e/start-operations/latest", async (route) => route.fulfill({
-    status: 200,
-    contentType: "application/json",
-    body: JSON.stringify({
-      schema_version: "1.1",
-      operation: confirmed ? {
-        schema_version: "1.1",
-        operation_id: "start_master_e2e",
+  await page.route("**/api/v1/instances/instance_direction_a*", async (route) => {
+    if (instancePhase === "starting") {
+      startPolls += 1;
+      if (startPolls >= 3) instancePhase = "running";
+    }
+    const running = instancePhase === "running";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "1.0",
         task_id: "task_master_e2e",
-        state: "RUNNING",
-        instance_progress: {
-          instance_direction_a: {
-            state: "PREPARING",
-            attempt: 1,
-            launch_id: null,
-            side_effect_stage: "NONE",
-            last_error: null,
-            updated_at: "2026-08-22T10:02:01Z",
-          },
-          instance_direction_b: {
-            state: "RUNNING",
-            attempt: 1,
-            launch_id: "launch_direction_b",
-            side_effect_stage: "AGENT_ACCEPTED",
-            last_error: null,
-            updated_at: "2026-08-22T10:02:01Z",
-          },
+        task_revision: 4,
+        instance: {
+          instance_id: "instance_direction_a",
+          task_id: "task_master_e2e",
+          stage_id: "stage_image",
+          agent_type: "image",
+          required: true,
+          status: running ? "RUNNING" : "READY",
+          start_failure: null,
         },
-        last_error: null,
-        retry_allowed: false,
-        created_at: "2026-08-22T10:02:00Z",
-        updated_at: "2026-08-22T10:02:01Z",
-        completed_at: null,
-      } : null,
-    }),
-  }));
+        observation: null,
+        pending_approval: null,
+        start_operation_id: confirmed ? "start_master_e2e" : null,
+        start_progress: confirmed ? {
+          state: running ? "RUNNING" : "PREPARING",
+          attempt: 1,
+          launch_id: null,
+          side_effect_stage: "NONE",
+          last_error: null,
+          updated_at: "2026-08-22T10:02:01Z",
+        } : null,
+        start_in_progress: instancePhase === "starting",
+        start_retry_allowed: false,
+      }),
+    });
+  });
   await page.route("**/api/v1/tasks/task_master_e2e/master/messages", async (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON() as { content: string; asset_refs: unknown[]; envelope: { expected_revision: number } };
@@ -182,25 +200,36 @@ test.beforeEach(async ({ page }, testInfo) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(session()) });
   });
   await page.route("**/api/v1/tasks/task_master_e2e/plan-proposals/*/confirm", async (route) => {
-    const body = route.request().postDataJSON() as { task_expected_revision: number; expected_card_revisions: Record<string, number>; envelope: { expected_revision: number } };
+    const body = route.request().postDataJSON() as { task_expected_revision: number; expected_card_revisions: Record<string, number>; instance_ids?: string[]; envelope: { expected_revision: number } };
     expect(body.task_expected_revision).toBe(2);
     expect(body.expected_card_revisions).toEqual({ card_direction_a: cardRevision });
     expect(body.envelope.expected_revision).toBe(proposalRevision);
+    expect(body.instance_ids).toEqual(["instance_direction_a"]);
     confirmed = true;
-    messages.push({ schema_version: "1.0", message_id: "message_confirm", task_id: "task_master_e2e", sequence: 3, role: "system", kind: "plan_confirmation", content: "计划 r1 已确认。", asset_refs: [], created_at: "2026-08-22T10:02:00Z" });
+    instancePhase = "starting";
+    startPolls = 0;
+    messages.push({ schema_version: "1.0", message_id: "message_confirm", task_id: "task_master_e2e", sequence: messages.length + 1, role: "system", kind: "plan_confirmation", content: "计划 r1 已确认。", asset_refs: [], created_at: "2026-08-22T10:02:00Z" });
     threadRevision += 1;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", proposal: proposal(), plan_result: {}, start_result: { launches: [{ instance_id: "instance_direction_a" }] }, session: session() }) });
   });
 });
 
-test("reviews a durable plan and sends revision feedback with existing resources", async ({ page }) => {
+test("shows plan cards inside the message flow and sends revision feedback with existing resources", async ({ page }) => {
   await page.goto("/tasks/task_master_e2e/master");
   await expect(page.locator(".workbench-topbar")).toContainText("秋季发布会主视觉");
   await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("已生成两条视觉探索路径");
-  await expect(page.getByRole("heading", { name: "执行计划预览" })).toBeVisible();
-  await expect(page.getByLabel("计划子任务").getByRole("heading", { name: "自然光主视觉方向" })).toBeVisible();
 
-  await page.getByRole("button", { name: "要求调整" }).click();
+  const group = page.getByRole("region", { name: "计划 r1 任务卡" });
+  await expect(group).toBeVisible();
+  await expect(group.getByText("图片", { exact: true })).toBeVisible();
+  await expect(group.getByRole("heading", { name: "自然光主视觉方向" })).toBeVisible();
+  await expect(group.getByRole("button", { name: "启动 自然光主视觉方向" })).toBeVisible();
+  await expect(group.getByRole("button", { name: "查看详情 自然光主视觉方向" })).toBeVisible();
+  await expect(group).not.toContainText("work_");
+  await expect(group).not.toContainText("必需");
+  await expect(page.getByRole("heading", { name: "执行计划预览" })).toHaveCount(0);
+
+  await group.getByRole("button", { name: "要求调整" }).click();
   await expect(page.getByLabel("发送给 Master")).toHaveValue("请调整计划 r1：");
   await page.getByLabel("发送给 Master").fill("请调整计划 r1：降低整体饱和度。");
   await page.getByRole("checkbox", { name: /brief\.md/ }).check();
@@ -209,23 +238,19 @@ test("reviews a durable plan and sends revision feedback with existing resources
   await expect(page.getByText("等待 Master 完成")).toBeVisible();
 });
 
-test("requires an explicit final confirmation before starting the reviewed revision", async ({ page }) => {
+test("launches one card from the chat flow and streams its live start status", async ({ page }) => {
   await page.goto("/tasks/task_master_e2e/master");
-  await page.getByRole("button", { name: "确认并运行" }).click();
-  const dialog = page.getByRole("dialog", { name: "启动计划 r1" });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("启动满足业务门禁的实例");
-  await dialog.getByRole("button", { name: "确认并启动" }).click();
-  await expect(page.getByText("计划已确认，实例启动已排队；页面会持续同步结果。")).toBeVisible();
-  await expect(page.getByText("已确认", { exact: true })).toBeVisible();
-  const progress = page.getByRole("progressbar", { name: "实例启动进度" });
-  await expect(progress).toBeVisible();
-  await expect(progress).toHaveAttribute("aria-valuenow", "2");
-  await expect(page.getByText("启动会在后台继续；你可以随时手动切换到任务看板查看进度。")).toBeVisible();
-  await expect(page.locator(".master-start-progress").getByRole("button")).toHaveCount(0);
+  const group = page.getByRole("region", { name: "计划 r1 任务卡" });
+  await group.getByRole("button", { name: "启动 自然光主视觉方向" }).click();
+
+  await expect(page.getByText("计划已确认，该子任务实例正在启动；其余子任务可继续单独启动。")).toBeVisible();
+  await expect(group.getByRole("status")).toContainText("准备运行环境");
+  await expect(group.getByText("已就绪")).toBeVisible();
+  await expect(group.getByRole("button", { name: "启动 自然光主视觉方向" })).toHaveCount(0);
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
 });
 
-test("shows concrete Chinese adapter validation details when confirmation fails", async ({ page }) => {
+test("shows concrete Chinese adapter validation details when a card launch fails", async ({ page }) => {
   await page.route("**/api/v1/tasks/task_master_e2e/plan-proposals/*/confirm", async (route) => {
     await route.fulfill({
       status: 422,
@@ -243,53 +268,38 @@ test("shows concrete Chinese adapter validation details when confirmation fails"
   });
 
   await page.goto("/tasks/task_master_e2e/master");
-  await page.getByRole("button", { name: "确认并运行" }).click();
-  await page.getByRole("dialog", { name: "启动计划 r1" })
-    .getByRole("button", { name: "确认并启动" })
-    .click();
+  await page.getByRole("button", { name: "启动 自然光主视觉方向" }).click();
 
-  await expect(page.getByRole("alert")).toHaveText(
+  await expect(page.getByRole("alert")).toContainText(
     "任务卡未通过智能体校验：图片任务卡缺少使用场景。",
   );
 });
 
-test("auto mode keeps human review and starts only after the final revision and cost confirmation", async ({ page }) => {
+test("auto mode still waits for an explicit per-card launch click", async ({ page }) => {
   let confirmationRequests = 0;
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().includes("/plan-proposals/1/confirm")) confirmationRequests += 1;
   });
 
   await page.goto("/tasks/task_master_e2e/master");
-  await expect(page.getByText("自动规划 · 人工启动")).toBeVisible();
-  await expect(page.getByRole("button", { name: "编辑任务卡 自然光主视觉方向" })).toBeVisible();
-  await page.getByRole("button", { name: "要求调整" }).click();
-  await expect(page.getByLabel("发送给 Master")).toHaveValue("请调整计划 r1：");
+  const group = page.getByRole("region", { name: "计划 r1 任务卡" });
+  await expect(group.getByRole("button", { name: "启动 自然光主视觉方向" })).toBeVisible();
   expect(confirmationRequests).toBe(0);
 
-  await page.getByRole("button", { name: "确认并运行" }).click();
-  const dialog = page.getByRole("dialog", { name: "启动计划 r1" });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("主任务修订");
-  await expect(dialog).toContainText("计划修订");
-  await expect(dialog.locator("dl").getByText("r2", { exact: true })).toBeVisible();
-  await expect(dialog.locator("dl").getByText("r1", { exact: true })).toBeVisible();
-  await expect(dialog).toContainText("实例 instance_direction_a");
-  await expect(dialog).toContainText("可能产生创作服务费用");
-  expect(confirmationRequests).toBe(0);
-
-  await dialog.getByRole("button", { name: "确认并启动" }).click();
+  await group.getByRole("button", { name: "启动 自然光主视觉方向" }).click();
   await expect.poll(() => confirmationRequests).toBe(1);
-  await expect(page.getByText("计划已确认，实例启动已排队；页面会持续同步结果。")).toBeVisible();
-  await expect(page.getByText("已确认", { exact: true })).toBeVisible();
+  await expect(group.getByText("已就绪")).toBeVisible();
 });
 
-test("edits a Master TaskCard into a new plan revision before confirmation", async ({ page }) => {
+test("edits a task card from the detail dialog and keeps every plan version in the flow", async ({ page }) => {
   await page.goto("/tasks/task_master_e2e/master");
-  await expect(page.getByRole("heading", { name: "任务卡" })).toBeVisible();
-  await expect(page.getByText("TaskCard · r1")).toBeVisible();
-  await expect(page.getByText("发布会主屏")).toBeVisible();
+  await page.getByRole("button", { name: "查看详情 自然光主视觉方向" }).click();
+  const detail = page.getByRole("dialog", { name: "任务卡详情" });
+  await expect(detail).toBeVisible();
+  await expect(detail).toContainText("TaskCard · r1");
+  await expect(detail).toContainText("发布会主屏");
 
-  await page.getByRole("button", { name: "编辑任务卡 自然光主视觉方向" }).click();
+  await detail.getByRole("button", { name: "编辑任务卡 自然光主视觉方向" }).click();
   const editor = page.getByRole("dialog", { name: "编辑任务卡" });
   await expect(editor).toBeVisible();
   await editor.getByLabel("目标").fill("生成低饱和、克制的自然光主视觉。");
@@ -298,12 +308,15 @@ test("edits a Master TaskCard into a new plan revision before confirmation", asy
   await editor.getByRole("button", { name: "保存为新修订" }).click();
 
   await expect(page.getByRole("status").filter({ hasText: "任务卡已保存；计划已更新为 r2" })).toBeVisible();
-  await expect(page.getByText("TaskCard · r2")).toBeVisible();
-  await expect(page.getByText("生成低饱和、克制的自然光主视觉。")).toBeVisible();
-  await page.getByRole("button", { name: "确认并运行" }).click();
-  const confirm = page.getByRole("dialog", { name: "启动计划 r2" });
-  await expect(confirm).toContainText("card_direction_a");
-  await expect(confirm).toContainText("r2");
+  const oldGroup = page.getByRole("region", { name: "计划 r1 任务卡" });
+  const newGroup = page.getByRole("region", { name: "计划 r2 任务卡" });
+  await expect(oldGroup).toBeVisible();
+  await expect(oldGroup).toContainText("已被替换");
+  await expect(oldGroup.getByRole("button", { name: "启动 自然光主视觉方向" })).toHaveCount(0);
+  await expect(newGroup).toBeVisible();
+  await newGroup.getByRole("button", { name: "查看详情 自然光主视觉方向" }).click();
+  await expect(page.getByRole("dialog", { name: "任务卡详情" })).toContainText("生成低饱和、克制的自然光主视觉。");
+  await expect(page.getByRole("dialog", { name: "任务卡详情" })).toContainText("TaskCard · r2");
 });
 
 test("keeps the permanent thread usable at supported desktop widths", async ({ page }) => {
@@ -321,30 +334,31 @@ test("keeps the permanent thread usable at supported desktop widths", async ({ p
   await expect(page.getByLabel("发送给 Master")).toBeFocused();
 });
 
-test("keeps TaskCard review dialogs accessible and returns keyboard focus", async ({ page }) => {
+test("keeps task card dialogs accessible and returns keyboard focus", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
   await page.goto("/tasks/task_master_e2e/master");
 
-  const edit = page.getByRole("button", { name: "编辑任务卡 自然光主视觉方向" });
-  await edit.focus();
-  await edit.click();
-  await expect(page.getByRole("dialog", { name: "编辑任务卡" })).toBeVisible();
+  const detailButton = page.getByRole("button", { name: "查看详情 自然光主视觉方向" });
+  await detailButton.focus();
+  await detailButton.click();
+  await expect(page.getByRole("dialog", { name: "任务卡详情" })).toBeVisible();
   let audit = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();
   expect(audit.violations, audit.violations.map((violation) => violation.id).join(", ")).toEqual([]);
-  await page.getByRole("button", { name: "取消" }).click();
-  await expect(edit).toBeFocused();
+  await page.getByRole("button", { name: "关闭任务卡详情" }).click();
+  await expect(detailButton).toBeFocused();
 
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
-  const confirm = page.getByRole("button", { name: "确认并运行" });
-  await confirm.focus();
-  await confirm.click();
-  await expect(page.getByRole("dialog", { name: "启动计划 r1" })).toBeVisible();
+  await detailButton.click();
+  await page.getByRole("dialog", { name: "任务卡详情" })
+    .getByRole("button", { name: "编辑任务卡 自然光主视觉方向" })
+    .click();
+  await expect(page.getByRole("dialog", { name: "编辑任务卡" })).toBeVisible();
   audit = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();
   expect(audit.violations, audit.violations.map((violation) => violation.id).join(", ")).toEqual([]);
-  await page.getByRole("button", { name: "返回审阅" }).click();
-  await expect(confirm).toBeFocused();
+  await page.getByRole("button", { name: "取消" }).click();
+  await expect(detailButton).toBeFocused();
 });

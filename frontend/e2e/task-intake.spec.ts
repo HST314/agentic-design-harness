@@ -103,6 +103,7 @@ test.beforeEach(async ({ page }) => {
       created_at: "2026-08-22T10:02:00Z",
     }],
     latest_proposal: null,
+    proposals: [],
     task: task(),
     task_revision: taskRevision,
     gateway_available: true,
@@ -136,8 +137,8 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", items }) });
   });
   await page.route("**/api/v1/task-intakes", async (route) => {
-    const body = route.request().postDataJSON() as { start_policy: "manual" | "auto" };
-    startPolicy = body.start_policy;
+    const body = route.request().postDataJSON() as { start_policy?: "manual" | "auto" };
+    startPolicy = body.start_policy ?? "manual";
     created = true;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response()) });
   });
@@ -203,44 +204,48 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("creates, uploads, refreshes and locks a task intake entirely through the workbench", async ({ page }) => {
+test("creates a task from the chat-style page and lands in the Master conversation", async ({ page }) => {
   await page.goto("/tasks/new");
-  const createButton = page.getByRole("button", { name: "创建草稿" });
-  await expect(createButton).toBeDisabled();
-  await page.getByLabel("Prompt").fill("秋季发布会三套主视觉方向");
+  const send = page.getByRole("button", { name: "发送并创建任务" });
+  await expect(send).toBeDisabled();
+  await page.getByLabel("发送给 Master 的首条消息").fill("秋季发布会三套主视觉方向");
   await page.locator('input[type="file"]').setInputFiles({
     name: "brief.md",
     mimeType: "text/markdown",
     buffer: Buffer.from("# 秋季发布会需求\n"),
   });
-  await page.getByLabel("文件说明（可选）").fill("发布会核心需求");
-  await page.getByRole("button", { name: "创建草稿并上传 1 个文件" }).click();
+  await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
+  await send.click();
 
   await expect(page).toHaveURL(/\/tasks\/task_e2e_intake\/master$/);
-  await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
-  await expect(page.getByText(/已安全上传/)).toBeVisible();
-  await expect(page.getByRole("link", { name: /秋季发布会三套主视觉方向/ })).toBeVisible();
-
-  await page.reload();
-  await expect(page.getByText("服务端草稿已恢复")).toBeVisible();
-  await expect(page.getByText("brief.md", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "提交任务材料" }).click();
+  await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("秋季发布会三套主视觉方向");
   await expect(page.getByText("已进入 Master 分析阶段")).toBeVisible();
-  await expect(page.getByText("添加图片 / PDF / TXT / MD")).toHaveCount(0);
-
-  await page.reload();
   await expect(page.getByText("引用已有资源（创建提交后不可追加上传）")).toBeVisible();
-  await expect(page.getByRole("button", { name: "提交任务材料" })).toHaveCount(0);
+  await expect(page.locator('input[type="file"]')).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /秋季发布会三套主视觉方向/ })).toBeVisible();
 });
 
-test("describes auto planning as requiring human confirmation before execution", async ({ page }) => {
+test("keeps the launch-mode choice out of the conversational create flow", async ({ page }) => {
   await page.goto("/tasks/new");
-  await page.getByLabel("自动生成计划，人工确认后运行").check();
-  await page.getByLabel("Prompt").fill("秋季发布会三套主视觉方向");
-  await page.getByRole("button", { name: "创建草稿" }).click();
+  await expect(page.getByText("启动方式")).toHaveCount(0);
+  await expect(page.getByRole("radio")).toHaveCount(0);
+  await page.getByLabel("发送给 Master 的首条消息").fill("秋季发布会三套主视觉方向");
+  await page.getByRole("button", { name: "发送并创建任务" }).click();
 
   await expect(page).toHaveURL(/\/tasks\/task_e2e_intake\/master$/);
-  await expect(page.getByText("自动生成计划，人工确认后运行", { exact: true })).toBeVisible();
+  await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("秋季发布会三套主视觉方向");
+});
+
+test("recovers a server-side draft and submits it manually", async ({ page }) => {
+  await page.goto("/tasks/task_e2e_intake/master");
+  await expect(page.getByText("服务端草稿已恢复")).toBeVisible();
+  await expect(page.getByText("尚未添加附件；Prompt 可单独提交。")).toBeVisible();
+  await page.getByRole("button", { name: "提交任务材料" }).click();
+  await expect(page.getByText("已进入 Master 分析阶段")).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("秋季发布会三套主视觉方向");
+  await expect(page.getByRole("button", { name: "提交任务材料" })).toHaveCount(0);
 });
 
 test("validates files locally and manages rename, pin and archive presentation state", async ({ page }) => {

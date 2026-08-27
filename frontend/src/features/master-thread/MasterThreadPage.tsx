@@ -1,22 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, useParams } from "react-router-dom";
 import type {
   CommandEnvelope,
+  ConfirmPlanResponse,
   EditableTaskCard,
+  InstanceStartProgress,
   MasterAssetReference,
   MasterSessionAsset,
+  MasterSessionProposal,
   MasterSessionResponse,
 } from "../../api/client";
 import { ApiError } from "../../api/client";
 import {
   api,
-  latestStartOperationQuery,
+  instanceStartQuery,
   masterSessionQuery,
   taskHistoryQuery,
   taskIntakeQuery,
 } from "../../api/queries";
-import type { StartOperation } from "../../api/client";
 import type {
   ContractMasterMessage,
   ContractPlanProposal,
@@ -82,74 +84,50 @@ function deliveryLabel(delivery: ExpectedDelivery): string {
   return `${kind} · ${delivery.role} · ${delivery.accepted_mime_types.join("、")}`;
 }
 
-const startStageLabels = [
-  "已受理",
-  "准备运行环境",
-  "启动进程",
-  "健康检查",
-  "工作台就绪",
-] as const;
+const startStageLabels: Record<InstanceStartProgress["state"], string> = {
+  PENDING: "已受理",
+  PREPARING: "准备运行环境",
+  PROCESS_STARTING: "启动进程",
+  AGENT_STARTING: "健康检查",
+  RUNNING: "已就绪",
+};
 
-function startStageIndex(operation: StartOperation | null | undefined): number {
-  if (!operation) return 0;
-  if (operation.state === "COMMITTED") return startStageLabels.length - 1;
-  const stageByState: Record<string, number> = {
-    PENDING: 0,
-    PREPARING: 1,
-    PROCESS_STARTING: 2,
-    AGENT_STARTING: 3,
-    RUNNING: 4,
-  };
-  const stages = Object.values(operation.instance_progress).map(
-    (item) => stageByState[item.state] ?? 0,
-  );
-  return stages.length ? Math.min(...stages) : 0;
+export function startStageLabel(progress: InstanceStartProgress | null | undefined): string {
+  if (!progress) return startStageLabels.PENDING;
+  return startStageLabels[progress.state] ?? startStageLabels.PENDING;
 }
 
-function StartProgressBar({ operation }: { operation: StartOperation | null | undefined }): React.JSX.Element {
-  const failed = operation?.state === "RETRYABLE_FAILED" || operation?.state === "ABORTED";
-  const current = startStageIndex(operation);
-  const ready = !failed && current === startStageLabels.length - 1;
-  return (
-    <section
-      className={`master-start-progress${failed ? " master-start-progress--failed" : ready ? " master-start-progress--ready" : ""}`}
-      aria-labelledby="master-start-progress-title"
-    >
-      <div className="master-start-progress__row">
-        <div className="master-start-progress__lead">
-          <span className="master-start-progress__dot" aria-hidden="true" />
-          <p className="workbench-eyebrow">实例启动</p>
-          <h2 id="master-start-progress-title">{failed ? "启动未完成" : ready ? "专业工作台已就绪" : "正在启动专业工作台"}</h2>
-        </div>
-        <ol
-          className="master-start-progress__steps"
-          role="progressbar"
-          aria-label="实例启动进度"
-          aria-valuemin={1}
-          aria-valuemax={startStageLabels.length}
-          aria-valuenow={current + 1}
-        >
-          {startStageLabels.map((label, index) => (
-            <li
-              key={label}
-              className={index < current ? "is-complete" : index === current ? "is-current" : ""}
-            >
-              <span className="master-start-progress__bar" aria-hidden="true" />
-              <strong>{label}</strong>
-            </li>
-          ))}
-        </ol>
-        <span className="master-start-progress__count" role="status" aria-live="polite">{failed ? "需要重试" : `${current + 1} / ${startStageLabels.length}`}</span>
-      </div>
-      {failed ? (
-        <p className="master-start-progress__message" role="alert">
-          {operation?.last_error?.message ?? "实例启动失败，请在任务看板中由用户手动重试。"}
-        </p>
-      ) : ready ? null : (
-        <p className="master-start-progress__message">启动会在后台继续；你可以随时手动切换到任务看板查看进度。</p>
-      )}
-    </section>
-  );
+export type MasterTimelineItem =
+  | { kind: "message"; message: ContractMasterMessage }
+  | { kind: "proposal"; proposal: MasterSessionProposal };
+
+export function buildMasterTimeline(
+  messages: ContractMasterMessage[],
+  proposals: MasterSessionProposal[],
+): MasterTimelineItem[] {
+  const messageIds = new Set(messages.map((message) => message.message_id));
+  const byMessage = new Map<string, MasterSessionProposal[]>();
+  const orphans: MasterSessionProposal[] = [];
+  for (const proposal of proposals) {
+    if (proposal.message_id && messageIds.has(proposal.message_id)) {
+      const list = byMessage.get(proposal.message_id) ?? [];
+      list.push(proposal);
+      byMessage.set(proposal.message_id, list);
+    } else {
+      orphans.push(proposal);
+    }
+  }
+  const items: MasterTimelineItem[] = [];
+  for (const message of messages) {
+    items.push({ kind: "message", message });
+    for (const proposal of byMessage.get(message.message_id) ?? []) {
+      items.push({ kind: "proposal", proposal });
+    }
+  }
+  for (const proposal of orphans) {
+    items.push({ kind: "proposal", proposal });
+  }
+  return items;
 }
 
 export function TaskTabs({ taskId, trailing }: { taskId: string; trailing?: React.ReactNode }): React.JSX.Element {
@@ -216,7 +194,7 @@ function TaskCardReview({
     <article className="master-task-card" aria-labelledby={`task-card-${card.card_id}`}>
       <header>
         <div>
-          <span className="master-agent-chip">{card.agent_type === "image" ? "Image" : "PPT"}</span>
+          <span className="master-agent-chip">{card.agent_type === "image" ? "图片" : "PPT"}</span>
           <span className="master-task-card__revision">TaskCard · r{card.revision}</span>
         </div>
         {editable ? (
@@ -443,118 +421,173 @@ function TaskCardEditorDialog({
   );
 }
 
-function ProposalCard({
-  proposal,
-  startPolicy,
-  confirming,
-  onConfirm,
-  onAdjust,
-  onEditCard,
+function MiniTaskCard({
+  card,
+  title,
+  proposalStatus,
+  launchPending,
+  launchBlocked,
+  onLaunch,
+  onShowDetail,
 }: {
-  proposal: ContractPlanProposal;
-  startPolicy: "manual" | "auto";
-  confirming: boolean;
-  onConfirm: (trigger: HTMLButtonElement) => void;
-  onAdjust: () => void;
-  onEditCard: (card: ProposalTaskCard, trigger: HTMLButtonElement) => void;
+  card: ProposalTaskCard;
+  title: string;
+  proposalStatus: ContractPlanProposal["status"];
+  launchPending: boolean;
+  launchBlocked: boolean;
+  onLaunch: () => void;
+  onShowDetail: (trigger: HTMLButtonElement) => void;
 }): React.JSX.Element {
-  const stageById = useMemo(
-    () => new Map(proposal.stages.map((stage) => [stage.stage_id, stage])),
-    [proposal.stages],
+  const queryClient = useQueryClient();
+  const start = useQuery(instanceStartQuery(card.instance_id, proposalStatus === "CONFIRMED"));
+  const detail = start.data;
+  const retry = useMutation({
+    mutationFn: () => {
+      const startOperationId = detail?.start_operation_id;
+      const taskRevision = detail?.task_revision;
+      if (!startOperationId || taskRevision === undefined) {
+        throw new Error("当前没有可重试的启动操作。");
+      }
+      return api.retryStartOperation(
+        startOperationId,
+        envelope(operationId("retry_start"), taskRevision),
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: instanceStartQuery(card.instance_id, true).queryKey });
+    },
+  });
+
+  const starting = launchPending || Boolean(detail?.start_in_progress) || retry.isPending;
+  const instanceReady = detail?.instance.status === "RUNNING" || detail?.instance.status === "WAITING_APPROVAL";
+  const ready = !starting && (instanceReady || detail?.start_progress?.state === "RUNNING");
+  const failed = !starting && !ready && (
+    detail?.instance.status === "FAILED_TO_START" || Boolean(detail?.start_progress?.last_error)
+  );
+  const unavailable = !starting && !ready && !failed && detail?.instance.status === "UNAVAILABLE";
+  const failureMessage = detail?.start_progress?.last_error?.message ?? detail?.instance.start_failure?.message ?? "实例启动失败。";
+  const retryable = failed && Boolean(detail?.start_retry_allowed && detail.start_operation_id);
+
+  let action: React.ReactNode;
+  if (proposalStatus === "SUPERSEDED") {
+    action = <span className="master-mini-card__state">已被替换</span>;
+  } else if (starting) {
+    action = (
+      <span className="master-mini-card__state master-mini-card__state--busy" role="status">
+        <span className="master-mini-card__spinner" aria-hidden="true" />
+        {launchPending && !detail ? startStageLabels.PENDING : startStageLabel(detail?.start_progress)}
+      </span>
+    );
+  } else if (ready) {
+    action = <span className="master-mini-card__state master-mini-card__state--ready">已就绪</span>;
+  } else if (failed) {
+    action = (
+      <span className="master-mini-card__state master-mini-card__state--failed" title={failureMessage}>
+        启动失败
+        {retryable ? (
+          <button type="button" className="workbench-text-button" onClick={() => retry.mutate()}>重试</button>
+        ) : null}
+      </span>
+    );
+  } else if (unavailable) {
+    action = <span className="master-mini-card__state">待上游就绪</span>;
+  } else {
+    action = (
+      <button
+        type="button"
+        className="workbench-primary-button master-mini-card__launch"
+        aria-label={`启动 ${title}`}
+        disabled={launchBlocked}
+        onClick={onLaunch}
+      >
+        启动
+      </button>
+    );
+  }
+
+  return (
+    <article className="master-mini-card">
+      <div className="master-mini-card__lead">
+        <span className="master-agent-chip">{card.agent_type === "image" ? "图片" : "PPT"}</span>
+        <h4>{title}</h4>
+      </div>
+      <div className="master-mini-card__actions">
+        {action}
+        <button
+          type="button"
+          className="workbench-secondary-button"
+          aria-label={`查看详情 ${title}`}
+          onClick={(event) => onShowDetail(event.currentTarget)}
+        >
+          查看详情
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function ProposalCardGroup({
+  proposal,
+  launchingCardId,
+  onLaunchCard,
+  onShowDetail,
+  onAdjust,
+}: {
+  proposal: MasterSessionProposal;
+  launchingCardId: string | null;
+  onLaunchCard: (proposal: MasterSessionProposal, card: ProposalTaskCard) => void;
+  onShowDetail: (proposal: MasterSessionProposal, card: ProposalTaskCard, trigger: HTMLButtonElement) => void;
+  onAdjust: (proposal: MasterSessionProposal) => void;
+}): React.JSX.Element {
+  const titleByCardId = new Map(
+    proposal.work_items.flatMap((item) => item.task_card_ids.map((cardId) => [cardId, item.title] as const)),
   );
   return (
-    <section className="master-proposal" aria-labelledby={`proposal-${proposal.revision}`}>
-      <header className="master-proposal__header">
-        <div>
-          <p className="workbench-eyebrow">PlanProposal · r{proposal.revision}</p>
-          <h2 id={`proposal-${proposal.revision}`}>执行计划预览</h2>
-          <p>{proposal.stages.length} 个阶段 · {proposal.work_items.length} 个逻辑子任务</p>
+    <section className="master-plan-cards" aria-label={`计划 r${proposal.revision} 任务卡`}>
+      <header className="master-plan-cards__header">
+        <p className="workbench-eyebrow">PlanProposal · r{proposal.revision}</p>
+        <div className="master-plan-cards__meta">
+          <span className={`master-proposal__status master-proposal__status--${proposal.status.toLowerCase()}`}>
+            {proposal.status === "PENDING_CONFIRMATION" ? "待确认" : proposal.status === "CONFIRMED" ? "已确认" : "已被替换"}
+          </span>
+          {proposal.status === "PENDING_CONFIRMATION" ? (
+            <button type="button" className="workbench-text-button" onClick={() => onAdjust(proposal)}>要求调整</button>
+          ) : null}
         </div>
-        <span className={`master-proposal__status master-proposal__status--${proposal.status.toLowerCase()}`}>
-          {proposal.status === "PENDING_CONFIRMATION" ? "待确认" : proposal.status === "CONFIRMED" ? "已确认" : "已被替换"}
-        </span>
       </header>
-      <ol className="master-stage-list">
-        {proposal.stages.map((stage) => (
-          <li key={stage.stage_id}>
-            <div className="master-stage-list__marker" aria-hidden="true">{stage.position}</div>
-            <div>
-              <strong>{stage.type === "image" ? "Image 设计阶段" : "PPT 阶段"}</strong>
-              <span>{stage.required ? "必需" : "可选"} · {stage.depends_on.length ? `依赖 ${stage.depends_on.join("、")}` : "无前置依赖"}</span>
-            </div>
-          </li>
+      <div className="master-plan-cards__grid">
+        {proposal.execution_cards.map((card) => (
+          <MiniTaskCard
+            key={card.card_id}
+            card={card}
+            title={titleByCardId.get(card.card_id) ?? card.card_id}
+            proposalStatus={proposal.status}
+            launchPending={launchingCardId === card.card_id}
+            launchBlocked={launchingCardId !== null}
+            onLaunch={() => onLaunchCard(proposal, card)}
+            onShowDetail={(trigger) => onShowDetail(proposal, card, trigger)}
+          />
         ))}
-      </ol>
-      <div className="master-work-items" aria-label="计划子任务">
-        {proposal.work_items.map((item) => {
-          const stage = stageById.get(item.stage_id);
-          return (
-            <article key={item.work_item_id}>
-              <div><span className="master-agent-chip">{item.agent_type === "image" ? "Image" : "PPT"}</span><span>{item.required ? "必需" : "可选"}</span></div>
-              <h3>{item.title}</h3>
-              <p>{stage ? `阶段 ${stage.position}` : item.stage_id} · {item.depends_on.length ? `依赖 ${item.depends_on.length} 项` : "可独立开始"}</p>
-              <code>{item.work_item_id}</code>
-            </article>
-          );
-        })}
       </div>
-      <section className="master-task-cards" aria-labelledby={`task-cards-${proposal.revision}`}>
-        <div className="master-task-cards__heading">
-          <div><p className="workbench-eyebrow">人工审阅门禁</p><h3 id={`task-cards-${proposal.revision}`}>任务卡</h3></div>
-          <span>{proposal.execution_cards.length} 张 · 保存编辑后必须重新审阅</span>
-        </div>
-        <div className="master-task-cards__grid">
-          {proposal.execution_cards.map((card) => (
-            <TaskCardReview
-              key={card.card_id}
-              card={card}
-              workItem={proposal.work_items.find((item) => item.task_card_ids.includes(card.card_id))}
-              editable={proposal.status === "PENDING_CONFIRMATION"}
-              onEdit={(trigger) => onEditCard(card, trigger)}
-            />
-          ))}
-        </div>
-      </section>
-      {proposal.status === "PENDING_CONFIRMATION" ? (
-        <footer className="master-proposal__actions">
-          <div>
-            <strong>{startPolicy === "manual" ? "人工确认模式" : "自动规划 · 人工启动"}</strong>
-            <span>{startPolicy === "manual" ? "审阅或调整计划后，由你确认才会创建或启动实例。" : "计划已自动生成；审阅或调整后，仍需由你确认才会创建或启动实例。"}</span>
-          </div>
-          <div>
-            <button type="button" className="workbench-secondary-button" onClick={onAdjust}>要求调整</button>
-            <button type="button" className="workbench-primary-button" disabled={confirming} onClick={(event) => onConfirm(event.currentTarget)}>{confirming ? "正在确认…" : "确认并运行"}</button>
-          </div>
-        </footer>
-      ) : null}
     </section>
   );
 }
 
-export function ConfirmDialog({
-  proposal,
-  taskRevision,
-  open,
-  pending,
-  error,
-  onCancel,
-  onConfirm,
+function TaskCardDetailDialog({
+  detail,
+  editable,
+  onClose,
+  onEdit,
 }: {
-  proposal: ContractPlanProposal | null;
-  taskRevision: number | null;
-  open: boolean;
-  pending: boolean;
-  error: string | null;
-  onCancel: () => void;
-  onConfirm: () => void;
+  detail: { proposal: MasterSessionProposal; card: ProposalTaskCard } | null;
+  editable: boolean;
+  onClose: () => void;
+  onEdit: () => void;
 }): React.JSX.Element | null {
   const ref = useRef<HTMLDialogElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
-  const [uncheckedCards, setUncheckedCards] = useState<Set<string>>(() => new Set());
-  const proposalKey = proposal ? `${proposal.proposal_id}:${proposal.revision}` : null;
-  useEffect(() => {
-    setUncheckedCards(new Set());
-  }, [proposalKey]);
+  const open = detail !== null;
+
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
@@ -567,50 +600,27 @@ export function ConfirmDialog({
       requestAnimationFrame(() => returnFocusRef.current?.focus());
     }
   }, [open]);
-  if (!proposal || taskRevision === null) return null;
-  const titleByCardId = new Map(
-    proposal.work_items.flatMap((item) => item.task_card_ids.map((cardId) => [cardId, item.title] as const)),
-  );
-  const allChecked = uncheckedCards.size === 0;
-  const batch = proposal.execution_cards.length > 1;
+
+  if (!detail) return null;
+  const workItem = detail.proposal.work_items.find((item) => item.task_card_ids.includes(detail.card.card_id));
   return (
-    <dialog ref={ref} className="master-confirm-dialog" aria-labelledby="master-confirm-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}>
-      <div className="workbench-drawer__header"><div><p className="workbench-eyebrow">最终确认</p><h2 id="master-confirm-title">启动计划 r{proposal.revision}</h2></div></div>
-      <div className="master-confirm-dialog__body">
-        <p>确认后将绑定当前计划、全部任务卡和主任务的准确修订，并启动满足业务门禁的实例。任一版本变化都会拒绝启动并要求重新审阅。</p>
-        <dl><div><dt>主任务修订</dt><dd>r{taskRevision}</dd></div><div><dt>计划修订</dt><dd>r{proposal.revision}</dd></div><div><dt>任务卡</dt><dd>{proposal.execution_cards.length}</dd></div><div><dt>预计实例</dt><dd>{proposal.work_items.length}</dd></div></dl>
-        <ul className="master-confirm-dialog__cards" aria-label="勾选要启动的任务卡">
-          {proposal.execution_cards.map((card) => (
-            <li key={card.card_id}>
-              <label className="master-confirm-dialog__card-check">
-                <input
-                  type="checkbox"
-                  checked={!uncheckedCards.has(card.card_id)}
-                  onChange={(event) => {
-                    const checked = event.currentTarget.checked;
-                    setUncheckedCards((current) => {
-                      const next = new Set(current);
-                      if (checked) next.delete(card.card_id); else next.add(card.card_id);
-                      return next;
-                    });
-                  }}
-                />
-                <span>
-                  <strong>{titleByCardId.get(card.card_id) ?? card.card_id}</strong>
-                  <small><code>{card.card_id}</code> · 实例 {card.instance_id}</small>
-                </span>
-                <strong>r{card.revision}</strong>
-              </label>
-            </li>
-          ))}
-        </ul>
-        {!allChecked ? <p className="master-confirm-dialog__hint">批量启动需勾选全部任务卡；要排除某张卡，请返回并用“要求调整”让 Master 修改计划。</p> : null}
-        <p className="master-confirm-dialog__warning"><Icon name="status" />点击“{batch ? "批量启动" : "确认并启动"}”表示你已知晓本次运行可能产生创作服务费用；启动仍受预算和服务可用性检查。</p>
-        {error ? <p className="workbench-inline-error" role="alert">{error}</p> : null}
-        <div className="workbench-dialog-actions">
-          <button type="button" className="workbench-secondary-button" disabled={pending} onClick={onCancel}>返回审阅</button>
-          <button type="button" className="workbench-primary-button" disabled={pending || !allChecked} onClick={onConfirm}>{pending ? "正在启动…" : batch ? "批量启动" : "确认并启动"}</button>
-        </div>
+    <dialog
+      ref={ref}
+      className="master-card-detail"
+      aria-labelledby="master-card-detail-title"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+    >
+      <header className="workbench-drawer__header">
+        <div><p className="workbench-eyebrow">PlanProposal · r{detail.proposal.revision}</p><h2 id="master-card-detail-title">任务卡详情</h2></div>
+        <button type="button" className="workbench-icon-button" aria-label="关闭任务卡详情" onClick={onClose}><Icon name="close" /></button>
+      </header>
+      <div className="master-card-detail__body">
+        <TaskCardReview
+          card={detail.card}
+          workItem={workItem}
+          editable={editable}
+          onEdit={() => onEdit()}
+        />
       </div>
     </dialog>
   );
@@ -623,28 +633,23 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
     ...masterSessionQuery(taskId),
     enabled: !pauseMasterPolling,
   });
-  const startOperation = useQuery({
-    ...latestStartOperationQuery(taskId),
-    enabled: session.data?.latest_proposal?.status === "CONFIRMED",
-  });
   const [content, setContent] = useState("");
   const [selectedAssets, setSelectedAssets] = useState<Set<string>>(() => new Set());
-  const [confirmReview, setConfirmReview] = useState<{
-    proposal: ContractPlanProposal;
-    taskRevision: number;
-  } | null>(null);
-  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<{ proposal: MasterSessionProposal; card: ProposalTaskCard } | null>(null);
+  const [editingCard, setEditingCard] = useState<{ proposal: MasterSessionProposal; card: ProposalTaskCard } | null>(null);
+  const [launchingCardId, setLaunchingCardId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pageAlert, setPageAlert] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const cardEditorTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const confirmTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const detailTriggerRef = useRef<HTMLButtonElement | null>(null);
   const closeCardEditor = () => {
-    setEditingCardId(null);
+    setEditingCard(null);
     requestAnimationFrame(() => cardEditorTriggerRef.current?.focus());
   };
-  const closeConfirmReview = () => {
-    setConfirmReview(null);
-    requestAnimationFrame(() => confirmTriggerRef.current?.focus());
+  const closeDetail = () => {
+    setDetail(null);
+    requestAnimationFrame(() => detailTriggerRef.current?.focus());
   };
 
   const append = useMutation({
@@ -666,43 +671,58 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
       }
     },
   });
-  const confirm = useMutation({
-    mutationFn: () => {
-      const proposal = confirmReview?.proposal;
-      if (!proposal || !confirmReview) throw new Error("当前没有可确认计划。");
-      return api.confirmPlanProposal(taskId, proposal.revision, {
-        task_expected_revision: confirmReview.taskRevision,
-        expected_card_revisions: Object.fromEntries(
-          proposal.execution_cards.map((card) => [card.card_id, card.revision]),
-        ),
-        envelope: envelope(operationId("confirm_plan"), proposal.revision),
+  const launch = useMutation({
+    mutationFn: async ({ proposal, card }: { proposal: MasterSessionProposal; card: ProposalTaskCard }): Promise<{ confirmation: ConfirmPlanResponse } | { confirmation: null }> => {
+      const taskRevision = session.data?.task_revision;
+      if (taskRevision === undefined) throw new Error("任务信息尚未载入。");
+      if (proposal.status === "PENDING_CONFIRMATION") {
+        const confirmation = await api.confirmPlanProposal(taskId, proposal.revision, {
+          task_expected_revision: taskRevision,
+          expected_card_revisions: Object.fromEntries(
+            proposal.execution_cards.map((item) => [item.card_id, item.revision]),
+          ),
+          envelope: envelope(operationId("confirm_plan"), proposal.revision),
+          instance_ids: [card.instance_id],
+        });
+        return { confirmation };
+      }
+      await api.confirmTaskStart(taskId, {
+        operation_id: operationId("start_card"),
+        envelope: envelope(operationId("start_card"), taskRevision),
+        instance_ids: [card.instance_id],
       });
+      return { confirmation: null };
     },
-    onMutate: () => {
+    onMutate: ({ card }) => {
+      setLaunchingCardId(card.card_id);
+      setPageAlert(null);
       setPauseMasterPolling(true);
     },
-    onSuccess: (response) => {
-      queryClient.setQueryData(masterSessionQuery(taskId).queryKey, response.session);
-      void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
-      void queryClient.invalidateQueries({ queryKey: latestStartOperationQuery(taskId).queryKey });
-      closeConfirmReview();
-      setNotice("计划已确认，实例启动已排队；页面会持续同步结果。");
+    onSuccess: (result, { card }) => {
+      if (result.confirmation) {
+        queryClient.setQueryData(masterSessionQuery(taskId).queryKey, result.confirmation.session);
+        void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
+        setNotice("计划已确认，该子任务实例正在启动；其余子任务可继续单独启动。");
+      } else {
+        setNotice("已受理，该子任务实例正在启动。");
+      }
+      void queryClient.invalidateQueries({ queryKey: instanceStartQuery(card.instance_id, true).queryKey });
     },
     onError: (error) => {
-      if (error instanceof ApiError && error.code === "REVISION_CONFLICT") {
-        closeConfirmReview();
-        setNotice("计划或任务已更新，本次未启动；请重新审阅最新版本。");
+      setPageAlert(error instanceof Error ? error.message : "实例启动失败，请重试。");
+      if (error instanceof ApiError && (error.code === "REVISION_CONFLICT" || error.code === "INVALID_STATE_TRANSITION")) {
         void queryClient.invalidateQueries({ queryKey: masterSessionQuery(taskId).queryKey });
       }
     },
     onSettled: () => {
+      setLaunchingCardId(null);
       setPauseMasterPolling(false);
     },
   });
   const reviseCard = useMutation({
-    mutationFn: ({ card, editable }: { card: ProposalTaskCard; editable: EditableTaskCard }) => {
-      const proposal = session.data?.latest_proposal;
-      if (!proposal) throw new Error("当前没有可编辑计划。");
+    mutationFn: ({ editable }: { editable: EditableTaskCard }) => {
+      if (!editingCard) throw new Error("当前没有可编辑计划。");
+      const { proposal, card } = editingCard;
       return api.updatePlanTaskCard(taskId, proposal.revision, card.card_id, {
         ...editable,
         expected_proposal_revision: proposal.revision,
@@ -732,8 +752,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   const data: MasterSessionResponse = session.data;
   const active = data.thread.active_run;
   const busy = active?.status === "SUBMITTING" || active?.status === "RUNNING";
-  const proposal = data.latest_proposal;
-  const editingCard = proposal?.execution_cards.find((card) => card.card_id === editingCardId) ?? null;
+  const timeline = buildMasterTimeline(data.messages, data.proposals);
   const refs = data.assets
     .filter((asset) => selectedAssets.has(asset.asset_id))
     .map(({ asset_id, manifest_relpath }) => ({ asset_id, manifest_relpath }));
@@ -742,9 +761,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
     <section className="workbench-page master-workspace" aria-labelledby="master-title">
       <h1 id="master-title" className="sr-only">{data.task.title}</h1>
       <TaskTabs taskId={taskId} />
-      {proposal?.status === "CONFIRMED" ? (
-        <StartProgressBar operation={startOperation.data?.operation} />
-      ) : null}
+      {pageAlert ? <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>实例启动未完成</strong><p>{pageAlert}</p></div></div> : null}
       {session.isError ? <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>后台同步暂时失败</strong><p>已保留当前页面数据，系统会继续重试；也可稍后手动刷新。</p></div></div> : null}
       {data.thread.last_error && !busy ? (
         <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>本次智能分析未完成</strong><p>任务内容和对话记录已保留。请稍后重新发送；若持续失败，请联系支持人员。</p></div></div>
@@ -752,29 +769,30 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         <div className="master-alert" role="status"><Icon name="status" /><div><strong>已进入 Master 分析阶段</strong><p>消息与运行标识已保存；页面会每 3 秒读取一次版本化结果。</p></div></div>
       ) : null}
       <div className="master-thread" role="log" aria-live="polite" aria-label="Master 消息记录">
-        {data.messages.length ? data.messages.map((message) => <MessageCard key={message.message_id} message={message} />) : <p className="master-thread__empty">尚无消息。发送目标或补充要求以开始规划。</p>}
+        {timeline.length ? timeline.map((item) => item.kind === "message" ? (
+          <MessageCard key={`message-${item.message.message_id}`} message={item.message} />
+        ) : (
+          <ProposalCardGroup
+            key={`proposal-${item.proposal.proposal_id}-r${item.proposal.revision}`}
+            proposal={item.proposal}
+            launchingCardId={launchingCardId}
+            onLaunchCard={(proposal, card) => {
+              launch.reset();
+              setNotice(null);
+              launch.mutate({ proposal, card });
+            }}
+            onShowDetail={(proposal, card, trigger) => {
+              reviseCard.reset();
+              detailTriggerRef.current = trigger;
+              setDetail({ proposal, card });
+            }}
+            onAdjust={(proposal) => {
+              setContent(`请调整计划 r${proposal.revision}：`);
+              requestAnimationFrame(() => composerRef.current?.focus());
+            }}
+          />
+        )) : <p className="master-thread__empty">尚无消息。发送目标或补充要求以开始规划。</p>}
       </div>
-      {proposal ? (
-        <ProposalCard
-          proposal={proposal}
-          startPolicy={data.task.start_policy}
-          confirming={confirm.isPending}
-          onConfirm={(trigger) => {
-            confirmTriggerRef.current = trigger;
-            setConfirmReview({ proposal, taskRevision: data.task_revision });
-          }}
-          onAdjust={() => {
-            setContent(`请调整计划 r${proposal.revision}：`);
-            requestAnimationFrame(() => composerRef.current?.focus());
-          }}
-          onEditCard={(card, trigger) => {
-            reviseCard.reset();
-            setNotice(null);
-            cardEditorTriggerRef.current = trigger;
-            setEditingCardId(card.card_id);
-          }}
-        />
-      ) : null}
       <form
         className="master-composer"
         onSubmit={(event) => {
@@ -794,15 +812,25 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         {append.isError ? <p className="workbench-inline-error" role="alert">{append.error.message}</p> : null}
       </form>
       <TaskCardEditorDialog
-        card={editingCard}
+        card={editingCard?.card ?? null}
         assets={data.assets}
         open={editingCard !== null}
         pending={reviseCard.isPending}
         error={reviseCard.isError ? reviseCard.error.message : null}
         onCancel={() => { if (!reviseCard.isPending) closeCardEditor(); }}
-        onSave={(editable) => { if (editingCard) reviseCard.mutate({ card: editingCard, editable }); }}
+        onSave={(editable) => reviseCard.mutate({ editable })}
       />
-      <ConfirmDialog proposal={confirmReview?.proposal ?? null} taskRevision={confirmReview?.taskRevision ?? null} open={confirmReview !== null} pending={confirm.isPending} error={confirm.isError ? confirm.error.message : null} onCancel={closeConfirmReview} onConfirm={() => confirm.mutate()} />
+      <TaskCardDetailDialog
+        detail={detail}
+        editable={detail?.proposal.status === "PENDING_CONFIRMATION"}
+        onClose={closeDetail}
+        onEdit={() => {
+          if (!detail) return;
+          cardEditorTriggerRef.current = detailTriggerRef.current;
+          setDetail(null);
+          setEditingCard(detail);
+        }}
+      />
     </section>
   );
 }

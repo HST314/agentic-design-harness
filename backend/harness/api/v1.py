@@ -84,7 +84,7 @@ class RetryStartOperationRequest(StrictRequest):
 
 class CreateTaskIntakeRequest(StrictRequest):
     prompt: str = Field(min_length=1, max_length=20_000)
-    start_policy: Literal["manual", "auto"] = "manual"
+    start_policy: Literal["manual", "auto"] | None = None
     envelope: CommandEnvelope
 
 
@@ -327,10 +327,18 @@ def build_v1_router(container: Container) -> APIRouter:
 
     @router.post("/task-intakes", tags=["tasks"])
     async def create_task_intake(body: CreateTaskIntakeRequest) -> dict[str, Any]:
+        start_policy = body.start_policy
+        if start_policy is None:
+            snapshot = container.task_config.process_snapshot
+            start_policy = (
+                "manual"
+                if snapshot is None
+                else snapshot.runtime.master.default_start_policy
+            )
         return await run_in_threadpool(
             container.task_intakes.create,
             prompt=body.prompt,
-            start_policy=body.start_policy,
+            start_policy=start_policy,
             envelope=body.envelope,
         )
 

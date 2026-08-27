@@ -94,6 +94,7 @@ test.beforeEach(async ({ page }) => {
         thread_revision: 1,
         messages: [],
         latest_proposal: null,
+        proposals: [],
         task: {
           schema_version: "1.0",
           task_id: "task_launch_campaign",

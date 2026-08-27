@@ -1,95 +1,98 @@
-import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
-import type { ContractPlanProposal } from "../../api/generated-contracts";
-import { ConfirmDialog } from "./MasterThreadPage";
+import type { MasterSessionProposal } from "../../api/client";
+import type {
+  ContractMasterMessage,
+  ContractPlanProposal,
+} from "../../api/generated-contracts";
+import { buildMasterTimeline, startStageLabel } from "./MasterThreadPage";
 
-function proposalWithCards(titles: string[]): ContractPlanProposal {
-  const stages = titles.map((_, index) => ({
-    stage_id: `stage_${index + 1}`,
-    type: "image" as const,
-    position: index + 1,
-    depends_on: [],
-    required: true,
-  }));
+function message(messageId: string, sequence: number): ContractMasterMessage {
   return {
     schema_version: "1.0",
-    proposal_id: "proposal_batch",
+    message_id: messageId,
     task_id: "task_batch",
-    revision: 1,
+    sequence,
+    role: "master",
+    kind: "plan_proposal",
+    content: `内容 ${messageId}`,
+    asset_refs: [],
+    created_at: "2026-08-27T00:00:00Z",
+  };
+}
+
+function proposal(
+  proposalId: string,
+  revision: number,
+  messageId: string | null,
+): MasterSessionProposal {
+  const base: ContractPlanProposal = {
+    schema_version: "1.0",
+    proposal_id: proposalId,
+    task_id: "task_batch",
+    revision,
     status: "PENDING_CONFIRMATION",
-    stages,
-    work_items: titles.map((title, index) => ({
-      schema_version: "1.0",
-      work_item_id: `work_${index + 1}`,
-      task_id: "task_batch",
-      stage_id: `stage_${index + 1}`,
-      title,
-      agent_type: "image" as const,
-      required: true,
-      depends_on: [],
-      current_instance_id: `instance_${index + 1}`,
-      instance_ids: [`instance_${index + 1}`],
-      task_card_ids: [`card_${index + 1}`],
-    })),
-    execution_cards: titles.map((_, index) => ({
-      schema_version: "1.1",
-      card_id: `card_${index + 1}`,
-      revision: 1,
-      task_id: "task_batch",
-      stage_id: `stage_${index + 1}`,
-      instance_id: `instance_${index + 1}`,
-      agent_type: "image" as const,
-      objective: `Create ${titles[index]}.`,
-      instructions: ["Use the written requirements."],
-      input_assets: [],
-      expected_deliveries: [
-        {
-          kind: "image" as const,
-          role: "key_visual",
-          required: true,
-          accepted_mime_types: ["image/png"],
-        },
-      ],
-      parameters: { variants: 1 },
-      created_at: "2026-08-27T00:00:00Z",
-    })),
+    stages: [],
+    work_items: [],
+    execution_cards: [],
     created_at: "2026-08-27T00:00:00Z",
     updated_at: "2026-08-27T00:00:00Z",
     confirmed_at: null,
   };
+  return { ...base, message_id: messageId };
 }
 
-function renderDialog(proposal: ContractPlanProposal): string {
-  return renderToStaticMarkup(
-    <ConfirmDialog
-      proposal={proposal}
-      taskRevision={2}
-      open={false}
-      pending={false}
-      error={null}
-      onCancel={() => undefined}
-      onConfirm={() => undefined}
-    />,
-  );
-}
+describe("buildMasterTimeline", () => {
+  test("inserts each proposal card group directly after its own message", () => {
+    const items = buildMasterTimeline(
+      [message("m1", 1), message("m2", 2), message("m3", 3)],
+      [proposal("p2", 2, "m2"), proposal("p1", 1, "m1")],
+    );
 
-describe("ConfirmDialog", () => {
-  test("lists N cards as an all-checked checkbox list with one batch start button", () => {
-    const markup = renderDialog(proposalWithCards(["北工大 A 海报", "北工大 B 文化墙"]));
-
-    expect(markup.match(/type="checkbox"/g)).toHaveLength(2);
-    expect(markup.match(/checked=""/g)).toHaveLength(2);
-    expect(markup).toContain("北工大 A 海报");
-    expect(markup).toContain("北工大 B 文化墙");
-    expect(markup).toContain("批量启动");
-    expect(markup).not.toContain("批量启动需勾选全部任务卡");
+    expect(items.map((item) => (item.kind === "message" ? item.message.message_id : item.proposal.proposal_id))).toEqual([
+      "m1",
+      "p1",
+      "m2",
+      "p2",
+      "m3",
+    ]);
   });
 
-  test("keeps the single-card confirm label for one-card plans", () => {
-    const markup = renderDialog(proposalWithCards(["北工大 A 海报"]));
+  test("keeps every plan version in the flow and appends orphan proposals at the end", () => {
+    const items = buildMasterTimeline(
+      [message("m1", 1)],
+      [proposal("p1", 1, "m1"), proposal("p2", 2, "missing_message"), proposal("p3", 3, null)],
+    );
 
-    expect(markup.match(/type="checkbox"/g)).toHaveLength(1);
-    expect(markup).toContain("确认并启动");
-    expect(markup).not.toContain("批量启动");
+    expect(items.map((item) => (item.kind === "message" ? item.message.message_id : item.proposal.proposal_id))).toEqual([
+      "m1",
+      "p1",
+      "p2",
+      "p3",
+    ]);
+  });
+
+  test("returns only proposals when the thread has no messages yet", () => {
+    const items = buildMasterTimeline([], [proposal("p1", 1, null)]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "proposal" });
+  });
+});
+
+describe("startStageLabel", () => {
+  test("maps backend start states to the Chinese live status labels", () => {
+    const base = {
+      attempt: 1,
+      launch_id: null,
+      side_effect_stage: "NONE",
+      last_error: null,
+      updated_at: "2026-08-27T00:00:00Z",
+    };
+    expect(startStageLabel(null)).toBe("已受理");
+    expect(startStageLabel({ ...base, state: "PENDING" })).toBe("已受理");
+    expect(startStageLabel({ ...base, state: "PREPARING" })).toBe("准备运行环境");
+    expect(startStageLabel({ ...base, state: "PROCESS_STARTING" })).toBe("启动进程");
+    expect(startStageLabel({ ...base, state: "AGENT_STARTING" })).toBe("健康检查");
+    expect(startStageLabel({ ...base, state: "RUNNING" })).toBe("已就绪");
   });
 });

@@ -14,6 +14,7 @@ const harnessSettings = {
     max_tool_rounds: 8,
     max_clarification_questions: 3,
     require_plan_confirmation: true,
+    default_start_policy: "manual",
   },
   document_processing: {
     max_files_per_task: 20,

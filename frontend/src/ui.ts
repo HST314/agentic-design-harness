@@ -1,4 +1,4 @@
-import type { AgentInstance, ApiClient, InboxItem, UsageSummary } from "./api/client";
+import type { AgentInstance, ApiClient, CommandEnvelope, InboxItem, UsageSummary } from "./api/client";
 import {
   navigate,
   routePath,
@@ -144,7 +144,7 @@ export function operationId(prefix: string): string {
   return `${prefix}_${suffix}`;
 }
 
-export function commandEnvelope(actorType: "human" | "master", actorId: string, revision: number): Record<string, unknown> {
+export function commandEnvelope(actorType: "human" | "master", actorId: string, revision: number): CommandEnvelope {
   return {
     idempotency_key: operationId("ui"),
     expected_revision: revision,
