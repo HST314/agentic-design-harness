@@ -40,7 +40,14 @@ TEXT_SUFFIXES = {
 ALLOWED_REDACTION_FIXTURES = {
     Path("agents/image_agent_mvp/tests/test_refactor.py"): frozenset(
         {"Bearer " + "sensitive-provider-value"}
-    )
+    ),
+    Path("agents/ppt-agent/tests/test_sqlite_storage.py"): frozenset(
+        {
+            "Bearer " + "audit-secret-token",
+            "Basic " + "YmFzaWMtc2VjcmV0LTAz",
+            "Bearer " + "bearer-secret-04",
+        }
+    ),
 }
 
 
