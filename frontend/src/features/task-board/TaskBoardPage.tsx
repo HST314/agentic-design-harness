@@ -116,7 +116,7 @@ function EmptyColumn({ text }: { text: string }): React.JSX.Element {
   return <p className="task-board__empty">{text}</p>;
 }
 
-function BoardView({ items }: { items: ContractWorkItemProjection[] }): React.JSX.Element {
+export function BoardView({ items }: { items: ContractWorkItemProjection[] }): React.JSX.Element {
   const [terminalFilter, setTerminalFilter] = useState<"all" | "completed" | "exception">("all");
   const columns: Array<{
     id: string;

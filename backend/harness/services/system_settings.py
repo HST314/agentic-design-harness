@@ -309,6 +309,75 @@ class SystemSettingsService:
             "items": items,
         }
 
+    def broadcast_task(self, task_id: str, *, actor: dict[str, str]) -> dict[str, Any]:
+        """Push the current global Image Agent defaults to one task's instances."""
+
+        if actor.get("actor_type") != "human" or not actor.get("actor_id"):
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only a human operator may broadcast task settings.",
+            )
+        validate_identifier(task_id, "task_id")
+        task = self.store.task.get(task_id, task_id)
+        if task is None:
+            raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "The task has no saved WorkItem plan to receive settings.",
+                {"task_id": task_id},
+            )
+        snapshot = self.task_config.require_process_snapshot()
+        items: list[dict[str, Any]] = []
+        for instance in plan["instances"]:
+            if instance.get("agent_type") != "image":
+                continue
+            instance_id = str(instance["instance_id"])
+            if instance.get("status") in {
+                "SUCCEEDED", "FAILED", "CANCELLED", "SUPERSEDED", "ARCHIVED", "CRASHED"
+            }:
+                items.append(
+                    {
+                        "task_id": task_id,
+                        "instance_id": instance_id,
+                        "status": "COMPLETED_HISTORY_UNCHANGED",
+                    }
+                )
+                continue
+            try:
+                items.append(
+                    self._distribute_instance(task_id, instance_id, snapshot, actor)
+                )
+            except HarnessError as exc:
+                items.append(
+                    {
+                        "task_id": task_id,
+                        "instance_id": instance_id,
+                        "status": "FAILED",
+                        "error_code": exc.code,
+                        "message": exc.message,
+                    }
+                )
+        return {
+            "schema_version": "1.0",
+            "task_id": task_id,
+            "revision": snapshot.revision,
+            "updated": sum(
+                item["status"] in {"APPLIED_BEFORE_START", "APPLIED_ON_BRANCH"}
+                for item in items
+            ),
+            "waiting_safe_point": sum(
+                item["status"] == "WAITING_SAFE_POINT" for item in items
+            ),
+            "unchanged": sum(item["status"] == "UNCHANGED" for item in items),
+            "failed": sum(item["status"] == "FAILED" for item in items),
+            "completed_history_unchanged": sum(
+                item["status"] == "COMPLETED_HISTORY_UNCHANGED" for item in items
+            ),
+            "items": items,
+        }
+
     def _distribute_instance(
         self,
         task_id: str,
@@ -334,6 +403,14 @@ class SystemSettingsService:
         patch = self._replacement_patch(
             current["manifest"]["overrides"], target_overrides
         )
+        if not patch:
+            return {
+                "task_id": task_id,
+                "instance_id": instance_id,
+                "status": "UNCHANGED",
+                "revision_id": current["manifest"]["revision_id"],
+                "branch_id": None,
+            }
         task_store_revision = self.store.task.revision(task_id, task_id)
         token = digest_json({"system_revision": candidate.revision})[:16]
         instance_token = digest_json(
@@ -363,6 +440,7 @@ class SystemSettingsService:
                 actor_id=str(actor["actor_id"]),
                 expected_revision=task_store_revision,
             ),
+            _propagate=False,
         )
         atomic_write_json(
             self._instance_distribution_path(task_id, instance_id),
