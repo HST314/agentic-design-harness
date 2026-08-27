@@ -91,8 +91,7 @@ test.beforeEach(async ({ page }) => {
 
 test("shows one stable logical card per WorkItem and supports terminal filtering", async ({ page }) => {
   await page.goto("/tasks/task_board_e2e/board");
-  await expect(page.getByRole("heading", { name: "当前任务看板" })).toBeVisible();
-  await expect(page.getByText("活动态 · 每 3 秒刷新")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "待办" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "运行中" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "待审批" })).toBeVisible();
@@ -128,7 +127,6 @@ test("opens a refresh-safe WorkItem drawer with raw status and attempt history",
 
 test("renders ordered Stage dependencies and a truthful PPT boundary", async ({ page }) => {
   await page.goto("/tasks/task_board_e2e/plan");
-  await expect(page.getByRole("heading", { name: "任务计划" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Image 设计阶段" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "PPT 设计阶段" })).toBeVisible();
   await expect(page.getByText("依赖 S1 Image")).toBeVisible();

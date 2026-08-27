@@ -231,22 +231,8 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
     && (stageId === "all" || item.stage.stage_id === stageId)
   )), [agent, projection.data?.items, stageId]);
   const title = view === "board" ? "当前任务看板" : "任务计划";
-  const description = view === "board"
-    ? "按业务状态扫描逻辑子任务；运行状态由系统投影，不能拖拽修改。"
-    : "按 Stage 顺序查看依赖、必需性、Agent 可用性与同一逻辑子任务入口。";
   return (
-    <section className={`workbench-page task-projection task-projection--${view}`} aria-labelledby="task-projection-title">
-      <header className="workbench-page__header task-projection__header">
-        <div>
-          <h1 id="task-projection-title">{title}</h1>
-          <p>{description}</p>
-        </div>
-        {projection.data ? (
-          <div className="task-projection__freshness" role="status" aria-live="polite">
-            <Icon name="retry" />{projection.data.refresh_after_ms === 3_000 ? "活动态 · 每 3 秒刷新" : "稳定态 · 每 5 秒刷新"}
-          </div>
-        ) : null}
-      </header>
+    <section className={`workbench-page task-projection task-projection--${view}`} aria-label={title}>
       <TaskTabs taskId={taskId} />
       {projection.isPending ? <div className="task-projection__loading" role="status">正在构建 WorkItem 投影…</div> : null}
       {projection.isError ? <div className="task-projection__error" role="alert"><strong>无法读取子任务投影</strong><span>{projection.error.message}</span><button type="button" className="workbench-secondary-button" onClick={() => void projection.refetch()}>重新读取</button></div> : null}

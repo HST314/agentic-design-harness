@@ -150,7 +150,7 @@ function StartProgressBar({ operation }: { operation: StartOperation | null | un
   );
 }
 
-export function TaskTabs({ taskId }: { taskId: string }): React.JSX.Element {
+export function TaskTabs({ taskId, trailing }: { taskId: string; trailing?: React.ReactNode }): React.JSX.Element {
   const base = `/tasks/${encodeURIComponent(taskId)}`;
   return (
     <nav className="workbench-task-tabs" aria-label="任务工作区">
@@ -158,6 +158,7 @@ export function TaskTabs({ taskId }: { taskId: string }): React.JSX.Element {
       <NavLink to={`${base}/board`}><Icon name="board" />看板</NavLink>
       <NavLink to={`${base}/plan`}><Icon name="plan" />计划</NavLink>
       <NavLink to={`${base}/deliveries`}><Icon name="file-check" />交付</NavLink>
+      {trailing ? <span className="workbench-task-tabs__trailing">{trailing}</span> : null}
     </nav>
   );
 }

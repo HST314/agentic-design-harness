@@ -218,6 +218,7 @@ export function AppShell(): React.JSX.Element {
   const groups = useMemo(() => historyGroups(tasks.data?.items ?? [], search), [search, tasks.data?.items]);
   const currentTask = taskId ? tasks.data?.items.find((task) => task.task_id === taskId) : undefined;
   const sectionLabel = sectionFromPath(location.pathname);
+  const flushMain = location.pathname.includes("/work-items/");
   const presentation = useMutation({
     mutationFn: ({ task, patch }: { task: TaskSummary; patch: { title?: string; pinned?: boolean; archived?: boolean } }) => api.updateTaskPresentation(task.task_id, {
       ...patch,
@@ -308,7 +309,6 @@ export function AppShell(): React.JSX.Element {
         <div className="workbench-center">
           <header className="workbench-topbar">
             <div className="workbench-topbar__lead">
-              <p className="workbench-eyebrow">{sectionLabel}</p>
               <p className="workbench-context">
                 <span className="workbench-context__title">{currentTask ? currentTask.title : taskId ? "当前任务" : sectionLabel}</span>
                 {currentTask ? (
@@ -339,7 +339,7 @@ export function AppShell(): React.JSX.Element {
             </div>
           </header>
           <p className="workbench-width-notice" role="note">工作台当前保证 1280px 及以上桌面宽度。</p>
-          <main id="workbench-main" className="workbench-main" tabIndex={-1}>
+          <main id="workbench-main" className={`workbench-main${flushMain ? " workbench-main--flush" : ""}`} tabIndex={-1}>
             <Outlet />
           </main>
         </div>

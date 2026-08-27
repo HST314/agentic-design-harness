@@ -67,8 +67,7 @@ test("embeds only the server-approved current Image instance", async ({ page }) 
   await page.route("http://127.0.0.1:19091/", async (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><html><body><main><h1>Image Agent Studio</h1><a download href='data:text/plain,asset'>下载交付物</a></main></body></html>" }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_image");
-  await expect(page.getByRole("heading", { name: "KV 方向 A" })).toBeVisible();
-  await expect(page.getByText("专业工作台连接已验证")).toBeVisible();
+  await expect(page.locator(".agent-workbench")).toBeVisible();
   await expect(page.locator("body")).not.toContainText(/Adapter|frame 策略|iframe|sandbox/);
   const iframe = page.locator("iframe[title='Image Agent 工作台：KV 方向 A']");
   await expect(iframe).toHaveAttribute("src", "http://127.0.0.1:19091/");
