@@ -6,7 +6,14 @@ import type {
   SystemSettingsPreview,
 } from "../../api/client";
 import { ApiError } from "../../api/client";
-import { api, systemSettingsQuery } from "../../api/queries";
+import { api, systemSettingsQuery, taskHistoryQuery } from "../../api/queries";
+
+function broadcastIdempotencyKey(): string {
+  const suffix = typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().replaceAll("-", "")
+    : `${Date.now()}${Math.random().toString(16).slice(2)}`;
+  return `task_settings_broadcast_${suffix}`.slice(0, 128);
+}
 
 type SettingsTab = "harness" | "image-agent";
 type Draft = {
@@ -124,13 +131,44 @@ function ToggleField({
 export function SystemSettingsPage(): React.JSX.Element {
   const queryClient = useQueryClient();
   const settings = useQuery(systemSettingsQuery);
+  const tasks = useQuery(taskHistoryQuery);
   const [tab, setTab] = useState<SettingsTab>("harness");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [baseRevision, setBaseRevision] = useState("");
   const [preview, setPreview] = useState<SystemSettingsPreview | null>(null);
   const [publicationMessage, setPublicationMessage] = useState<string | null>(null);
+  const [broadcastTaskId, setBroadcastTaskId] = useState("");
+  const [broadcastMessage, setBroadcastMessage] = useState<string | null>(null);
   const dirtyPaths = useRef(new Set<string>());
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const taskItems = tasks.data?.items ?? [];
+  useEffect(() => {
+    const first = taskItems[0];
+    if (!broadcastTaskId && first) {
+      setBroadcastTaskId(first.task_id);
+    }
+  }, [broadcastTaskId, taskItems]);
+
+  const broadcastMutation = useMutation({
+    mutationFn: () => {
+      const task = taskItems.find((item) => item.task_id === broadcastTaskId);
+      if (!task) throw new Error("请选择要下发的任务。");
+      return api.broadcastTaskSettings(task.task_id, {
+        idempotency_key: broadcastIdempotencyKey(),
+        actor_type: "human",
+        actor_id: "human_operator",
+        expected_revision: task.revision,
+      });
+    },
+    onSuccess: (result) => {
+      setBroadcastMessage(
+        result.failed
+          ? `下发完成，但 ${result.failed} 个实例失败（${result.items.find((item) => item.status === "FAILED")?.message ?? "未知错误"}）。`
+          : `已下发：${result.updated} 个实例已更新，${result.waiting_safe_point} 个将在安全检查点应用，${result.unchanged} 个已是最新。`,
+      );
+    },
+  });
 
   useEffect(() => {
     if (!settings.data || dirtyPaths.current.size > 0) return;
@@ -350,6 +388,32 @@ export function SystemSettingsPage(): React.JSX.Element {
                 <label className="settings-field" key={key} htmlFor={`agent-model-${key}`}><span>{label}</span><select id={`agent-model-${key}`} value={draft.image.advanced_model_overrides[key] ?? ""} onChange={(event) => update(`image.advanced_model_overrides.${key}`, event.currentTarget.value || null)}><option value="">继承 Harness 映射</option>{(options[group] ?? []).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
               ))}
             </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section__heading"><h2>按任务下发</h2><p>把当前已发布的全局 Image Agent 默认立即推送到所选任务的全部 Image 实例；未启动实例立即生效，运行中实例在最近安全检查点应用，实例私有覆盖保持不变。</p></div>
+            <div className="settings-grid settings-grid--two">
+              <label className="settings-field" htmlFor="broadcast-task">
+                <span>目标任务</span>
+                <select id="broadcast-task" value={broadcastTaskId} onChange={(event) => { setBroadcastTaskId(event.currentTarget.value); setBroadcastMessage(null); broadcastMutation.reset(); }}>
+                  {taskItems.length ? taskItems.map((item) => (
+                    <option key={item.task_id} value={item.task_id}>{item.title}</option>
+                  )) : <option value="">暂无可选任务</option>}
+                </select>
+              </label>
+            </div>
+            <div className="settings-toggle-list">
+              <button
+                type="button"
+                className="workbench-secondary-button"
+                disabled={broadcastMutation.isPending || !broadcastTaskId}
+                onClick={() => broadcastMutation.mutate()}
+              >
+                {broadcastMutation.isPending ? "正在下发…" : "立即下发给本任务所有 image-agent"}
+              </button>
+            </div>
+            {broadcastMessage ? <p role="status">{broadcastMessage}</p> : null}
+            {broadcastMutation.isError ? <p className="workbench-inline-error" role="alert">{broadcastMutation.error.message}</p> : null}
           </section>
         </div>
       )}

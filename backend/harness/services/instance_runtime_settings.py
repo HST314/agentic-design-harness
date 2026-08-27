@@ -72,6 +72,8 @@ class InstanceRuntimeSettingsService:
         self.observability = observability
         self.saga_root = store.layout.control_root / "runtime-config-sagas"
         self.saga_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.sync_toggle_root = store.layout.control_root / "instance-sync-toggles"
+        self.sync_toggle_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def get(self, task_id: str, instance_id: str) -> dict[str, Any]:
         instance = self._image_instance(task_id, instance_id)
@@ -142,6 +144,8 @@ class InstanceRuntimeSettingsService:
             ),
             "workflow_boundary": self._workflow_boundary(task_id, instance),
             "sync_candidates": self._sync_candidates(task_id, instance_id),
+            "sync_to_peers": self._sync_to_peers(task_id, instance_id),
+            "sync_peers": self._sync_peers(task_id, instance_id),
             "pending_application": self._pending_projection(task_id, instance_id),
             "last_application_failure": self._last_failure_projection(
                 task_id, instance_id
@@ -317,6 +321,7 @@ class InstanceRuntimeSettingsService:
         *,
         envelope: CommandEnvelope,
         crash_hook: CrashHook | None = None,
+        _propagate: bool = True,
     ) -> dict[str, Any]:
         self._require_settings_actor(envelope)
         validate_identifier(proposal_id, "proposal_id")
@@ -517,11 +522,28 @@ class InstanceRuntimeSettingsService:
                     replay = self._complete_local_saga(saga)
                 else:
                     replay = self._saga_response(saga)
+        peer_sync = None
+        if (
+            _propagate
+            and replay["status"] != "FAILED"
+            and self._sync_to_peers(task_id, instance_id)
+        ):
+            peer_sync = self._fan_out_to_peers(
+                task_id,
+                instance_id,
+                proposal=proposal,
+                envelope=envelope,
+            )
         if replay["status"] in {"APPLIED_BEFORE_START", "APPLIED_ON_BRANCH", "FAILED"}:
             if replay["status"] == "FAILED":
                 self._raise_saga_failure(saga)
+            if peer_sync is not None:
+                replay["peer_sync"] = peer_sync
             return replay
-        return self.apply_pending_if_safe(task_id, instance_id, crash_hook=crash_hook) or replay
+        result = self.apply_pending_if_safe(task_id, instance_id, crash_hook=crash_hook) or replay
+        if peer_sync is not None:
+            result["peer_sync"] = peer_sync
+        return result
 
     def apply_pending_if_safe(
         self,
@@ -1049,6 +1071,267 @@ class InstanceRuntimeSettingsService:
                     }
                 )
         return sorted(candidates, key=lambda item: item["instance_id"])
+
+    def set_sync_to_peers(
+        self,
+        task_id: str,
+        work_item_id: str,
+        *,
+        sync_to_peers: bool,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Persist the per-instance "sync settings changes to task peers" switch."""
+
+        self._require_settings_actor(envelope)
+        validate_identifier(task_id, "task_id")
+        validate_identifier(work_item_id, "work_item_id")
+        instance_id = self._current_instance_for_work_item(task_id, work_item_id)
+        self._image_instance(task_id, instance_id)
+        with FileLock(
+            application_task_lock_path(self.store, task_id),
+            self.store.lock_timeout_seconds,
+        ):
+            self._validate_task_revision(task_id, envelope.expected_revision)
+            now = utc_now()
+            document = {
+                "schema_version": "1.0",
+                "task_id": task_id,
+                "instance_id": instance_id,
+                "sync_to_peers": bool(sync_to_peers),
+                "updated_at": now,
+                "updated_by": {
+                    "actor_type": envelope.actor_type,
+                    "actor_id": envelope.actor_id,
+                },
+            }
+            validate_public_config_tree(document)
+            atomic_write_json(
+                self._sync_toggle_path(task_id, instance_id), document, mode=0o640
+            )
+        self.observability.event(
+            task_id,
+            "CONFIG_SYNC_TOGGLED",
+            actor=document["updated_by"],
+            fields={
+                "instance_id": instance_id,
+                "work_item_id": work_item_id,
+                "sync_to_peers": bool(sync_to_peers),
+                "result": "TOGGLED",
+            },
+        )
+        return {
+            "schema_version": "1.0",
+            "task_id": task_id,
+            "work_item_id": work_item_id,
+            "instance_id": instance_id,
+            "sync_to_peers": bool(sync_to_peers),
+            "sync_peers": self._sync_peers(task_id, instance_id),
+            "updated_at": now,
+        }
+
+    def _sync_to_peers(self, task_id: str, instance_id: str) -> bool:
+        path = self._sync_toggle_path(task_id, instance_id)
+        if not path.is_file():
+            return False
+        return bool(read_json(path).get("sync_to_peers"))
+
+    def _sync_peers(self, task_id: str, source_instance_id: str) -> list[dict[str, Any]]:
+        """Every other Image instance of the task, regardless of start state."""
+
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            return []
+        work_item_ids = self._work_item_ids(task_id, plan=plan)
+        peers = []
+        for instance in plan["instances"]:
+            if instance["instance_id"] == source_instance_id:
+                continue
+            if instance.get("agent_type") != "image":
+                continue
+            peers.append(
+                {
+                    "instance_id": instance["instance_id"],
+                    "work_item_id": work_item_ids[instance["instance_id"]],
+                    "started": not is_unstarted_image_instance(
+                        self.store, task_id, instance
+                    ),
+                }
+            )
+        return sorted(peers, key=lambda item: item["instance_id"])
+
+    def _fan_out_to_peers(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        proposal: dict[str, Any],
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Propagate a confirmed override set to every Image peer of the task.
+
+        Each peer receives an independent propose/confirm with idempotency keys
+        derived from the source proposal, so crash recovery and client retries
+        never double-apply. Peers never re-propagate (``_propagate=False``).
+        """
+
+        try:
+            peers = self._sync_peers(task_id, instance_id)
+        except HarnessError as exc:
+            return self._peer_sync_summary(
+                [
+                    {
+                        "instance_id": None,
+                        "status": "FAILED",
+                        "error_code": exc.code,
+                        "message": exc.message,
+                    }
+                ]
+            )
+        items: list[dict[str, Any]] = []
+        for peer in peers:
+            peer_id = peer["instance_id"]
+            instance = self.store.instance.get(task_id, peer_id)
+            if instance is None or instance.get("status") in _LOCKED_INSTANCE_STATES:
+                items.append(
+                    {"instance_id": peer_id, "status": "COMPLETED_HISTORY_UNCHANGED"}
+                )
+                continue
+            token = digest_json(
+                {"proposal_id": proposal["proposal_id"], "instance_id": peer_id}
+            )[:16]
+            propose_key = f"peer-sync-propose-{token}"
+            confirm_key = f"peer-sync-confirm-{token}"
+            proposal_id = self._proposal_id(task_id, peer_id, propose_key)
+            try:
+                if not self._proposal_path(task_id, peer_id, proposal_id).is_file():
+                    current = self.materializer.revisions.read_current(task_id, peer_id)
+                    if current is None:
+                        self.materializer.materialize(task_id, peer_id)
+                        current = self.materializer.revisions.read_current(
+                            task_id, peer_id
+                        )
+                    assert current is not None
+                    patch = self._replacement_patch(
+                        current["manifest"]["overrides"], proposal["overrides"]
+                    )
+                    if not patch:
+                        items.append({"instance_id": peer_id, "status": "UNCHANGED"})
+                        continue
+                    self.propose(
+                        task_id,
+                        peer_id,
+                        base_revision=int(current["state"]["revision"]),
+                        patch=patch,
+                        sync_unstarted_image_work_items=False,
+                        expected_sync_instance_ids=[],
+                        envelope=CommandEnvelope(
+                            idempotency_key=propose_key,
+                            actor_type=envelope.actor_type,
+                            actor_id=envelope.actor_id,
+                            expected_revision=self.store.task.revision(
+                                task_id, task_id
+                            ),
+                        ),
+                    )
+                applied = self.confirm(
+                    task_id,
+                    peer_id,
+                    proposal_id,
+                    envelope=CommandEnvelope(
+                        idempotency_key=confirm_key,
+                        actor_type=envelope.actor_type,
+                        actor_id=envelope.actor_id,
+                        expected_revision=self.store.task.revision(task_id, task_id),
+                    ),
+                    _propagate=False,
+                )
+                items.append(
+                    {
+                        "instance_id": peer_id,
+                        "status": applied["status"],
+                        "revision_id": applied["revision_id"],
+                        "branch_id": applied.get("branch_id"),
+                    }
+                )
+            except HarnessError as exc:
+                items.append(
+                    {
+                        "instance_id": peer_id,
+                        "status": "FAILED",
+                        "error_code": exc.code,
+                        "message": exc.message,
+                    }
+                )
+        return self._peer_sync_summary(items)
+
+    @staticmethod
+    def _peer_sync_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "updated": sum(
+                item["status"] in {"APPLIED_BEFORE_START", "APPLIED_ON_BRANCH"}
+                for item in items
+            ),
+            "waiting_safe_point": sum(
+                item["status"] == "WAITING_SAFE_POINT" for item in items
+            ),
+            "unchanged": sum(item["status"] == "UNCHANGED" for item in items),
+            "failed": sum(item["status"] == "FAILED" for item in items),
+            "completed_history_unchanged": sum(
+                item["status"] == "COMPLETED_HISTORY_UNCHANGED" for item in items
+            ),
+            "items": items,
+        }
+
+    @staticmethod
+    def _replacement_patch(
+        current: dict[str, Any], target: dict[str, Any]
+    ) -> dict[str, Any]:
+        patch: dict[str, Any] = {}
+        for field in RUNTIME_SETTING_FIELDS:
+            before = current.get(field)
+            after = target.get(field)
+            if before == after:
+                continue
+            if isinstance(before, dict) or isinstance(after, dict):
+                before_nested = before if isinstance(before, dict) else {}
+                after_nested = after if isinstance(after, dict) else {}
+                patch[field] = {
+                    key: deepcopy(after_nested[key]) if key in after_nested else None
+                    for key in sorted(set(before_nested) | set(after_nested))
+                }
+            else:
+                patch[field] = deepcopy(after) if field in target else None
+        return patch
+
+    def _current_instance_for_work_item(self, task_id: str, work_item_id: str) -> str:
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Runtime settings require a saved WorkItem plan.",
+                {"task_id": task_id},
+            )
+        stages = sorted(plan["stages"], key=lambda item: item["position"])
+        for item in logical_work_items(self.store, task_id, plan, stages):
+            if item["work_item_id"] != work_item_id:
+                continue
+            instance_id = item.get("current_instance_id")
+            if isinstance(instance_id, str) and instance_id:
+                return instance_id
+            break
+        raise HarnessError(
+            "TASK_NOT_FOUND",
+            "The requested WorkItem does not exist in the selected task.",
+            {"task_id": task_id, "work_item_id": work_item_id},
+        )
+
+    def _sync_toggle_path(self, task_id: str, instance_id: str) -> Path:
+        validate_identifier(task_id, "task_id")
+        validate_identifier(instance_id, "instance_id")
+        root = self.sync_toggle_root / task_id
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return root / f"{instance_id}.json"
 
     def _work_item_ids(
         self, task_id: str, *, plan: dict[str, Any] | None = None

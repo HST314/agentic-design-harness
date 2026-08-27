@@ -69,4 +69,27 @@ describe("runtime settings bridge protocol", () => {
     expect(key).toBe("workbench_confirm_bridge_request_12345678");
     expect(key.length).toBeLessThanOrEqual(128);
   });
+
+  test("accepts a strict sync toggle payload and rejects malformed ones", () => {
+    const request = {
+      ...base,
+      action: "runtime_settings.sync_toggle",
+      payload: { sync_to_peers: true },
+    };
+    expect(parseBridgeRequest(request, "instance_image", base.nonce)).toEqual(request);
+    expect(parseBridgeRequest({
+      ...request,
+      payload: { sync_to_peers: false },
+    }, "instance_image", base.nonce)).toEqual({ ...request, payload: { sync_to_peers: false } });
+    // Non-boolean flags, extra keys and empty payloads are all refused.
+    expect(parseBridgeRequest({
+      ...request,
+      payload: { sync_to_peers: "yes" },
+    }, "instance_image", base.nonce)).toBeNull();
+    expect(parseBridgeRequest({
+      ...request,
+      payload: { sync_to_peers: true, adapter_key: "secret" },
+    }, "instance_image", base.nonce)).toBeNull();
+    expect(parseBridgeRequest({ ...request, payload: {} }, "instance_image", base.nonce)).toBeNull();
+  });
 });

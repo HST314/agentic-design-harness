@@ -187,6 +187,8 @@ export interface InstanceRuntimeSettingsResponse {
   model_options: Record<string, Array<{ id: string; label: string }>>;
   workflow_boundary: Record<string, unknown>;
   sync_candidates: Array<{ instance_id: string; work_item_id?: string }>;
+  sync_to_peers: boolean;
+  sync_peers: Array<{ instance_id: string; work_item_id: string; started: boolean }>;
   pending_application: Record<string, unknown> | null;
   last_application_failure: Record<string, unknown> | null;
 }
@@ -223,6 +225,54 @@ export interface RuntimeSettingsConfirmationResponse {
   checkpoint_id: string | null;
   sync_instance_ids: string[];
   last_error: Record<string, unknown> | null;
+  peer_sync?: PeerSyncSummary;
+}
+
+export interface PeerSyncSummary {
+  enabled: boolean;
+  updated: number;
+  waiting_safe_point: number;
+  unchanged: number;
+  failed: number;
+  completed_history_unchanged: number;
+  items: Array<{
+    instance_id: string | null;
+    status: string;
+    revision_id?: string;
+    branch_id?: string | null;
+    error_code?: string;
+    message?: string;
+  }>;
+}
+
+export interface WorkItemSyncToggleResponse {
+  schema_version: "1.0";
+  task_id: string;
+  work_item_id: string;
+  instance_id: string;
+  sync_to_peers: boolean;
+  sync_peers: Array<{ instance_id: string; work_item_id: string; started: boolean }>;
+  updated_at: string;
+}
+
+export interface TaskSettingsBroadcastResponse {
+  schema_version: "1.0";
+  task_id: string;
+  revision: string;
+  updated: number;
+  waiting_safe_point: number;
+  unchanged: number;
+  failed: number;
+  completed_history_unchanged: number;
+  items: Array<{
+    task_id: string;
+    instance_id: string | null;
+    status: string;
+    revision_id?: string;
+    branch_id?: string | null;
+    error_code?: string;
+    message?: string;
+  }>;
 }
 
 export interface HarnessSettingsDocument {
@@ -812,6 +862,32 @@ export class ApiClient {
     return this.send(
       "POST",
       `/api/v1/instances/${encodeURIComponent(instanceId)}/runtime-setting-proposals/${encodeURIComponent(proposalId)}/confirm`,
+      { envelope },
+    );
+  }
+
+  setWorkItemSyncToggle(
+    taskId: string,
+    workItemId: string,
+    body: {
+      sync_to_peers: boolean;
+      envelope: CommandEnvelope;
+    },
+  ): Promise<WorkItemSyncToggleResponse> {
+    return this.send(
+      "POST",
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}/sync-toggle`,
+      body,
+    );
+  }
+
+  broadcastTaskSettings(
+    taskId: string,
+    envelope: CommandEnvelope,
+  ): Promise<TaskSettingsBroadcastResponse> {
+    return this.send(
+      "POST",
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/settings/broadcast`,
       { envelope },
     );
   }

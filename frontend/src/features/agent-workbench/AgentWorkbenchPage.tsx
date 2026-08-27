@@ -25,6 +25,7 @@ async function executeBridgeRequest(
   request: RuntimeSettingsBridgeRequest,
   instanceId: string,
   taskRevision: number | undefined,
+  scope: { taskId: string; workItemId: string },
 ): Promise<unknown> {
   if (request.action === "runtime_settings.get") {
     return api.instanceRuntimeSettings(instanceId);
@@ -38,6 +39,12 @@ async function executeBridgeRequest(
     actor_id: "human_operator",
     expected_revision: taskRevision as number,
   };
+  if (request.action === "runtime_settings.sync_toggle") {
+    return api.setWorkItemSyncToggle(scope.taskId, scope.workItemId, {
+      sync_to_peers: Boolean(request.payload.sync_to_peers),
+      envelope,
+    });
+  }
   if (request.action === "runtime_settings.propose") {
     return api.proposeInstanceRuntimeSettings(instanceId, {
       base_revision: Number(request.payload.base_revision),
@@ -210,7 +217,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
       const consumedNonce = nonce;
       const nextNonce = newBridgeNonce();
       nonce = nextNonce;
-      void executeBridgeRequest(request, instanceId, link.data?.task_revision).then(
+      void executeBridgeRequest(request, instanceId, link.data?.task_revision, { taskId, workItemId }).then(
         (payload) => post({
           protocol: RUNTIME_SETTINGS_BRIDGE_PROTOCOL,
           version: RUNTIME_SETTINGS_BRIDGE_VERSION,

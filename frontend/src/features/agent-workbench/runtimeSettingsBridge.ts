@@ -4,7 +4,8 @@ export const RUNTIME_SETTINGS_BRIDGE_VERSION = "1.0";
 export type RuntimeSettingsBridgeAction =
   | "runtime_settings.get"
   | "runtime_settings.propose"
-  | "runtime_settings.confirm";
+  | "runtime_settings.confirm"
+  | "runtime_settings.sync_toggle";
 
 export interface RuntimeSettingsBridgeRequest {
   protocol: typeof RUNTIME_SETTINGS_BRIDGE_PROTOCOL;
@@ -126,6 +127,10 @@ function validPayload(action: RuntimeSettingsBridgeAction, payload: Record<strin
       && typeof payload.proposal_id === "string"
       && IDENTIFIER.test(payload.proposal_id);
   }
+  if (action === "runtime_settings.sync_toggle") {
+    return Object.keys(payload).length === 1
+      && typeof payload.sync_to_peers === "boolean";
+  }
   const allowed = new Set([
     "base_revision",
     "overrides",
@@ -162,7 +167,7 @@ export function parseBridgeRequest(
     || value.nonce !== nonce
     || typeof value.request_id !== "string"
     || !REQUEST_ID.test(value.request_id)
-    || !["runtime_settings.get", "runtime_settings.propose", "runtime_settings.confirm"].includes(String(value.action))
+    || !["runtime_settings.get", "runtime_settings.propose", "runtime_settings.confirm", "runtime_settings.sync_toggle"].includes(String(value.action))
     || !record(value.payload)) return null;
   const action = value.action as RuntimeSettingsBridgeAction;
   if (!validPayload(action, value.payload)) return null;

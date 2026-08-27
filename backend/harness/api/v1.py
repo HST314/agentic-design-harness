@@ -287,6 +287,15 @@ class TaskConfigRebaseRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class WorkItemSyncToggleRequest(StrictRequest):
+    sync_to_peers: bool
+    envelope: CommandEnvelope
+
+
+class TaskSettingsBroadcastRequest(StrictRequest):
+    envelope: CommandEnvelope
+
+
 class SystemSettingsPreviewRequest(StrictRequest):
     base_revision: str = Field(pattern=r"^cfg_[A-Za-z0-9_-]{1,128}$")
     harness_settings: dict[str, Any]
@@ -783,6 +792,37 @@ def build_v1_router(container: Container) -> APIRouter:
             )
         return await run_in_threadpool(
             container.task_config_rebase.rebase_all,
+            actor={
+                "actor_type": body.envelope.actor_type,
+                "actor_id": body.envelope.actor_id,
+            },
+        )
+
+    @router.post(
+        "/tasks/{task_id}/work-items/{work_item_id}/sync-toggle",
+        tags=["instances"],
+    )
+    async def set_work_item_sync_toggle(
+        task_id: str,
+        work_item_id: str,
+        body: WorkItemSyncToggleRequest,
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.runtime_settings.set_sync_to_peers,
+            task_id,
+            work_item_id,
+            sync_to_peers=body.sync_to_peers,
+            envelope=body.envelope,
+        )
+
+    @router.post("/tasks/{task_id}/settings/broadcast", tags=["settings"])
+    async def broadcast_task_settings(
+        task_id: str,
+        body: TaskSettingsBroadcastRequest,
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            container.system_settings.broadcast_task,
+            task_id,
             actor={
                 "actor_type": body.envelope.actor_type,
                 "actor_id": body.envelope.actor_id,
