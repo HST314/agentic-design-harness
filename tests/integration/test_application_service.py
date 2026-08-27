@@ -1153,6 +1153,17 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             {(item["manifest"]["role"], item["manifest"]["mime_type"]) for item in assets},
             {("final_artwork", "image/png"), ("design_note", "text/markdown")},
         )
+        self.assertEqual(
+            {item["manifest"]["relative_path"] for item in assets},
+            {
+                f"resources/shared/{candidate['bundle_id']}.png",
+                f"resources/shared/{candidate['bundle_id']}.md",
+            },
+        )
+        self.assertEqual(
+            {item["manifest"]["bundle_id"] for item in assets},
+            {candidate["bundle_id"]},
+        )
         bundles = self.assets.list_bundle_manifests(task_id)
         self.assertEqual(len(bundles), 1)
         self.assertEqual(bundles[0]["bundle_id"], candidate["bundle_id"])

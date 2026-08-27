@@ -459,6 +459,7 @@ class AssetService(AssetRecoveryMixin):
         description: str,
         idempotency_key: str,
         batch_id: str | None = None,
+        bundle_id: str | None = None,
         derivation: dict[str, Any] | None = None,
         crash_hook: CrashHook | None = None,
     ) -> dict[str, Any]:
@@ -468,6 +469,8 @@ class AssetService(AssetRecoveryMixin):
         self._validate_idempotency_key(idempotency_key)
         if batch_id is not None:
             validate_identifier(batch_id, "batch_id")
+        if bundle_id is not None:
+            validate_identifier(bundle_id, "bundle_id")
         if not role or len(role) > 128 or len(description) > 4000:
             self._invalid("Delivery role or description is invalid.")
         normalized = normalized_relative_path(source_relative_path).as_posix()
@@ -488,6 +491,8 @@ class AssetService(AssetRecoveryMixin):
         }
         if batch_id is not None:
             request["batch_id"] = batch_id
+        if bundle_id is not None:
+            request["bundle_id"] = bundle_id
         if derivation is not None:
             request["derivation"] = deepcopy(derivation)
         transaction_digest = hashlib.sha256(f"{instance_id}:{idempotency_key}".encode()).hexdigest()
@@ -500,7 +505,11 @@ class AssetService(AssetRecoveryMixin):
                 record = read_json(record_path)
                 self._check_request(record, "publication", request)
             else:
-                destination_relpath = f"resources/shared/{asset_id}/{source.name}"
+                destination_relpath = (
+                    f"resources/shared/{bundle_id}{source.suffix.lower()}"
+                    if bundle_id is not None
+                    else f"resources/shared/{asset_id}/{source.name}"
+                )
                 record = {
                     "transaction_type": "publication",
                     "transaction_id": transaction_id,
