@@ -61,14 +61,6 @@ async function executeBridgeRequest(
   );
 }
 
-const businessStatusLabel = {
-  TODO: "待办",
-  RUNNING: "运行中",
-  WAITING_APPROVAL: "待审批",
-  COMPLETED: "已完成",
-  EXCEPTION: "异常",
-} as const;
-
 function WorkbenchFailure({
   link,
   message,
@@ -147,7 +139,6 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
     enabled: Boolean(item?.agent_type === "image" && instanceId),
   });
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const toolbarRef = useRef<HTMLDivElement>(null);
   const loadTimeoutRef = useRef<number | undefined>(undefined);
   const announceBridgeRef = useRef<() => void>(() => undefined);
   const [frameKey, setFrameKey] = useState(0);
@@ -280,7 +271,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
     return (
       <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-labelledby="agent-workbench-title">
         <header className="agent-workbench__context">
-          <div><p className="workbench-eyebrow">{detail.data.task.title} / 阶段 {item.stage.position}</p><h1 id="agent-workbench-title">{item.title}</h1><p>当前任务需要的 PPT 创作能力尚未开放，任务不会被误标为完成。</p></div>
+          <div><p className="workbench-eyebrow">阶段 {item.stage.position}</p><h1 id="agent-workbench-title">{item.title}</h1><p>当前任务需要的 PPT 创作能力尚未开放，任务不会被误标为完成。</p></div>
           <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}>返回看板</Link>
         </header>
         {focusMode ? null : <TaskTabs taskId={taskId} />}
@@ -290,7 +281,6 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
   }
 
   const readyLink = link.data?.embeddable && link.data.ui_url ? link.data : undefined;
-  const statusText = businessStatusLabel[item.business_status];
   const failureMessage = frameState === "failed"
     ? "工作台在 12 秒内未完成加载。可重新检查、返回看板，或在新标签页专注模式中尝试。"
     : link.data?.link_status === "FRAME_BLOCKED"
@@ -307,28 +297,15 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
 
   const focusPath = `/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}/focus`;
   return (
-    <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-labelledby="agent-workbench-title">
-      <header className="agent-workbench__context">
-        <div>
-          <p className="workbench-eyebrow">{detail.data.task.title} / 阶段 {item.stage.position}</p>
-          <h1 id="agent-workbench-title">{item.title}</h1>
-          <p>Image Agent 专业会话与审批保留在下方原生工作台中，Harness 只维护任务上下文和安全入口。</p>
-        </div>
-        <div className="agent-workbench__actions" ref={toolbarRef} tabIndex={-1}>
-          <span className={`task-status task-status--${item.business_status.toLowerCase()}`}><span aria-hidden="true" />{statusText}</span>
-          <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}><Icon name="board" />返回看板</Link>
-          {link.data?.ui_url && !focusMode ? (
-            <a className="workbench-secondary-button" href={focusPath} target="_blank" rel="noopener noreferrer"><Icon name="external-link" />新标签页</a>
+    <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-label={item.title}>
+      {focusMode ? null : (
+        <TaskTabs
+          taskId={taskId}
+          trailing={link.data?.ui_url ? (
+            <a className="workbench-task-tabs__focus" href={focusPath} target="_blank" rel="noopener noreferrer"><Icon name="external-link" />新标签页</a>
           ) : null}
-        </div>
-      </header>
-      {focusMode ? null : <TaskTabs taskId={taskId} />}
-
-      <div className="agent-workbench__security" role="status" aria-live="polite">
-        <Icon name="status" />
-        <span>{readyLink ? "专业工作台连接已验证" : link.data?.link_status === "STARTING" ? "Image Agent 正在启动…" : link.isPending ? "正在准备专业工作台…" : "专业工作台暂时不可用"}</span>
-      </div>
-
+        />
+      )}
       {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 Image Agent 工作台地址…</div> : null}
       {link.isError || (link.data && !readyLink) ? (
         <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retryAction} retryLabel={retryLabel} retryPending={recoverStart.isPending} taskId={taskId} workItemId={workItemId} focusMode={focusMode} />
@@ -338,10 +315,6 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
       ) : null}
       {readyLink && frameState !== "failed" ? (
         <div className="agent-workbench-frame">
-          <div className="agent-workbench-frame__entry">
-            <button className="workbench-secondary-button" type="button" onClick={() => iframeRef.current?.focus()}>跳到 Image Agent 工作台</button>
-            <span>专业工作台将在安全隔离区域内打开。</span>
-          </div>
           {frameState === "loading" ? <div className="agent-workbench-frame__overlay" role="status">Image Agent 工作台正在加载…</div> : null}
           <iframe
             key={`${readyLink.instance_id}-${frameKey}`}
@@ -359,10 +332,6 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
             }}
             onError={() => { window.clearTimeout(loadTimeoutRef.current); setFrameState("failed"); }}
           />
-          <div className="agent-workbench-frame__exit">
-            <button className="workbench-secondary-button" type="button" onClick={() => toolbarRef.current?.focus()}>返回工作台操作栏</button>
-            <Link to={`/tasks/${encodeURIComponent(taskId)}/board`}>结束专业工作，返回看板</Link>
-          </div>
         </div>
       ) : null}
     </section>

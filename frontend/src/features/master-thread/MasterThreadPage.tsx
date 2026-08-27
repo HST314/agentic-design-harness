@@ -28,19 +28,6 @@ const ACTOR_ID = "human_operator";
 type ProposalTaskCard = ContractPlanProposal["execution_cards"][number];
 type ExpectedDelivery = ProposalTaskCard["expected_deliveries"][number];
 
-const taskStatusLabel: Record<string, string> = {
-  DRAFT: "规划中",
-  PLANNED: "计划已保存",
-  AWAITING_START_CONFIRMATION: "等待启动确认",
-  RUNNING: "运行中",
-  WAITING_APPROVAL: "等待审批",
-  BLOCKED_UNAVAILABLE: "能力不可用",
-  FAILED: "失败",
-  SUCCEEDED: "已完成",
-  PARTIAL: "部分完成",
-  CANCELLED: "已取消",
-};
-
 const messageLabel: Record<ContractMasterMessage["kind"], string> = {
   text: "用户消息",
   clarification: "Master 澄清",
@@ -122,48 +109,50 @@ function startStageIndex(operation: StartOperation | null | undefined): number {
 function StartProgressBar({ operation }: { operation: StartOperation | null | undefined }): React.JSX.Element {
   const failed = operation?.state === "RETRYABLE_FAILED" || operation?.state === "ABORTED";
   const current = startStageIndex(operation);
+  const ready = !failed && current === startStageLabels.length - 1;
   return (
     <section
-      className={`master-start-progress${failed ? " master-start-progress--failed" : ""}`}
+      className={`master-start-progress${failed ? " master-start-progress--failed" : ready ? " master-start-progress--ready" : ""}`}
       aria-labelledby="master-start-progress-title"
     >
-      <header>
-        <div>
+      <div className="master-start-progress__row">
+        <div className="master-start-progress__lead">
+          <span className="master-start-progress__dot" aria-hidden="true" />
           <p className="workbench-eyebrow">实例启动</p>
-          <h2 id="master-start-progress-title">{failed ? "启动未完成" : current === 4 ? "专业工作台已就绪" : "正在启动专业工作台"}</h2>
+          <h2 id="master-start-progress-title">{failed ? "启动未完成" : ready ? "专业工作台已就绪" : "正在启动专业工作台"}</h2>
         </div>
-        <span role="status" aria-live="polite">{failed ? "需要重试" : `${current + 1} / ${startStageLabels.length}`}</span>
-      </header>
-      <ol
-        className="master-start-progress__steps"
-        role="progressbar"
-        aria-label="实例启动进度"
-        aria-valuemin={1}
-        aria-valuemax={startStageLabels.length}
-        aria-valuenow={current + 1}
-      >
-        {startStageLabels.map((label, index) => (
-          <li
-            key={label}
-            className={index < current ? "is-complete" : index === current ? "is-current" : ""}
-          >
-            <span aria-hidden="true">{index + 1}</span>
-            <strong>{label}</strong>
-          </li>
-        ))}
-      </ol>
+        <ol
+          className="master-start-progress__steps"
+          role="progressbar"
+          aria-label="实例启动进度"
+          aria-valuemin={1}
+          aria-valuemax={startStageLabels.length}
+          aria-valuenow={current + 1}
+        >
+          {startStageLabels.map((label, index) => (
+            <li
+              key={label}
+              className={index < current ? "is-complete" : index === current ? "is-current" : ""}
+            >
+              <span className="master-start-progress__bar" aria-hidden="true" />
+              <strong>{label}</strong>
+            </li>
+          ))}
+        </ol>
+        <span className="master-start-progress__count" role="status" aria-live="polite">{failed ? "需要重试" : `${current + 1} / ${startStageLabels.length}`}</span>
+      </div>
       {failed ? (
         <p className="master-start-progress__message" role="alert">
           {operation?.last_error?.message ?? "实例启动失败，请在任务看板中由用户手动重试。"}
         </p>
-      ) : (
+      ) : ready ? null : (
         <p className="master-start-progress__message">启动会在后台继续；你可以随时手动切换到任务看板查看进度。</p>
       )}
     </section>
   );
 }
 
-export function TaskTabs({ taskId }: { taskId: string }): React.JSX.Element {
+export function TaskTabs({ taskId, trailing }: { taskId: string; trailing?: React.ReactNode }): React.JSX.Element {
   const base = `/tasks/${encodeURIComponent(taskId)}`;
   return (
     <nav className="workbench-task-tabs" aria-label="任务工作区">
@@ -171,6 +160,7 @@ export function TaskTabs({ taskId }: { taskId: string }): React.JSX.Element {
       <NavLink to={`${base}/board`}><Icon name="board" />看板</NavLink>
       <NavLink to={`${base}/plan`}><Icon name="plan" />计划</NavLink>
       <NavLink to={`${base}/deliveries`}><Icon name="file-check" />交付</NavLink>
+      {trailing ? <span className="workbench-task-tabs__trailing">{trailing}</span> : null}
     </nav>
   );
 }
@@ -750,10 +740,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
 
   return (
     <section className="workbench-page master-workspace" aria-labelledby="master-title">
-      <header className="workbench-page__header master-workspace__header">
-        <div><p className="workbench-eyebrow">Master 永久线程</p><h1 id="master-title">{data.task.title}</h1><p>澄清、计划版本与启动结果均持久化在当前主任务下。</p></div>
-        <span className={`master-task-status master-task-status--${data.task.status.toLowerCase()}`}><span aria-hidden="true" />{taskStatusLabel[data.task.status] ?? data.task.status}</span>
-      </header>
+      <h1 id="master-title" className="sr-only">{data.task.title}</h1>
       <TaskTabs taskId={taskId} />
       {proposal?.status === "CONFIRMED" ? (
         <StartProgressBar operation={startOperation.data?.operation} />

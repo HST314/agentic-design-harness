@@ -260,6 +260,8 @@ class SupervisorConfig(StrictConfigModel):
     port_range_end: int = Field(ge=1, le=65535)
     startup_timeout_seconds: int = Field(ge=1, le=3600)
     shutdown_grace_seconds: int = Field(ge=0, le=3600)
+    probe_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
+    health_failure_threshold: int = Field(default=5, ge=1, le=100)
 
     @model_validator(mode="after")
     def ordered_port_range(self) -> SupervisorConfig:

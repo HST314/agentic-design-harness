@@ -60,15 +60,14 @@ test.beforeEach(async ({ page }) => {
   await mockShell(page);
 });
 
-test("embeds only the server-approved current Image instance with keyboard exits", async ({ page }) => {
+test("embeds only the server-approved current Image instance", async ({ page }) => {
   const item = workItem("image");
   await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_image", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, item, refresh_after_ms: 3000, projection_revision: "image-ready" }) }));
   await page.route("**/api/v1/instances/instance_image/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_image", agent_type: "image", instance_status: "RUNNING", ui_url: "http://127.0.0.1:19091/", link_status: "READY", embeddable: true, frame_policy: "FRAME_ANCESTORS_ALLOWED", diagnostic: "Allowed." }) }));
   await page.route("http://127.0.0.1:19091/", async (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><html><body><main><h1>Image Agent Studio</h1><a download href='data:text/plain,asset'>下载交付物</a></main></body></html>" }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_image");
-  await expect(page.getByRole("heading", { name: "KV 方向 A" })).toBeVisible();
-  await expect(page.getByText("专业工作台连接已验证")).toBeVisible();
+  await expect(page.locator(".agent-workbench")).toBeVisible();
   await expect(page.locator("body")).not.toContainText(/Adapter|frame 策略|iframe|sandbox/);
   const iframe = page.locator("iframe[title='Image Agent 工作台：KV 方向 A']");
   await expect(iframe).toHaveAttribute("src", "http://127.0.0.1:19091/");
@@ -84,11 +83,6 @@ test("embeds only the server-approved current Image instance with keyboard exits
     "/tasks/task_workbench_e2e/work-items/work_image/focus",
   );
   await expect(focusLink).toHaveAttribute("rel", "noopener noreferrer");
-
-  await page.getByRole("button", { name: "跳到 Image Agent 工作台" }).click();
-  await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).toBe("IFRAME");
-  await page.getByRole("button", { name: "返回工作台操作栏" }).click();
-  await expect.poll(() => page.evaluate(() => document.activeElement?.classList.contains("agent-workbench__actions"))).toBe(true);
 
   for (const width of [1280, 1440, 1920]) {
     await page.setViewportSize({ width, height: 900 });

@@ -30,3 +30,7 @@ supervisor:
   port_range_end: 18199
   startup_timeout_seconds: 30
   shutdown_grace_seconds: 5
+  # 运行期存活探测：超时预算与连续失败容忍次数。任务执行期间实例可能短暂
+  # 卡顿（模型调用、磁盘竞争），过紧的预算会把健康实例误判为崩溃并强杀。
+  probe_timeout_seconds: 2.0
+  health_failure_threshold: 5

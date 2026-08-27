@@ -24,6 +24,11 @@ class SupervisorLifecycleMixin:
     if TYPE_CHECKING:
         def __getattr__(self, name: str) -> Any: ...
 
+    @staticmethod
+    def _probe_timeout(record: dict[str, Any]) -> float:
+        # Launch records written before probe configurability lack the key.
+        return float(record.get("probe_timeout_seconds", 2.0))
+
     def monitor_once(self) -> list[dict[str, Any]]:
         changes: list[dict[str, Any]] = []
         for record_path in sorted(self.launch_root.glob("*.json")):
@@ -34,22 +39,31 @@ class SupervisorLifecycleMixin:
                     continue
                 alive = self._record_is_alive(record)
                 if alive and record["state"] == "STARTING":
-                    if self._probe(record["port"], record["health_path"]) and self._probe(
-                        record["port"], record["readiness_path"]
+                    if self._probe(
+                        record["port"], record["health_path"], self._probe_timeout(record)
+                    ) and self._probe(
+                        record["port"], record["readiness_path"], self._probe_timeout(record)
                     ):
                         changes.append(self._promote_ready(record))
                         continue
                     if self._startup_elapsed(record) <= record["startup_timeout_seconds"]:
                         continue
                 if alive and record["state"] == "RUNNING":
-                    if self._probe(record["port"], record["health_path"]):
+                    healthy, detail = self._probe_with_detail(
+                        record["port"], record["health_path"], self._probe_timeout(record)
+                    )
+                    if healthy:
                         if record.get("health_failures"):
                             record["health_failures"] = 0
+                            record.pop("last_health_failure", None)
                             atomic_write_json(record_path, record)
                         continue
                     record["health_failures"] = record.get("health_failures", 0) + 1
+                    detail["at"] = utc_now()
+                    record["last_health_failure"] = detail
                     atomic_write_json(record_path, record)
-                    if record["health_failures"] < 3:
+                    threshold = int(record.get("health_failure_threshold", 5))
+                    if record["health_failures"] < threshold:
                         continue
                 elif alive:
                     continue
@@ -83,8 +97,10 @@ class SupervisorLifecycleMixin:
                     record["port"],
                 )
                 if record["state"] == "STARTING" and self._probe(
-                    record["port"], record["health_path"]
-                ) and self._probe(record["port"], record["readiness_path"]):
+                    record["port"], record["health_path"], self._probe_timeout(record)
+                ) and self._probe(
+                    record["port"], record["readiness_path"], self._probe_timeout(record)
+                ):
                     results.append(self._promote_ready(record))
                     continue
                 process_state = "RUNNING" if record["state"] == "RUNNING" else "STARTING"
