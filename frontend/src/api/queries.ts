@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
-import { ApiClient } from "./client";
+import { ApiClient, type ApprovalDetailResponse } from "./client";
 
 export const api = new ApiClient();
 
@@ -103,6 +103,27 @@ export const deliveryBundlesQuery = (taskId: string) => queryOptions({
   queryKey: ["delivery-bundles", taskId],
   queryFn: ({ signal }: { signal: AbortSignal }) => api.deliveryBundles(taskId, signal),
   refetchInterval: 5_000,
+  refetchIntervalInBackground: false,
+  retry: false,
+});
+
+export const inboxQuery = queryOptions({
+  queryKey: ["inbox", "human"],
+  queryFn: async ({ signal }) => {
+    const response = await api.inbox(signal);
+    const entries = await Promise.all(
+      response.items.map(async (item): Promise<readonly [string, ApprovalDetailResponse | null]> => {
+        if (!item.approval_id) return [item.inbox_id, null] as const;
+        try {
+          return [item.inbox_id, await api.approval(item.approval_id, signal)] as const;
+        } catch {
+          return [item.inbox_id, null] as const;
+        }
+      }),
+    );
+    return { items: response.items, approvals: new Map(entries) };
+  },
+  refetchInterval: 10_000,
   refetchIntervalInBackground: false,
   retry: false,
 });

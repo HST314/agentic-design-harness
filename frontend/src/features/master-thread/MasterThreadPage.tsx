@@ -28,19 +28,6 @@ const ACTOR_ID = "human_operator";
 type ProposalTaskCard = ContractPlanProposal["execution_cards"][number];
 type ExpectedDelivery = ProposalTaskCard["expected_deliveries"][number];
 
-const taskStatusLabel: Record<string, string> = {
-  DRAFT: "规划中",
-  PLANNED: "计划已保存",
-  AWAITING_START_CONFIRMATION: "等待启动确认",
-  RUNNING: "运行中",
-  WAITING_APPROVAL: "等待审批",
-  BLOCKED_UNAVAILABLE: "能力不可用",
-  FAILED: "失败",
-  SUCCEEDED: "已完成",
-  PARTIAL: "部分完成",
-  CANCELLED: "已取消",
-};
-
 const messageLabel: Record<ContractMasterMessage["kind"], string> = {
   text: "用户消息",
   clarification: "Master 澄清",
@@ -750,10 +737,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
 
   return (
     <section className="workbench-page master-workspace" aria-labelledby="master-title">
-      <header className="workbench-page__header master-workspace__header">
-        <div><p className="workbench-eyebrow">Master 永久线程</p><h1 id="master-title">{data.task.title}</h1><p>澄清、计划版本与启动结果均持久化在当前主任务下。</p></div>
-        <span className={`master-task-status master-task-status--${data.task.status.toLowerCase()}`}><span aria-hidden="true" />{taskStatusLabel[data.task.status] ?? data.task.status}</span>
-      </header>
+      <h1 id="master-title" className="sr-only">{data.task.title}</h1>
       <TaskTabs taskId={taskId} />
       {proposal?.status === "CONFIRMED" ? (
         <StartProgressBar operation={startOperation.data?.operation} />

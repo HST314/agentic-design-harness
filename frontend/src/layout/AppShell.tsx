@@ -39,6 +39,18 @@ function taskIdFromPath(pathname: string): string | null {
   }
 }
 
+function sectionFromPath(pathname: string): string {
+  if (pathname === "/settings") return "全局设置";
+  if (pathname === "/inbox") return "收件箱";
+  if (pathname === "/tasks") return "已验收任务面板";
+  if (pathname.includes("/work-items/")) return "Image 工作台";
+  if (pathname.endsWith("/master")) return "Master 线程";
+  if (pathname.endsWith("/board")) return "任务看板";
+  if (pathname.endsWith("/plan")) return "任务计划";
+  if (pathname.endsWith("/deliveries")) return "任务交付";
+  return "创建任务";
+}
+
 function historyGroups(tasks: TaskSummary[], search: string): Array<{ label: string; items: TaskSummary[] }> {
   const needle = search.trim().toLocaleLowerCase("zh-CN");
   const visible = tasks.filter((task) => {
@@ -204,6 +216,8 @@ export function AppShell(): React.JSX.Element {
   const drawer = searchParams.get("drawer");
   const drawerTarget = searchParams.get("target");
   const groups = useMemo(() => historyGroups(tasks.data?.items ?? [], search), [search, tasks.data?.items]);
+  const currentTask = taskId ? tasks.data?.items.find((task) => task.task_id === taskId) : undefined;
+  const sectionLabel = sectionFromPath(location.pathname);
   const presentation = useMutation({
     mutationFn: ({ task, patch }: { task: TaskSummary; patch: { title?: string; pinned?: boolean; archived?: boolean } }) => api.updateTaskPresentation(task.task_id, {
       ...patch,
@@ -285,17 +299,24 @@ export function AppShell(): React.JSX.Element {
           </nav>
 
           <nav className="workbench-utilities" aria-label="工作台工具">
-            <Link to="/tasks"><Icon name="history" /><span className="workbench-label">已验收任务面板</span></Link>
-            <Link to="/inbox"><Icon name="inbox" /><span className="workbench-label">收件箱</span></Link>
+            <NavLink to="/tasks" end><Icon name="history" /><span className="workbench-label">已验收任务面板</span></NavLink>
+            <NavLink to="/inbox"><Icon name="inbox" /><span className="workbench-label">收件箱</span></NavLink>
             <NavLink to="/settings"><Icon name="settings" /><span className="workbench-label">全局设置</span></NavLink>
           </nav>
         </aside>
 
         <div className="workbench-center">
           <header className="workbench-topbar">
-            <div>
-              <p className="workbench-eyebrow">工作台框架</p>
-              <p className="workbench-context">{location.pathname === "/settings" ? "全局设置" : taskId ? `任务 ${taskId}` : "创建任务"}</p>
+            <div className="workbench-topbar__lead">
+              <p className="workbench-eyebrow">{sectionLabel}</p>
+              <p className="workbench-context">
+                <span className="workbench-context__title">{currentTask ? currentTask.title : taskId ? "当前任务" : sectionLabel}</span>
+                {currentTask ? (
+                  <span className={`master-task-status master-task-status--${currentTask.status.toLowerCase()}`}>
+                    <span aria-hidden="true" />{taskLabel(currentTask)}
+                  </span>
+                ) : null}
+              </p>
             </div>
             <div className="workbench-topbar__actions">
               <span

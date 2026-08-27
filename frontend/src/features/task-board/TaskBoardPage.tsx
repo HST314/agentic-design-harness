@@ -238,7 +238,6 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
     <section className={`workbench-page task-projection task-projection--${view}`} aria-labelledby="task-projection-title">
       <header className="workbench-page__header task-projection__header">
         <div>
-          <p className="workbench-eyebrow">{projection.data?.task.title ?? "当前主任务"}</p>
           <h1 id="task-projection-title">{title}</h1>
           <p>{description}</p>
         </div>

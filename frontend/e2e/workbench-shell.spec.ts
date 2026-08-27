@@ -151,7 +151,10 @@ test("master, board and plan deep links share one stable shell", async ({ page }
     await page.goto(`/tasks/task_launch_campaign/${route}`);
     await expect(page.getByRole("complementary", { name: "主任务历史" })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: route === "master" ? "秋季发布会主视觉" : route === "board" ? "当前任务看板" : "任务计划" })).toBeVisible();
+    await expect(page.locator(".workbench-topbar")).toContainText("秋季发布会主视觉");
+    if (route !== "master") {
+      await expect(page.getByRole("heading", { name: route === "board" ? "当前任务看板" : "任务计划" })).toBeVisible();
+    }
   }
 });
 
