@@ -162,6 +162,10 @@ class InstanceOperationRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class ManualFinishedRequest(StrictRequest):
+    envelope: CommandEnvelope
+
+
 class ImportAssetRequest(StrictRequest):
     filename: str = Field(min_length=1, max_length=255)
     content_base64: str = Field(min_length=1, max_length=30_000_000)
@@ -885,6 +889,30 @@ def build_v1_router(container: Container) -> APIRouter:
             instance_id,
             harness_origin,
         )
+
+    async def _set_manual_finished(
+        instance_id: str, body: ManualFinishedRequest, value: bool
+    ) -> dict[str, Any]:
+        task_id = await run_in_threadpool(_task_for_instance, container, instance_id)
+        return await run_in_threadpool(
+            container.commands.set_manual_finished,
+            task_id,
+            instance_id,
+            value,
+            body.envelope,
+        )
+
+    @router.post("/instances/{instance_id}/manual-finished", tags=["instances"])
+    async def mark_instance_manual_finished(
+        instance_id: str, body: ManualFinishedRequest
+    ) -> dict[str, Any]:
+        return await _set_manual_finished(instance_id, body, True)
+
+    @router.post("/instances/{instance_id}/manual-in-progress", tags=["instances"])
+    async def mark_instance_manual_in_progress(
+        instance_id: str, body: ManualFinishedRequest
+    ) -> dict[str, Any]:
+        return await _set_manual_finished(instance_id, body, False)
 
     @router.post("/instances/{instance_id}/cancel", tags=["instances"])
     async def cancel_instance(

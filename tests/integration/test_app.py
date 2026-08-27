@@ -190,6 +190,34 @@ class ApplicationTests(unittest.TestCase):
                 )
 
                 current_revision = plan.json()["task_revision"]
+                marked_finished = client.post(
+                    "/api/v1/instances/i_api_g2/manual-finished",
+                    json={
+                        "envelope": self._envelope(
+                            "api-mark-manual-finished", current_revision
+                        )
+                    },
+                )
+                self.assertEqual(marked_finished.status_code, 200, marked_finished.text)
+                self.assertTrue(
+                    marked_finished.json()["plan"]["instances"][0]["manual_finished"]
+                )
+                current_revision = marked_finished.json()["task_revision"]
+                marked_in_progress = client.post(
+                    "/api/v1/instances/i_api_g2/manual-in-progress",
+                    json={
+                        "envelope": self._envelope(
+                            "api-mark-manual-in-progress", current_revision
+                        )
+                    },
+                )
+                self.assertEqual(
+                    marked_in_progress.status_code, 200, marked_in_progress.text
+                )
+                self.assertFalse(
+                    marked_in_progress.json()["plan"]["instances"][0]["manual_finished"]
+                )
+                current_revision = marked_in_progress.json()["task_revision"]
                 for index, status in enumerate(("STARTING", "RUNNING", "WAITING_APPROVAL")):
                     transition = container.commands.transition_instance(
                         "t_api_g2",

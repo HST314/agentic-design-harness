@@ -76,6 +76,67 @@ class TaskCommandTests(unittest.TestCase):
         lifecycle = confirmed["plan"]["instances"][0]["requirement_lifecycle"]
         self.assertIsNotNone(lifecycle["first_activated_at"])
 
+    def test_manual_finished_is_reversible_image_only_state(self) -> None:
+        create_task(self.service, "t_manual_finished")
+        saved = self._save(
+            "t_manual_finished", image_to_ppt_plan("t_manual_finished")
+        )
+        image = next(
+            item
+            for item in saved["plan"]["instances"]
+            if item["agent_type"] == "image"
+        )
+        self.assertFalse(image["manual_finished"])
+
+        finished = self.service.set_manual_finished(
+            "t_manual_finished",
+            "i_image_1",
+            True,
+            envelope("finish-image", saved["task_revision"]),
+        )
+        self.assertTrue(
+            next(
+                item
+                for item in finished["plan"]["instances"]
+                if item["instance_id"] == "i_image_1"
+            )["manual_finished"]
+        )
+        resumed = self.service.set_manual_finished(
+            "t_manual_finished",
+            "i_image_1",
+            False,
+            envelope("resume-image", finished["task_revision"]),
+        )
+        self.assertFalse(
+            next(
+                item
+                for item in resumed["plan"]["instances"]
+                if item["instance_id"] == "i_image_1"
+            )["manual_finished"]
+        )
+
+        with self.assertRaises(HarnessError) as captured:
+            self.service.set_manual_finished(
+                "t_manual_finished",
+                "i_ppt_1",
+                True,
+                envelope("finish-ppt", resumed["task_revision"]),
+            )
+        self.assertEqual(captured.exception.code, "VALIDATION_ERROR")
+
+        with self.assertRaises(HarnessError) as captured:
+            self.service.set_manual_finished(
+                "t_manual_finished",
+                "i_image_1",
+                True,
+                envelope(
+                    "master-finish-image",
+                    resumed["task_revision"],
+                    actor_type="master",
+                ),
+            )
+        self.assertEqual(captured.exception.code, "VALIDATION_ERROR")
+
     def test_input_registration_is_revisioned_and_image_only_can_complete(self) -> None:
         created = create_task(self.service, "t_complete", "auto")
         registered = self.service.register_input_manifest(

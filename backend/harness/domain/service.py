@@ -357,6 +357,63 @@ class TaskCommandService:
         task["updated_at"] = utc_now()
         return self._persist_aggregate(plan, envelope, "confirm_start", request, actual)
 
+    def set_manual_finished(
+        self,
+        task_id: str,
+        instance_id: str,
+        manual_finished: bool,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Set the reversible human completion gate for one Image instance."""
+
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "manual_finished": manual_finished,
+        }
+        return self._idempotent(
+            task_id,
+            "set_manual_finished",
+            request,
+            envelope,
+            lambda: self._set_manual_finished(request, envelope),
+        )
+
+    def _set_manual_finished(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        if envelope.actor_type != "human":
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only a human may change the manual completion gate.",
+            )
+        task_id = request["task_id"]
+        plan = self._plan(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        instance = next(
+            (
+                item
+                for item in plan["instances"]
+                if item["instance_id"] == request["instance_id"]
+            ),
+            None,
+        )
+        if instance is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        if instance["agent_type"] != "image":
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "The manual completion gate only applies to Image instances.",
+                {"instance_id": request["instance_id"]},
+            )
+        instance["manual_finished"] = request["manual_finished"]
+        plan["task"]["updated_at"] = utc_now()
+        return self._persist_aggregate(
+            plan, envelope, "set_manual_finished", request, actual
+        )
+
     def transition_instance(
         self,
         task_id: str,
@@ -676,6 +733,7 @@ class TaskCommandService:
                         "authorized_downgrade": None,
                     },
                     "status": "READY" if raw["agent_type"] in {"image", "ppt"} else "UNAVAILABLE",
+                    "manual_finished": False,
                     "process": None,
                     "ui_url": None,
                     "created_at": now,
@@ -782,6 +840,7 @@ class TaskCommandService:
                         "authorized_downgrade": None,
                     },
                     "status": "READY" if raw["agent_type"] in {"image", "ppt"} else "UNAVAILABLE",
+                    "manual_finished": False,
                     "process": None,
                     "ui_url": None,
                     "created_at": now,

@@ -203,11 +203,14 @@ def image_plan(task_id: str, count: int = 1) -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def ppt_plan(task_id: str, required: bool = True) -> dict[str, list[dict[str, Any]]]:
+def ppt_plan(
+    task_id: str, required: bool = True, count: int = 1
+) -> dict[str, list[dict[str, Any]]]:
+    instance_ids = [f"i_ppt_{index}" for index in range(1, count + 1)]
     return {
-        "stages": [stage(task_id, "s_ppt", "ppt", 1, [], required, ["i_ppt_1"])],
-        "instances": [instance(task_id, "i_ppt_1", "s_ppt", "ppt", required)],
-        "task_cards": [card(task_id, "i_ppt_1", "s_ppt", "ppt")],
+        "stages": [stage(task_id, "s_ppt", "ppt", 1, [], required, instance_ids)],
+        "instances": [instance(task_id, item, "s_ppt", "ppt", required) for item in instance_ids],
+        "task_cards": [card(task_id, item, "s_ppt", "ppt") for item in instance_ids],
     }
 
 
@@ -299,7 +302,11 @@ def card(task_id: str, instance_id: str, stage_id: str, agent_type: str) -> dict
         "instructions": ["Use only registered inputs."],
         "input_assets": [],
         "expected_deliveries": [delivery],
-        "parameters": {"variants": 1} if agent_type == "image" else {"slide_count": 8},
+        "parameters": (
+            {"variants": 1}
+            if agent_type == "image"
+            else {"slide_count": 8, "input_source": "shared"}
+        ),
     }
 
 

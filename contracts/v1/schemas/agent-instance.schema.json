@@ -65,6 +65,11 @@
       "type": "string",
       "enum": ["human", "master"]
     },
+    "manual_finished": {
+      "type": "boolean",
+      "default": false,
+      "description": "Human-controlled Image completion gate used only for PPT startup."
+    },
     "config_revision": {
       "type": "integer",
       "minimum": 1

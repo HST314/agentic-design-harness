@@ -84,6 +84,9 @@ class PptAgentAdapter:
             not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 500
         ):
             errors.append("PPT slide_count must be an integer between 1 and 500.")
+        input_source = card.get("parameters", {}).get("input_source", "shared")
+        if input_source not in {"shared", "empty"}:
+            errors.append("PPT input_source must be shared or empty.")
         required = [item for item in card.get("expected_deliveries", []) if item.get("required")]
         if not any(item.get("kind") in {"presentation", "archive"} for item in required):
             errors.append("PPT Agent requires a presentation or archive delivery.")
@@ -103,7 +106,12 @@ class PptAgentAdapter:
         instance_root = self.store.layout.initialize_instance(task_id, instance_id)
         runtime_root = instance_root / "runtime"
         projects_root = instance_root / "work" / "projects"
-        images_root = request.task_root / "resources" / "shared"
+        input_source = str(request.task_card.get("parameters", {}).get("input_source", "shared"))
+        images_root = (
+            request.task_root / "resources" / "shared"
+            if input_source == "shared"
+            else instance_root / "work" / "empty-input"
+        )
         projects_root.mkdir(parents=True, exist_ok=True)
         images_root.mkdir(parents=True, exist_ok=True)
         mapped = self.map_task_card(request)

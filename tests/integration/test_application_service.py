@@ -35,6 +35,7 @@ from runtime_helpers import (
     create_task,
     envelope,
     image_plan,
+    image_to_ppt_plan,
     ppt_plan,
 )
 
@@ -133,7 +134,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.image_config = ImageAgentConfigMaterializer(self.store, self.task_config)
         self.supervisor = ProcessSupervisor(self.store, self.commands, self.image_config)
         self.fake_adapter = FakeImageAdapter()
-        self.adapters = AdapterRegistry([self.fake_adapter, FakePptAdapter()])
+        self.fake_ppt_adapter = FakePptAdapter()
+        self.adapters = AdapterRegistry([self.fake_adapter, self.fake_ppt_adapter])
         self.runtime_settings = InstanceRuntimeSettingsService(
             self.store,
             self.task_config,
@@ -169,6 +171,10 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         entrypoint = artifact_root / "fake_agent_process.py"
         shutil.copyfile(FAKE_AGENT, entrypoint)
         (artifact_root / "requirements.lock").write_text("stdlib-only\n", encoding="utf-8")
+        runtime_policy = artifact_root / "ppt-runtime.yaml"
+        model_config = artifact_root / "ppt-model-config.yaml"
+        runtime_policy.write_text("schema_version: '1.0'\n", encoding="utf-8")
+        model_config.write_text("model_config_id: test\n", encoding="utf-8")
         for path in artifact_root.rglob("*"):
             path.chmod(0o444)
         artifact_root.chmod(0o555)
@@ -182,7 +188,12 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 entrypoint_relpath="fake_agent_process.py",
                 dependency_lock_relpaths=("requirements.lock",),
             ),
+            public_environment={
+                "PPT_AGENT_RUNTIME_POLICY": str(runtime_policy),
+                "PPT_AGENT_MODEL_CONFIG": str(model_config),
+            },
         )
+        self.fake_ppt_adapter.runtime_spec = self.fake_adapter.runtime_spec
 
     def test_plan_and_instance_creation_is_atomic_to_callers_and_idempotent(self) -> None:
         created = create_task(self.commands, "t_application")
@@ -330,6 +341,124 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
         self.assertEqual(result["plan"]["instances"][0]["status"], "READY")
         self.assertNotIn("credential_pair_ref", result["plan"]["instances"][0])
+
+    def test_ppt_start_gate_lists_unfinished_images_and_is_reversible(self) -> None:
+        created = create_task(self.commands, "t_ppt_gate")
+        draft = image_to_ppt_plan("t_ppt_gate")
+        saved = self.application.save_plan_and_create_instances(
+            "t_ppt_gate",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_ppt_gate",
+            envelope=envelope("save-ppt-gate", created["revision"]),
+        )
+        confirmed = self.commands.confirm_start(
+            "t_ppt_gate",
+            envelope("confirm-ppt-gate", saved["task_revision"]),
+        )
+
+        with self.assertRaises(HarnessError) as blocked:
+            self.application.start_instance(
+                "t_ppt_gate",
+                "i_ppt_1",
+                operation_id="start_blocked_ppt",
+                envelope=envelope(
+                    "start-blocked-ppt", confirmed["task_revision"]
+                ),
+            )
+        self.assertEqual(blocked.exception.code, "INVALID_STATE_TRANSITION")
+        self.assertEqual(
+            blocked.exception.details["unfinished_instance_ids"], ["i_image_1"]
+        )
+
+        finished = self.commands.set_manual_finished(
+            "t_ppt_gate",
+            "i_image_1",
+            True,
+            envelope("finish-ppt-gate-image", confirmed["task_revision"]),
+        )
+        self.application._require_ppt_start_gate("t_ppt_gate", "i_ppt_1")
+        resumed = self.commands.set_manual_finished(
+            "t_ppt_gate",
+            "i_image_1",
+            False,
+            envelope("resume-ppt-gate-image", finished["task_revision"]),
+        )
+        with self.assertRaises(HarnessError):
+            self.application._require_ppt_start_gate("t_ppt_gate", "i_ppt_1")
+        self.assertFalse(
+            next(
+                item
+                for item in resumed["plan"]["instances"]
+                if item["instance_id"] == "i_image_1"
+            )["manual_finished"]
+        )
+
+    def test_task_start_targets_only_instances_in_ready_stages(self) -> None:
+        created = create_task(self.commands, "t_staged_start")
+        draft = image_to_ppt_plan("t_staged_start")
+        saved = self.application.save_plan_and_create_instances(
+            "t_staged_start",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_staged_start",
+            envelope=envelope("save-staged-start", created["revision"]),
+        )
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_start_intent":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.application.confirm_and_start_ready_instances(
+                "t_staged_start",
+                operation_id="start_staged_start",
+                envelope=envelope("start-staged-start", saved["task_revision"]),
+                crash_hook=crash,
+            )
+        intent = read_json(self.application._intent_path("start_staged_start"))
+        self.assertEqual(intent["target_instance_ids"], ["i_image_1"])
+
+    def test_two_ppt_instances_start_on_distinct_ports_and_workspaces(self) -> None:
+        self._configure_runtime_artifact("parallel-ppt-fake-agent")
+        created = create_task(self.commands, "t_parallel_ppt")
+        draft = ppt_plan("t_parallel_ppt", count=2)
+        saved = self.application.save_plan_and_create_instances(
+            "t_parallel_ppt",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_parallel_ppt",
+            envelope=envelope("save-parallel-ppt", created["revision"]),
+        )
+
+        started = self.application.confirm_and_start_ready_instances(
+            "t_parallel_ppt",
+            operation_id="start_parallel_ppt",
+            envelope=envelope("start-parallel-ppt", saved["task_revision"]),
+        )
+
+        self.assertEqual(started["state"], "COMMITTED")
+        instances = [
+            self.store.instance.get("t_parallel_ppt", instance_id)
+            for instance_id in ("i_ppt_1", "i_ppt_2")
+        ]
+        self.assertEqual({item["status"] for item in instances}, {"RUNNING"})
+        self.assertEqual(len({item["process"]["port"] for item in instances}), 2)
+        roots = [
+            self.store.layout.workspace_root
+            / "tasks"
+            / "t_parallel_ppt"
+            / "instances"
+            / item["instance_id"]
+            for item in instances
+        ]
+        self.assertEqual(len(set(roots)), 2)
+        self.assertTrue(all(root.is_dir() for root in roots))
+        for item in instances:
+            self.application.cancel_instance("t_parallel_ppt", item["instance_id"])
 
     def test_start_intent_replays_adapter_start_after_process_crash_window(self) -> None:
         self._configure_runtime_artifact("application-fake-agent")
