@@ -129,6 +129,64 @@ class ProcessSupervisorTests(unittest.TestCase):
         with urlopen(f"http://127.0.0.1:{port}/identity", timeout=1) as response:
             return json.loads(response.read())
 
+    def test_health_failures_respect_threshold_and_record_probe_detail(self) -> None:
+        snapshot = build_config_snapshot(
+            api_key="phase-c-supervisor-secret",
+            base_url="https://phase-c-provider.invalid/v1",
+            supervisor_port_start=19200,
+            supervisor_port_end=19230,
+            supervisor_startup_timeout=2,
+            supervisor_shutdown_grace=1,
+            supervisor_probe_timeout=1.5,
+            supervisor_health_failure_threshold=2,
+        )
+        task_config = TaskConfigService(self.store, snapshot)
+        image_config = ImageAgentConfigMaterializer(self.store, task_config)
+        supervisor = ProcessSupervisor(self.store, self.commands, image_config)
+        self.addCleanup(supervisor.close)
+        launch = supervisor.start_instance(
+            "t_process",
+            "i_image_1",
+            self.spec,
+            launch_id="launch_health",
+            attempt_id="attempt_health",
+        )
+        record_path = supervisor._launch_path(launch["launch_id"])
+        record = read_json(record_path)
+        self.assertEqual(record["probe_timeout_seconds"], 1.5)
+        self.assertEqual(record["health_failure_threshold"], 2)
+
+        failure = (
+            False,
+            {
+                "path": "/healthz",
+                "timeout_seconds": 1.5,
+                "error": "TimeoutError: timed out",
+            },
+        )
+        with patch.object(ProcessSupervisor, "_probe_with_detail", return_value=failure):
+            # First failure stays below the configured threshold: no kill.
+            self.assertEqual(supervisor.monitor_once(), [])
+            self.assertEqual(
+                self.store.instance.get("t_process", "i_image_1")["status"], "RUNNING"
+            )
+            record = read_json(record_path)
+            self.assertEqual(record["health_failures"], 1)
+            self.assertEqual(
+                record["last_health_failure"]["error"], "TimeoutError: timed out"
+            )
+            # Second consecutive failure reaches the threshold: kill as crashed.
+            changes = supervisor.monitor_once()
+        self.assertEqual(changes[0]["status"], "CRASHED")
+        self.assertEqual(
+            self.store.instance.get("t_process", "i_image_1")["status"], "CRASHED"
+        )
+        record = read_json(record_path)
+        self.assertEqual(record["exit_reason"], "health_or_process_exit")
+        self.assertEqual(
+            record["last_health_failure"]["error"], "TimeoutError: timed out"
+        )
+
     def test_three_isolated_processes_crash_cancel_and_archive_independently(self) -> None:
         previous = os.environ.get("UNRELATED_SECRET")
         os.environ["UNRELATED_SECRET"] = "must-not-be-inherited"

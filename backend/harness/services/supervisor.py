@@ -249,6 +249,8 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 "health_failures": 0,
                 "startup_timeout_seconds": supervisor.startup_timeout_seconds,
                 "shutdown_grace_seconds": supervisor.shutdown_grace_seconds,
+                "probe_timeout_seconds": supervisor.probe_timeout_seconds,
+                "health_failure_threshold": supervisor.health_failure_threshold,
                 "source_config_revision": launch_config.source_config_revision,
                 "task_config_revision_id": launch_config.task_config_revision_id,
                 "runtime_config_revision_id": launch_config.runtime_config_revision_id,
@@ -342,8 +344,10 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 while time.monotonic() < deadline:
                     if process.poll() is not None:
                         raise RuntimeError("process exited before readiness")
-                    if self._probe(port, spec.health_path) and self._probe(
-                        port, spec.readiness_path
+                    if self._probe(
+                        port, spec.health_path, supervisor.probe_timeout_seconds
+                    ) and self._probe(
+                        port, spec.readiness_path, supervisor.probe_timeout_seconds
                     ):
                         break
                     time.sleep(0.05)
@@ -552,23 +556,37 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
     def _terminate_group(pid: int, grace_seconds: float) -> None:
         terminate_process_tree(pid, grace_seconds)
 
-    def _probe(self, port: int, path: str) -> bool:
-        connection = http.client.HTTPConnection(self.host, port, timeout=0.25)
+    def _probe(self, port: int, path: str, timeout_seconds: float) -> bool:
+        ok, _ = self._probe_with_detail(port, path, timeout_seconds)
+        return ok
+
+    def _probe_with_detail(
+        self, port: int, path: str, timeout_seconds: float
+    ) -> tuple[bool, dict[str, Any]]:
+        """Probe once and describe the outcome for post-mortem diagnostics."""
+        started = time.monotonic()
+        detail: dict[str, Any] = {"path": path, "timeout_seconds": timeout_seconds}
+        connection = http.client.HTTPConnection(self.host, port, timeout=timeout_seconds)
         try:
             connection.request("GET", path, headers={"Connection": "close"})
             response = connection.getresponse()
             response.read(4096)
-            return response.status == 200
-        except (http.client.HTTPException, TimeoutError, OSError):
-            return False
+            detail["http_status"] = response.status
+            ok = response.status == 200
+        except (http.client.HTTPException, TimeoutError, OSError) as exc:
+            detail["error"] = f"{type(exc).__name__}: {exc}"
+            ok = False
         finally:
             connection.close()
+        detail["elapsed_ms"] = round((time.monotonic() - started) * 1000, 1)
+        return ok, detail
 
     def _promote_ready(self, record: dict[str, Any]) -> dict[str, Any]:
         record = deepcopy(record)
         record["state"] = "RUNNING"
         record["ready_at"] = utc_now()
         record["health_failures"] = 0
+        record.pop("last_health_failure", None)
         atomic_write_json(self._launch_path(record["launch_id"]), record)
         self._write_process_projection(record, "RUNNING")
         instance = self._instance(record["task_id"], record["instance_id"])
