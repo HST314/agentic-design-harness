@@ -15,7 +15,6 @@ from harness.adapters import (
     AdapterObservation,
     AdapterRecoveryResult,
     AdapterRegistry,
-    PptAgentContractAdapter,
     ValidationResult,
 )
 from harness.adapters.image import ImageAgentAdapter
@@ -40,6 +39,8 @@ from runtime_helpers import (
 )
 
 FAKE_AGENT = Path(__file__).resolve().parents[1] / "fixtures" / "fake_agent_process.py"
+
+
 class FakeImageAdapter:
     agent_type = "image"
     available = True
@@ -113,6 +114,14 @@ class FakeImageAdapter:
         return AdapterRecoveryResult(True, "RUNNING")
 
 
+class FakePptAdapter(FakeImageAdapter):
+    agent_type = "ppt"
+
+    def validate_task_card(self, card):
+        errors = () if card.get("agent_type") == "ppt" else ("wrong agent type",)
+        return ValidationResult(valid=not errors, errors=errors)
+
+
 class HarnessApplicationServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -124,7 +133,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.image_config = ImageAgentConfigMaterializer(self.store, self.task_config)
         self.supervisor = ProcessSupervisor(self.store, self.commands, self.image_config)
         self.fake_adapter = FakeImageAdapter()
-        self.adapters = AdapterRegistry([self.fake_adapter, PptAgentContractAdapter()])
+        self.adapters = AdapterRegistry([self.fake_adapter, FakePptAdapter()])
         self.runtime_settings = InstanceRuntimeSettingsService(
             self.store,
             self.task_config,
@@ -221,9 +230,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 envelope=envelope("recover-application-plan", created["revision"]),
                 crash_hook=crash,
             )
-        self.assertIsNotNone(
-            self.store.plan.get("t_recover_application", "t_recover_application")
-        )
+        self.assertIsNotNone(self.store.plan.get("t_recover_application", "t_recover_application"))
         recovered = self.application.recover()
         self.assertEqual(recovered[0]["status"], "RECOVERED")
         self.assertIsNotNone(self.store.plan.get("t_recover_application", "t_recover_application"))
@@ -310,7 +317,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertIsNone(self.store.instance.get("t_intent_revision_advance", "i_image_2"))
         self.assertEqual(self.application.recover(), [])
 
-    def test_unavailable_ppt_plan_saves_without_deployment_configuration(self) -> None:
+    def test_ppt_plan_is_ready_for_runtime_start(self) -> None:
         created = create_task(self.commands, "t_ppt_application")
         draft = ppt_plan("t_ppt_application")
         result = self.application.save_plan_and_create_instances(
@@ -321,7 +328,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             operation_id="save_ppt_application_plan",
             envelope=envelope("save-ppt-application-plan", created["revision"]),
         )
-        self.assertEqual(result["plan"]["instances"][0]["status"], "UNAVAILABLE")
+        self.assertEqual(result["plan"]["instances"][0]["status"], "READY")
         self.assertNotIn("credential_pair_ref", result["plan"]["instances"][0])
 
     def test_start_intent_replays_adapter_start_after_process_crash_window(self) -> None:
@@ -460,9 +467,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                             proposal["proposal_id"],
                             envelope=envelope(
                                 f"confirm-foreign-{suffix}",
-                                self.store.task.revision(
-                                    foreign_task_id, foreign_task_id
-                                ),
+                                self.store.task.revision(foreign_task_id, foreign_task_id),
                             ),
                         )
                     self.assertEqual(raised.exception.code, "CONTROL_PLANE_NOT_READY")
@@ -496,9 +501,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                     )
 
                 recovered = self.application.recover()
-                recovery = next(
-                    item for item in recovered if item["operation_id"] == operation_id
-                )
+                recovery = next(item for item in recovered if item["operation_id"] == operation_id)
                 self.assertEqual(recovery["status"], "RECOVERED")
                 self.assertEqual(
                     self.store.instance.get(recovery_task_id, "i_image_1")["status"],
@@ -634,9 +637,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(failed["state"], "RETRYABLE_FAILED")
-        instance_state = self.store.instance.get(
-            "t_agent_start_failure", "i_image_1"
-        )
+        instance_state = self.store.instance.get("t_agent_start_failure", "i_image_1")
         self.assertEqual(instance_state["status"], "FAILED_TO_START")
         self.assertEqual(instance_state["process"]["state"], "RUNNING")
         self.assertEqual(instance_state["start_failure"]["phase"], "AGENT_STARTING")
@@ -1141,9 +1142,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             action="publish_bundle",
             payload={},
             operation_id="publish_bundle_main_01",
-            envelope=envelope(
-                "publish-bundle-main-01", approval["approval_revision"]
-            ),
+            envelope=envelope("publish-bundle-main-01", approval["approval_revision"]),
         )
 
         self.assertEqual(resolved["instance"]["status"], "SUCCEEDED")
@@ -1190,9 +1189,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             action="publish_bundle",
             payload={},
             operation_id="publish_bundle_main_01",
-            envelope=envelope(
-                "publish-bundle-main-01", approval["approval_revision"]
-            ),
+            envelope=envelope("publish-bundle-main-01", approval["approval_revision"]),
         )
         self.assertEqual(replay["bundle_manifest"], resolved["bundle_manifest"])
         self.assertEqual(len(self.assets.list_assets(task_id)), 4)
@@ -1240,17 +1237,13 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.fake_adapter.observation = AdapterObservation(
             "RUNNING", step_id="completed", details={"completed": True}
         )
-        approval = self.application.observe_instance(task_id, "i_image_1")["delivery"][
-            "approval"
-        ]
+        approval = self.application.observe_instance(task_id, "i_image_1")["delivery"]["approval"]
 
         def crash(checkpoint: str) -> None:
             if checkpoint == "after_bundle_manifest_write":
                 raise SimulatedCrash(checkpoint)
 
-        resolve_envelope = envelope(
-            "publish-crash-safe-bundle", approval["approval_revision"]
-        )
+        resolve_envelope = envelope("publish-crash-safe-bundle", approval["approval_revision"])
         with self.assertRaises(SimulatedCrash):
             self.application.resolve_approval(
                 approval["approval"]["approval_id"],
@@ -1327,7 +1320,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 ],
             )
         self.assertEqual(unexpected.exception.code, "VALIDATION_ERROR")
-
 
     def test_publication_batch_is_invisible_until_instance_success(self) -> None:
         task_id = "t_atomic_publication_visibility"

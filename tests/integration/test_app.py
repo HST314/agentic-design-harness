@@ -42,7 +42,7 @@ class ApplicationTests(unittest.TestCase):
                     client.get("/api/v1/adapters").json()["items"],
                     [
                         {"agent_type": "image", "available": False},
-                        {"agent_type": "ppt", "available": False},
+                        {"agent_type": "ppt", "available": True},
                     ],
                 )
                 validation = client.post(
@@ -185,7 +185,7 @@ class ApplicationTests(unittest.TestCase):
                     adapters.json()["items"],
                     [
                         {"agent_type": "image", "available": True},
-                        {"agent_type": "ppt", "available": False},
+                        {"agent_type": "ppt", "available": True},
                     ],
                 )
 
@@ -208,9 +208,7 @@ class ApplicationTests(unittest.TestCase):
                     if status == "RUNNING":
                         operation = {
                             "state": "RUNNING",
-                            "instance_progress": {
-                                "i_api_g2": {"state": "AGENT_STARTING"}
-                            },
+                            "instance_progress": {"i_api_g2": {"state": "AGENT_STARTING"}},
                         }
                         with patch.object(
                             container.application,
@@ -218,12 +216,8 @@ class ApplicationTests(unittest.TestCase):
                             return_value=operation,
                         ):
                             agent_starting = client.get("/api/v1/instances/i_api_g2")
-                        self.assertEqual(
-                            agent_starting.status_code, 200, agent_starting.text
-                        )
-                        self.assertEqual(
-                            agent_starting.json()["instance"]["status"], "RUNNING"
-                        )
+                        self.assertEqual(agent_starting.status_code, 200, agent_starting.text)
+                        self.assertEqual(agent_starting.json()["instance"]["status"], "RUNNING")
                         self.assertIsNone(agent_starting.json()["observation"])
                 created_approval = container.approvals.ensure_workflow_approval(
                     "t_api_g2",
@@ -256,9 +250,7 @@ class ApplicationTests(unittest.TestCase):
                     f"/api/v1/inbox/{item['inbox_id']}/status",
                     json={
                         "status": "READ",
-                        "envelope": self._envelope(
-                            "api-g3-read", item["store_revision"]
-                        ),
+                        "envelope": self._envelope("api-g3-read", item["store_revision"]),
                     },
                 )
                 self.assertEqual(marked_read.json()["item"]["status"], "READ")
@@ -312,9 +304,7 @@ class ApplicationTests(unittest.TestCase):
                 )
                 self.assertEqual(imported_via_api.status_code, 200, imported_via_api.text)
                 self.assertTrue(
-                    imported_via_api.json()["manifest"]["relative_path"].endswith(
-                        "/api-note.txt"
-                    )
+                    imported_via_api.json()["manifest"]["relative_path"].endswith("/api-note.txt")
                 )
                 invalid_import = client.post(
                     "/api/v1/tasks/t_api_g2/assets",
@@ -327,9 +317,7 @@ class ApplicationTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(invalid_import.status_code, 422)
-                self.assertEqual(
-                    invalid_import.json()["error"]["code"], "ASSET_VALIDATION_FAILED"
-                )
+                self.assertEqual(invalid_import.json()["error"]["code"], "ASSET_VALIDATION_FAILED")
 
                 task_approvals = client.get("/api/v1/tasks/t_api_g2/approvals")
                 self.assertEqual(task_approvals.status_code, 200, task_approvals.text)
@@ -391,9 +379,7 @@ class ApplicationTests(unittest.TestCase):
                     "/api/v1/tasks/t_api_g2/cancel",
                     json={
                         "operation_id": "cancel_api_g5_task",
-                        "envelope": self._envelope(
-                            "cancel-api-g5-task", current_revision
-                        ),
+                        "envelope": self._envelope("cancel-api-g5-task", current_revision),
                     },
                 )
                 self.assertEqual(cancelled_replay.status_code, 200, cancelled_replay.text)
@@ -520,13 +506,11 @@ class ApplicationTests(unittest.TestCase):
                     headers = {}
                     if if_match is not None:
                         headers["If-Match"] = str(if_match)
-                    return client.put(
-                        "/api/v1/tasks/t_api_mode/plan", json=body, headers=headers
-                    )
+                    return client.put("/api/v1/tasks/t_api_mode/plan", json=body, headers=headers)
 
-                initial_plan_revision = container.store.task.get(
-                    "t_api_mode", "t_api_mode"
-                )["plan_revision"]
+                initial_plan_revision = container.store.task.get("t_api_mode", "t_api_mode")[
+                    "plan_revision"
+                ]
                 first = put_plan("one", 1, "first", 1, if_match=initial_plan_revision)
                 self.assertEqual(first.status_code, 200, first.text)
                 landed_plan_revision = first.json()["task"]["plan_revision"]
@@ -567,9 +551,7 @@ class ApplicationTests(unittest.TestCase):
                     if_match=landed_plan_revision,
                 )
                 self.assertEqual(appended.status_code, 200, appended.text)
-                self.assertEqual(
-                    appended.json()["task"]["plan_revision"], landed_plan_revision + 1
-                )
+                self.assertEqual(appended.json()["task"]["plan_revision"], landed_plan_revision + 1)
                 self.assertEqual(len(appended.json()["plan"]["stages"]), 2)
 
                 replaced = put_plan(
@@ -579,9 +561,7 @@ class ApplicationTests(unittest.TestCase):
                     appended.json()["task_revision"],
                 )
                 self.assertEqual(replaced.status_code, 409, replaced.text)
-                self.assertEqual(
-                    replaced.json()["error"]["code"], "INVALID_STATE_TRANSITION"
-                )
+                self.assertEqual(replaced.json()["error"]["code"], "INVALID_STATE_TRANSITION")
 
     @staticmethod
     def _envelope(key: str, expected_revision: int) -> dict[str, object]:

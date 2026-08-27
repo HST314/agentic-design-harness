@@ -71,9 +71,7 @@ def _console_safe(value: str, *, encoding: str | None = None) -> str:
     try:
         value.encode(selected_encoding)
     except UnicodeEncodeError:
-        return value.encode(selected_encoding, errors="backslashreplace").decode(
-            selected_encoding
-        )
+        return value.encode(selected_encoding, errors="backslashreplace").decode(selected_encoding)
     return value
 
 
@@ -85,9 +83,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def input_digest(
-    paths: Sequence[Path], *, identity: Sequence[str] = (), root: Path = ROOT
-) -> str:
+def input_digest(paths: Sequence[Path], *, identity: Sequence[str] = (), root: Path = ROOT) -> str:
     """Hash named inputs without depending on absolute checkout locations."""
 
     digest = hashlib.sha256()
@@ -232,6 +228,10 @@ class DevelopmentLauncher:
         return candidate
 
     @property
+    def ppt_agent_root(self) -> Path:
+        return self.root / "agents" / "ppt-agent"
+
+    @property
     def venv_root(self) -> Path:
         return self.root / ".venv"
 
@@ -246,6 +246,10 @@ class DevelopmentLauncher:
     @property
     def image_dependency_root(self) -> Path:
         return self.runtime_root / "image-agent-deps"
+
+    @property
+    def ppt_dependency_root(self) -> Path:
+        return self.runtime_root / "ppt-agent-deps"
 
     @property
     def image_runtime_root(self) -> Path:
@@ -283,9 +287,7 @@ class DevelopmentLauncher:
         )
 
     @staticmethod
-    def _identity_matches_path(
-        identity: PythonInterpreterIdentity, path: Path
-    ) -> bool:
+    def _identity_matches_path(identity: PythonInterpreterIdentity, path: Path) -> bool:
         return os.path.normcase(os.path.abspath(identity.executable)) == os.path.normcase(
             os.path.abspath(path)
         )
@@ -350,9 +352,7 @@ class DevelopmentLauncher:
             cwd=self.root,
         )
 
-    def backend_input_digest(
-        self, identity: PythonInterpreterIdentity | None = None
-    ) -> str:
+    def backend_input_digest(self, identity: PythonInterpreterIdentity | None = None) -> str:
         selected = identity or self.interpreter_identity([self.venv_python])
         return input_digest(
             [self.root / "requirements-runtime.txt", self.root / "pyproject.toml"],
@@ -469,20 +469,13 @@ class DevelopmentLauncher:
                 self.interpreter_identity([self.venv_python]),
             )
         if not command_succeeds([self.python, "-m", "pip", "--version"]):
-            _fail(
-                "pip is unavailable. Install the Python pip/venv components and rerun setup."
-            )
+            _fail("pip is unavailable. Install the Python pip/venv components and rerun setup.")
         installer_identity = self.interpreter_identity([self.python])
         if os.name == "nt":
             site_packages = self.venv_root / "Lib" / "site-packages"
         else:
             major, minor, *_ = installer_identity.version.split(".")
-            site_packages = (
-                self.venv_root
-                / "lib"
-                / f"python{major}.{minor}"
-                / "site-packages"
-            )
+            site_packages = self.venv_root / "lib" / f"python{major}.{minor}" / "site-packages"
         site_packages.mkdir(parents=True, exist_ok=True)
         return [str(self.python), "-m", "pip"], site_packages, installer_identity
 
@@ -547,18 +540,14 @@ class DevelopmentLauncher:
         lock = load_json(self.lock_path)
         paths: list[Path] = [self.lock_path]
         dependencies = lock.get("dependencies")
-        if not isinstance(dependencies, dict) or not isinstance(
-            dependencies.get("files"), list
-        ):
+        if not isinstance(dependencies, dict) or not isinstance(dependencies.get("files"), list):
             _fail("Image Agent lock has no dependency file list.")
         for item in dependencies["files"]:
             if not isinstance(item, dict):
                 _fail("Image Agent lock contains an invalid dependency record.")
             scope = item.get("scope")
             relative = Path(str(item.get("path", "")))
-            paths.append(
-                (self.root if scope == "harness" else self.image_agent_root) / relative
-            )
+            paths.append((self.root if scope == "harness" else self.image_agent_root) / relative)
         return input_digest(
             paths,
             identity=(
@@ -581,8 +570,7 @@ class DevelopmentLauncher:
         stamp_path = root / IMAGE_STAMP_NAME
         if not root.is_dir() or not stamp_path.is_file():
             _fail(
-                "Image Agent dependencies are not installed; run "
-                "scripts/dev.py setup --force."
+                "Image Agent dependencies are not installed; run " "scripts/dev.py setup --force."
             )
         stamp = load_json(stamp_path)
         runtime_identity = self.interpreter_identity([self.image_python])
@@ -595,9 +583,7 @@ class DevelopmentLauncher:
                 "Image Agent would run with an unexpected Python interpreter; rebuild "
                 "the Harness environment with scripts/dev.py setup --force."
             )
-        expected_input = self.image_input_digest(
-            runtime_identity, installer_identity
-        )
+        expected_input = self.image_input_digest(runtime_identity, installer_identity)
         if (
             stamp.get("schema_version") != "2.0"
             or stamp.get("input_sha256") != expected_input
@@ -610,8 +596,7 @@ class DevelopmentLauncher:
             )
         if stamp.get("content_sha256") != actual_digest:
             _fail(
-                "Image Agent dependencies changed after setup; run "
-                "scripts/dev.py setup --force."
+                "Image Agent dependencies changed after setup; run " "scripts/dev.py setup --force."
             )
         return runtime_identity, installer_identity
 
@@ -700,9 +685,7 @@ class DevelopmentLauncher:
             print("[ok] Image Agent isolated dependencies match their locks.", flush=True)
             return
         self.runtime_root.mkdir(parents=True, exist_ok=True)
-        temporary = Path(
-            tempfile.mkdtemp(prefix=".image-agent-deps-", dir=self.runtime_root)
-        )
+        temporary = Path(tempfile.mkdtemp(prefix=".image-agent-deps-", dir=self.runtime_root))
         backup: Path | None = None
         try:
             installer, _, installer_identity = self.pip_installer()
@@ -731,9 +714,7 @@ class DevelopmentLauncher:
                 temporary / IMAGE_STAMP_NAME,
                 {
                     "schema_version": "2.0",
-                    "input_sha256": self.image_input_digest(
-                        runtime_identity, installer_identity
-                    ),
+                    "input_sha256": self.image_input_digest(runtime_identity, installer_identity),
                     "content_sha256": content_sha256,
                     "interpreter": runtime_identity.as_dict(),
                     "installer": installer_identity.as_dict(),
@@ -753,10 +734,62 @@ class DevelopmentLauncher:
                 backup.replace(self.image_dependency_root)
             raise
 
-    def frontend_input_digest(self) -> str:
-        return input_digest(
-            [self.frontend_root / "package-lock.json"], root=self.root
+    def install_ppt_dependencies(self, *, force: bool = False) -> None:
+        """Install PPT Agent's declared runtime dependencies in an isolated target."""
+
+        marker = self.ppt_dependency_root / ".requirements-installed"
+        expected = input_digest(
+            [self.root / "agents" / "ppt-agent.lock.json", self.ppt_agent_root / "pyproject.toml"],
+            root=self.root,
         )
+        if (
+            not force
+            and marker.is_file()
+            and marker.read_text(encoding="utf-8").strip() == expected
+        ):
+            print("[ok] PPT Agent isolated dependencies match their lock.", flush=True)
+            return
+        self.runtime_root.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".ppt-agent-deps-", dir=self.runtime_root))
+        backup: Path | None = None
+        try:
+            installer, _, _ = self.pip_installer()
+            run_command(
+                [
+                    *installer,
+                    "install",
+                    "--disable-pip-version-check",
+                    "--upgrade",
+                    "--target",
+                    temporary,
+                    "fastapi>=0.110,<1",
+                    "html5lib>=1.1,<2",
+                    "openai>=1.0,<2",
+                    "pydantic>=2.6,<3",
+                    "PyYAML>=6.0,<7",
+                    "tinycss2>=1.4,<2",
+                    "uvicorn>=0.29,<1",
+                ],
+                cwd=self.root,
+                environment=self.pip_environment(),
+            )
+            marker_path = temporary / ".requirements-installed"
+            marker_path.write_text(expected + "\n", encoding="utf-8")
+            if self.ppt_dependency_root.exists():
+                backup = self.runtime_root / f".ppt-agent-deps-backup-{uuid.uuid4().hex}"
+                self.ppt_dependency_root.replace(backup)
+            temporary.replace(self.ppt_dependency_root)
+            if backup is not None:
+                shutil.rmtree(backup)
+        except BaseException:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            if backup is not None and backup.exists() and not self.ppt_dependency_root.exists():
+                backup.replace(self.ppt_dependency_root)
+            raise
+
+    def frontend_input_digest(self) -> str:
+        return input_digest([self.frontend_root / "package-lock.json"], root=self.root)
 
     def frontend_is_current(self) -> bool:
         node_modules = self.frontend_root / "node_modules"
@@ -795,6 +828,7 @@ class DevelopmentLauncher:
         self.ensure_submodule()
         self.install_backend(force=force)
         self.install_image_dependencies(force=force)
+        self.install_ppt_dependencies(force=force)
         self.prepare_image_runtime()
         self.install_frontend(force=force)
         print("[ok] Development environment is ready.", flush=True)
@@ -877,6 +911,9 @@ class DevelopmentLauncher:
             "assert s.contracts_root.is_dir(); assert s.image_agent_root.is_dir(); "
             "assert s.image_agent_lock_path.is_file(); "
             "assert s.image_agent_python.is_file()"
+            "; assert s.ppt_agent_root.is_dir(); assert s.ppt_agent_lock_path.is_file(); "
+            "assert s.ppt_agent_python.is_file(); assert s.ppt_agent_runtime_policy.is_file(); "
+            "assert s.ppt_agent_model_config.is_file()"
         )
         if not command_succeeds(
             [self.venv_python, "-c", code],
@@ -888,9 +925,7 @@ class DevelopmentLauncher:
     def _check_writable_runtime(self) -> None:
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         try:
-            descriptor, raw_path = tempfile.mkstemp(
-                prefix=".doctor-", dir=self.runtime_root
-            )
+            descriptor, raw_path = tempfile.mkstemp(prefix=".doctor-", dir=self.runtime_root)
             os.close(descriptor)
             Path(raw_path).unlink()
         except OSError as exc:
@@ -925,9 +960,7 @@ class DevelopmentLauncher:
         print("[ok] Harness Python environment", flush=True)
         image_degraded = False
         try:
-            runtime_identity, installer_identity = (
-                self.require_current_image_dependencies()
-            )
+            runtime_identity, installer_identity = self.require_current_image_dependencies()
             attestation = self.prepare_image_runtime()
         except LauncherError as exc:
             if not allow_image_degraded:
@@ -986,9 +1019,7 @@ class DevelopmentLauncher:
         )
         backend_environment = self.backend_environment()
         frontend_environment = self.npm_environment()
-        frontend_environment["HARNESS_BACKEND_URL"] = (
-            f"http://127.0.0.1:{backend_port}"
-        )
+        frontend_environment["HARNESS_BACKEND_URL"] = f"http://127.0.0.1:{backend_port}"
         npm = executable("npm")
         specifications = (
             ChildSpecification(
@@ -1105,9 +1136,7 @@ class ChildGroup:
         except (OSError, urllib.error.URLError):
             return False
 
-    def wait_until_healthy(
-        self, urls: Sequence[str], *, timeout_seconds: float
-    ) -> None:
+    def wait_until_healthy(self, urls: Sequence[str], *, timeout_seconds: float) -> None:
         pending = set(urls)
         deadline = time.monotonic() + timeout_seconds
         while pending and time.monotonic() < deadline:

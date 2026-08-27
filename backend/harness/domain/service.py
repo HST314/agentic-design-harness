@@ -129,9 +129,7 @@ class TaskCommandService:
             lambda: self._rename_task(request, envelope),
         )
 
-    def _rename_task(
-        self, request: dict[str, Any], envelope: CommandEnvelope
-    ) -> dict[str, Any]:
+    def _rename_task(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
         task_id = request["task_id"]
         task = self._task(task_id)
         actual = self.store.task.revision(task_id, task_id)
@@ -677,7 +675,7 @@ class TaskCommandService:
                         "first_activated_at": None,
                         "authorized_downgrade": None,
                     },
-                    "status": "READY" if raw["agent_type"] == "image" else "UNAVAILABLE",
+                    "status": "READY" if raw["agent_type"] in {"image", "ppt"} else "UNAVAILABLE",
                     "process": None,
                     "ui_url": None,
                     "created_at": now,
@@ -783,7 +781,7 @@ class TaskCommandService:
                         "first_activated_at": None,
                         "authorized_downgrade": None,
                     },
-                    "status": "READY" if raw["agent_type"] == "image" else "UNAVAILABLE",
+                    "status": "READY" if raw["agent_type"] in {"image", "ppt"} else "UNAVAILABLE",
                     "process": None,
                     "ui_url": None,
                     "created_at": now,
@@ -823,13 +821,9 @@ class TaskCommandService:
                 stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]
             )
             if activate_new and dependencies_ready and stage["type"] == "ppt":
-                if stage["required"]:
-                    self._activate_lifecycle(stage, now)
-                    for instance_id in stage["instance_ids"]:
-                        self._activate_lifecycle(instance_by_id[instance_id], now)
-                    target = "UNAVAILABLE"
-                else:
-                    target = "SKIPPED"
+                self._activate_lifecycle(stage, now)
+                for instance_id in stage["instance_ids"]:
+                    self._activate_lifecycle(instance_by_id[instance_id], now)
             if target != before and before not in {"SKIPPED", "CANCELLED"}:
                 self._validate_stage_reaggregation(before, target)
             stage["status"] = target
@@ -852,11 +846,6 @@ class TaskCommandService:
         instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
         for stage in sorted(plan["stages"], key=lambda item: item["position"]):
             if not all(stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]):
-                continue
-            if stage["type"] == "ppt" and not stage["required"]:
-                if stage["status"] != "SKIPPED":
-                    self.machine.transition("stage", stage["status"], "SKIPPED")
-                stage["status"] = "SKIPPED"
                 continue
             self._activate_lifecycle(stage, now)
             for instance_id in stage["instance_ids"]:

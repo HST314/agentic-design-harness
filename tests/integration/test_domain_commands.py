@@ -95,7 +95,7 @@ class TaskCommandTests(unittest.TestCase):
         result = self._transition("t_complete", "i_image_1", "SUCCEEDED", "done")
         self.assertEqual(result["task"]["status"], "SUCCEEDED")
 
-    def test_ppt_only_blocks_only_when_activated(self) -> None:
+    def test_ppt_only_becomes_running_when_activated(self) -> None:
         create_task(self.service, "t_ppt_manual")
         saved = self._save("t_ppt_manual", ppt_plan("t_ppt_manual"))
         self.assertEqual(saved["task"]["status"], "AWAITING_START_CONFIRMATION")
@@ -105,28 +105,28 @@ class TaskCommandTests(unittest.TestCase):
         confirmed = self.service.confirm_start(
             "t_ppt_manual", envelope("confirm-ppt", saved["task_revision"])
         )
-        self.assertEqual(confirmed["task"]["status"], "BLOCKED_UNAVAILABLE")
+        self.assertEqual(confirmed["task"]["status"], "RUNNING")
+        self.assertEqual(confirmed["plan"]["instances"][0]["status"], "READY")
         self.assertIsNotNone(
             confirmed["plan"]["instances"][0]["requirement_lifecycle"]["first_activated_at"]
         )
 
-    def test_manual_optional_ppt_only_is_explicitly_skipped_without_partial(self) -> None:
+    def test_manual_optional_ppt_is_available_after_confirmation(self) -> None:
         create_task(self.service, "t_ppt_optional")
         saved = self._save(
             "t_ppt_optional",
             ppt_plan("t_ppt_optional", required=False),
         )
         self.assertEqual(saved["task"]["status"], "AWAITING_START_CONFIRMATION")
-        self.assertEqual(saved["plan"]["stages"][0]["status"], "SKIPPED")
+        self.assertEqual(saved["plan"]["stages"][0]["status"], "READY")
 
         confirmed = self.service.confirm_start(
             "t_ppt_optional",
             envelope("confirm-ppt-optional", saved["task_revision"]),
         )
 
-        self.assertEqual(confirmed["task"]["status"], "SUCCEEDED")
-        self.assertEqual(confirmed["plan"]["stages"][0]["status"], "SKIPPED")
-        self.assertNotEqual(confirmed["task"]["status"], "PARTIAL")
+        self.assertEqual(confirmed["task"]["status"], "RUNNING")
+        self.assertEqual(confirmed["plan"]["stages"][0]["status"], "READY")
 
     def test_required_ppt_is_delayed_until_image_succeeds_and_survives_restart(self) -> None:
         create_task(self.service, "t_delayed", "auto")
@@ -139,8 +139,8 @@ class TaskCommandTests(unittest.TestCase):
         self._transition("t_delayed", "i_image_1", "STARTING", "starting")
         self._transition("t_delayed", "i_image_1", "RUNNING", "running")
         finished = self._transition("t_delayed", "i_image_1", "SUCCEEDED", "succeeded")
-        self.assertEqual(finished["task"]["status"], "BLOCKED_UNAVAILABLE")
-        self.assertEqual(finished["plan"]["stages"][1]["status"], "UNAVAILABLE")
+        self.assertEqual(finished["task"]["status"], "RUNNING")
+        self.assertEqual(finished["plan"]["stages"][1]["status"], "READY")
         self.assertIsNotNone(
             finished["plan"]["instances"][1]["requirement_lifecycle"]["first_activated_at"]
         )
@@ -149,16 +149,16 @@ class TaskCommandTests(unittest.TestCase):
         self.store = recovered_store
         self.service = recovered_service
         recovered = self.store.plan.get("t_delayed", "t_delayed")
-        self.assertEqual(recovered["task"]["status"], "BLOCKED_UNAVAILABLE")
+        self.assertEqual(recovered["task"]["status"], "RUNNING")
 
-    def test_initial_optional_ppt_is_skipped_without_partial_result(self) -> None:
+    def test_initial_optional_ppt_activates_after_image_succeeds(self) -> None:
         create_task(self.service, "t_optional", "auto")
         self._save("t_optional", image_to_ppt_plan("t_optional", ppt_required=False))
         self._transition("t_optional", "i_image_1", "STARTING", "starting")
         self._transition("t_optional", "i_image_1", "RUNNING", "running")
         finished = self._transition("t_optional", "i_image_1", "SUCCEEDED", "succeeded")
-        self.assertEqual(finished["plan"]["stages"][1]["status"], "SKIPPED")
-        self.assertEqual(finished["task"]["status"], "SUCCEEDED")
+        self.assertEqual(finished["plan"]["stages"][1]["status"], "READY")
+        self.assertEqual(finished["task"]["status"], "RUNNING")
 
     def test_running_work_has_priority_over_waiting_approval(self) -> None:
         create_task(self.service, "t_priority", "auto")

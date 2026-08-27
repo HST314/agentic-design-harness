@@ -159,7 +159,7 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                 self.assertEqual(waiting["items"][0]["business_status"], "WAITING_APPROVAL")
                 self.assertEqual(waiting["refresh_after_ms"], 5000)
 
-    def test_legacy_ppt_plan_projects_truthful_unavailable_boundary(self) -> None:
+    def test_ppt_plan_projects_available_runtime_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))
             with TestClient(app) as client:
@@ -203,7 +203,7 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                                 "instance_id": "instance_board_ppt",
                                 "agent_type": "ppt",
                                 "objective": "整合已确认视觉资源并制作演示文稿。",
-                                "instructions": ["等待 PPT 能力接入。"],
+                                "instructions": ["使用已确认视觉资源。"],
                                 "input_assets": [],
                                 "expected_deliveries": [
                                     {
@@ -225,12 +225,9 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 200, response.text)
                 projection = client.get(f"/api/v1/tasks/{task_id}/work-items").json()
-                self.assertFalse(projection["stages"][0]["available"])
-                self.assertEqual(projection["items"][0]["business_status"], "EXCEPTION")
-                self.assertIn(
-                    "ADAPTER_UNAVAILABLE",
-                    {alert["code"] for alert in projection["items"][0]["alerts"]},
-                )
+                self.assertTrue(projection["stages"][0]["available"])
+                self.assertEqual(projection["items"][0]["business_status"], "TODO")
+                self.assertEqual(projection["items"][0]["alerts"], [])
 
     @staticmethod
     def _app(root: Path):

@@ -183,15 +183,21 @@ class StateStoreRecoveryTests(unittest.TestCase):
         self.store = store
         created = create_task(service, "t_topology", "auto")
         old = ppt_plan("t_topology")
-        blocked = service.save_plan(
+        landed = service.save_plan(
             "t_topology",
             stages=old["stages"],
             instances=old["instances"],
             task_cards=old["task_cards"],
             envelope=envelope("save-ppt-topology", created["revision"]),
         )
+        failed = service.transition_instance(
+            "t_topology",
+            "i_ppt_1",
+            "FAILED_TO_START",
+            envelope("fail-ppt-topology", landed["task_revision"], "adapter"),
+        )
         replacement = image_plan("t_topology")
-        command = envelope("save-image-topology", blocked["task_revision"])
+        command = envelope("save-image-topology", failed["task_revision"])
 
         with patch.object(
             store,
@@ -223,7 +229,7 @@ class StateStoreRecoveryTests(unittest.TestCase):
             envelope=command,
         )
 
-        self.assertEqual(replayed["task_revision"], 3)
+        self.assertEqual(replayed["task_revision"], 4)
         self.assertEqual(
             {item["stage_id"] for item in recovered_store.stage.list("t_topology")},
             {"s_image"},
