@@ -14,6 +14,14 @@ from ..core.errors import HarnessError
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _VERSION = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?$")
+_DEPENDENCY_SCOPES = frozenset({"harness", "ppt_agent"})
+
+
+@dataclass(frozen=True, slots=True)
+class LockedPptDependencyFile:
+    scope: str
+    path: str
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +32,7 @@ class PptAgentReleaseLock:
     contract_version: str
     embedded_path: str
     source_content_sha256: str
+    dependency_files: tuple[LockedPptDependencyFile, ...]
     dependency_lock_set_sha256: str
 
 
@@ -68,15 +77,33 @@ def load_ppt_agent_lock(path: Path) -> PptAgentReleaseLock:
     files = dependencies.get("files")
     if not isinstance(files, list) or not files:
         _invalid("The PPT Agent dependency lock is empty.", path)
+    locked_files: list[LockedPptDependencyFile] = []
+    identities: set[tuple[str, str]] = set()
     for item in files:
         if (
             not isinstance(item, dict)
             or set(item) != {"scope", "path", "sha256"}
-            or item.get("scope") != "ppt_agent"
         ):
             _invalid("The PPT Agent dependency record is invalid.", path)
-        _relative(item.get("path"), "dependency path", path)
-        _matching(item.get("sha256"), _SHA256, "dependency sha256", path)
+        scope = _string(item.get("scope"), "dependency scope", path)
+        if scope not in _DEPENDENCY_SCOPES:
+            _invalid("The PPT Agent dependency scope is unsupported.", path)
+        relative = _relative(item.get("path"), "dependency path", path)
+        identity = (scope, relative)
+        if identity in identities:
+            _invalid("The PPT Agent dependency lock contains a duplicate file.", path)
+        identities.add(identity)
+        locked_files.append(
+            LockedPptDependencyFile(
+                scope,
+                relative,
+                _matching(item.get("sha256"), _SHA256, "dependency sha256", path),
+            )
+        )
+    if tuple((item.scope, item.path) for item in locked_files) != tuple(
+        sorted((item.scope, item.path) for item in locked_files)
+    ):
+        _invalid("The PPT Agent dependency file lock is not canonical.", path)
     return PptAgentReleaseLock(
         repository=repository,
         revision=_matching(document.get("revision"), _REVISION, "revision", path),
@@ -90,6 +117,7 @@ def load_ppt_agent_lock(path: Path) -> PptAgentReleaseLock:
         source_content_sha256=_matching(
             document.get("source_content_sha256"), _SHA256, "source digest", path
         ),
+        dependency_files=tuple(locked_files),
         dependency_lock_set_sha256=_matching(
             dependencies.get("lock_set_sha256"), _SHA256, "dependency lock digest", path
         ),

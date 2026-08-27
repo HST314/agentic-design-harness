@@ -10,11 +10,16 @@
   "dependencies": {
     "files": [
       {
+        "scope": "harness",
+        "path": "requirements/ppt-agent.lock",
+        "sha256": "06dccf0ec76b929ab95337faf3ac0876e111526e3c58c9197ae96283c2122c54"
+      },
+      {
         "scope": "ppt_agent",
         "path": "pyproject.toml",
         "sha256": "950f04e42b92874bfb5ccfdd37b15c8e81d5003ee8fb0cb8add850407b8d3ba4"
       }
     ],
-    "lock_set_sha256": "b018ee2d88080b71db02a34b0e46958f38d5fb8e43d8accf8bacda0d6ddb62b7"
+    "lock_set_sha256": "df93bb7b107c1fdaebacacfd56358570d6544ba78724177035404aae72d7e186"
   }
 }

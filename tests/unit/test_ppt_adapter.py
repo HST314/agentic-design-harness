@@ -72,7 +72,11 @@ class PptAgentAdapterTests(unittest.TestCase):
         self.assertIn("{port}", spec.command)
         self.assertEqual(
             spec.public_environment["PPT_AGENT_IMAGES_ROOT"],
-            str(task_root / "resources" / "shared"),
+            str(task_root / "instances" / instance_id / "work" / "input-snapshot"),
+        )
+        self.assertEqual(
+            spec.writable_roots,
+            (task_root / "instances" / instance_id / "work" / "projects",),
         )
         self.assertEqual(
             spec.public_environment["PPT_AGENT_PROJECTS_ROOT"],
@@ -125,7 +129,7 @@ class PptAgentAdapterTests(unittest.TestCase):
         images_root = Path(spec.public_environment["PPT_AGENT_IMAGES_ROOT"])
         self.assertEqual(
             images_root,
-            task_root / "instances" / instance_id / "work" / "empty-input",
+            task_root / "instances" / instance_id / "work" / "input-snapshot",
         )
         self.assertTrue(images_root.is_dir())
         self.assertEqual(list(images_root.iterdir()), [])

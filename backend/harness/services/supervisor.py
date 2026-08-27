@@ -292,6 +292,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                             if pinned_artifact.source_descriptor is not None
                             else []
                         ),
+                        "writable_roots": [str(path) for path in spec.writable_roots],
                     },
                     mode=0o600,
                 )

@@ -19,6 +19,7 @@ _IGNORED_NAMES = frozenset(
         ".mypy_cache",
         ".pytest_cache",
         ".requirements-installed",
+        ".requirements-installed.json",
         ".ruff_cache",
         "__pycache__",
         "build",
@@ -88,6 +89,57 @@ for module_name, expected_root in expected_roots.items():
             "module": module_name,
             "origin": str(origin),
             "expected_root": str(expected_root),
+        }, sort_keys=True))
+        raise SystemExit(2)
+    imports[module_name] = str(origin)
+
+def normalized_name(value):
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+distributions = {}
+for distribution in importlib.metadata.distributions(path=[str(dependency_root)]):
+    name = distribution.metadata.get("Name")
+    if name:
+        distributions[normalized_name(name)] = distribution.version
+print(json.dumps({
+    "python_executable": sys.executable,
+    "imports": imports,
+    "distributions": distributions,
+}, sort_keys=True))
+"""
+_PPT_RUNTIME_PACKAGE_PROBE = r"""
+import importlib
+import importlib.metadata
+import json
+import re
+import sys
+from pathlib import Path
+
+source_root = Path(sys.argv[1]).resolve()
+dependency_root = Path(sys.argv[2]).resolve()
+sys.path.insert(0, str(source_root))
+sys.path.insert(0, str(dependency_root))
+expected_roots = {
+    "fastapi": dependency_root,
+    "html5lib": dependency_root,
+    "openai": dependency_root,
+    "pydantic": dependency_root,
+    "tinycss2": dependency_root,
+    "uvicorn": dependency_root,
+    "yaml": dependency_root,
+    "main_front": source_root,
+}
+imports = {}
+for module_name, expected_root in expected_roots.items():
+    try:
+        module = importlib.import_module(module_name)
+        origin = Path(module.__file__).resolve()
+        origin.relative_to(expected_root)
+    except Exception as exc:
+        print(json.dumps({
+            "error": "import_outside_isolated_runtime",
+            "module": module_name,
+            "error_type": type(exc).__name__,
         }, sort_keys=True))
         raise SystemExit(2)
     imports[module_name] = str(origin)
@@ -250,6 +302,70 @@ def inspect_runtime_packages(
         imports=imports,
         distributions=distributions,
     )
+
+
+def inspect_ppt_runtime_packages(
+    interpreter: Path,
+    *,
+    source_root: Path,
+    dependency_root: Path,
+) -> RuntimePackageIdentity:
+    """Verify PPT imports and distribution metadata against isolated roots."""
+
+    try:
+        completed = subprocess.run(
+            [
+                str(interpreter),
+                "-I",
+                "-c",
+                _PPT_RUNTIME_PACKAGE_PROBE,
+                str(source_root),
+                str(dependency_root),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise RuntimeIdentityError(
+            "The PPT Agent interpreter could not run the import probe."
+        ) from exc
+    try:
+        document: Any = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeIdentityError(
+            "The PPT Agent import probe returned no usable diagnostics."
+        ) from exc
+    if completed.returncode != 0:
+        module = document.get("module") if isinstance(document, dict) else None
+        reason = document.get("error") if isinstance(document, dict) else None
+        suffix = f" ({module}: {reason})" if module and reason else ""
+        raise RuntimeIdentityError(
+            "The PPT Agent packages are not importable from the isolated dependency "
+            f"directory{suffix}."
+        )
+    if not isinstance(document, dict) or set(document) != {
+        "python_executable",
+        "imports",
+        "distributions",
+    }:
+        raise RuntimeIdentityError("The PPT Agent import probe returned invalid data.")
+    python_executable = document["python_executable"]
+    imports = document["imports"]
+    distributions = document["distributions"]
+    if (
+        not isinstance(python_executable, str)
+        or not python_executable
+        or not isinstance(imports, dict)
+        or not isinstance(distributions, dict)
+        or not all(
+            isinstance(name, str) and isinstance(value, str) and name and value
+            for collection in (imports, distributions)
+            for name, value in collection.items()
+        )
+    ):
+        raise RuntimeIdentityError("The PPT Agent import probe returned invalid data.")
+    return RuntimePackageIdentity(python_executable, imports, distributions)
 
 
 def runtime_platform_identity() -> str:

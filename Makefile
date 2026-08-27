@@ -32,6 +32,7 @@ boundary-check:
 
 lock-check:
 	$(PYTHON) scripts/verify_image_agent_lock.py
+	$(PYTHON) scripts/verify_ppt_agent_lock.py
 
 dependency-audit: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m pip_audit \

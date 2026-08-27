@@ -27,7 +27,8 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
-from .image_runtime import content_tree_sha256
+from .image_runtime import content_tree_sha256, dependency_tree_sha256
+from .ppt_attestation import attest_ppt_runtime
 from .ppt_lock import PptAgentReleaseLock
 from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
 
@@ -107,13 +108,16 @@ class PptAgentAdapter:
         runtime_root = instance_root / "runtime"
         projects_root = instance_root / "work" / "projects"
         input_source = str(request.task_card.get("parameters", {}).get("input_source", "shared"))
-        images_root = (
+        source_images_root = (
             request.task_root / "resources" / "shared"
             if input_source == "shared"
             else instance_root / "work" / "empty-input"
         )
         projects_root.mkdir(parents=True, exist_ok=True)
-        images_root.mkdir(parents=True, exist_ok=True)
+        source_images_root.mkdir(parents=True, exist_ok=True)
+        images_root, input_sha256 = self._prepare_read_only_input(
+            source_images_root, instance_root / "work" / "input-snapshot"
+        )
         mapped = self.map_task_card(request)
         card_path = runtime_root / "ppt-task-card.json"
         atomic_write_json(card_path, mapped, mode=0o640)
@@ -124,6 +128,7 @@ class PptAgentAdapter:
             "instance_id": instance_id,
             "task_card_sha256": digest_json(mapped),
             "source_revision": self.release_lock.revision,
+            "input_sha256": input_sha256,
             "project_created": False,
             "operation_id": None,
         }
@@ -131,7 +136,13 @@ class PptAgentAdapter:
             current = read_json(state_path)
             if any(
                 current.get(key) != expected[key]
-                for key in ("task_id", "instance_id", "task_card_sha256", "source_revision")
+                for key in (
+                    "task_id",
+                    "instance_id",
+                    "task_card_sha256",
+                    "source_revision",
+                    "input_sha256",
+                )
             ):
                 raise HarnessError(
                     "IDEMPOTENCY_CONFLICT",
@@ -156,7 +167,7 @@ class PptAgentAdapter:
             )
         )
         pythonpath = os.pathsep.join(
-            str(item) for item in (self.runtime_root, self.dependency_root) if item.is_dir()
+            (str(self.runtime_root), str(self.runtime_root / "_dependencies"))
         )
         return ProcessSpec(
             command=(str(self.interpreter), "-c", _LAUNCHER, str(entrypoint), "{host}", "{port}"),
@@ -169,6 +180,7 @@ class PptAgentAdapter:
                 "PPT_AGENT_RUNTIME_POLICY": str(self.runtime_policy),
                 "PYTHONPATH": pythonpath,
             },
+            writable_roots=(projects_root,),
             health_path="/api/health",
             readiness_path="/api/health",
             ui_path="/",
@@ -332,6 +344,52 @@ class PptAgentAdapter:
             raise HarnessError(
                 "ADAPTER_UNAVAILABLE", "The PPT Agent source does not match its release lock."
             )
+        self.dependency_sha256 = attest_ppt_runtime(
+            self.release_lock,
+            source_root=self.source_root,
+            dependency_root=self.dependency_root,
+            harness_root=self.source_root.parent.parent,
+            interpreter=self.interpreter,
+        )
+
+    def _prepare_read_only_input(self, source: Path, destination: Path) -> tuple[Path, str]:
+        """Publish a private immutable copy; the child never receives the shared path."""
+
+        source_sha256 = content_tree_sha256(source)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(
+            tempfile.mkdtemp(prefix=".ppt-input-", dir=destination.parent)
+        )
+        try:
+            shutil.copytree(source, temporary, dirs_exist_ok=True, symlinks=True)
+            if content_tree_sha256(source) != source_sha256:
+                raise HarnessError(
+                    "PROCESS_START_FAILED", "The shared input changed while it was snapshotted."
+                )
+            if content_tree_sha256(temporary) != source_sha256:
+                raise HarnessError(
+                    "PROCESS_START_FAILED", "The PPT input snapshot does not match shared assets."
+                )
+            for path in sorted(temporary.rglob("*"), reverse=True):
+                path.chmod(0o555 if path.is_dir() else 0o444)
+            temporary.chmod(0o555)
+            if destination.exists():
+                self._make_removable(destination)
+                shutil.rmtree(destination)
+            temporary.replace(destination)
+            return destination.resolve(), source_sha256
+        finally:
+            if temporary.exists():
+                self._make_removable(temporary)
+                shutil.rmtree(temporary)
+
+    @staticmethod
+    def _make_removable(root: Path) -> None:
+        with suppress(OSError):
+            root.chmod(0o700)
+        for path in root.rglob("*"):
+            with suppress(OSError):
+                path.chmod(0o700 if path.is_dir() else 0o600)
 
     def _runtime_artifact(self) -> AgentRuntimeArtifact:
         return AgentRuntimeArtifact(
@@ -339,13 +397,13 @@ class PptAgentAdapter:
             self.release_lock.revision,
             self.runtime_root,
             "main_front.py",
-            ("pyproject.toml",),
+            ("pyproject.toml", "_harness-ppt-requirements.lock"),
             self.interpreter.parent.parent,
         )
 
     def _prepare_runtime_artifact(self) -> Path:
         cache_root = self.dependency_root.parent / "ppt-runtime"
-        destination = cache_root / self.release_lock.revision
+        destination = cache_root / f"{self.release_lock.revision}-{self.dependency_sha256[:16]}"
         if destination.is_dir():
             return self._validated_cached_runtime(destination)
         cache_root.mkdir(parents=True, exist_ok=True)
@@ -358,6 +416,15 @@ class PptAgentAdapter:
                 ignore=shutil.ignore_patterns(
                     ".git", "__pycache__", ".pytest_cache", ".ruff_cache"
                 ),
+            )
+            if content_tree_sha256(temporary) != self.release_lock.source_content_sha256:
+                raise HarnessError(
+                    "ADAPTER_UNAVAILABLE", "The copied PPT Agent source does not match its lock."
+                )
+            shutil.copytree(self.dependency_root, temporary / "_dependencies")
+            shutil.copyfile(
+                self.source_root.parent.parent / "requirements" / "ppt-agent.lock",
+                temporary / "_harness-ppt-requirements.lock",
             )
             for path in sorted(temporary.rglob("*"), reverse=True):
                 path.chmod(0o555 if path.is_dir() else 0o444)
@@ -377,10 +444,19 @@ class PptAgentAdapter:
                 shutil.rmtree(temporary)
 
     def _validated_cached_runtime(self, destination: Path) -> Path:
-        if content_tree_sha256(destination) != self.release_lock.source_content_sha256:
+        if content_tree_sha256(
+            destination,
+            ignored_names={"_harness-ppt-requirements.lock"},
+            ignored_root_names={"_dependencies"},
+        ) != self.release_lock.source_content_sha256:
             raise HarnessError(
                 "ADAPTER_UNAVAILABLE",
                 "The cached PPT Agent runtime does not match its release lock.",
+            )
+        if dependency_tree_sha256(destination / "_dependencies") != self.dependency_sha256:
+            raise HarnessError(
+                "ADAPTER_UNAVAILABLE",
+                "The cached PPT Agent dependencies do not match their proof.",
             )
         return destination.resolve()
 

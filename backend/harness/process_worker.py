@@ -264,9 +264,19 @@ def main() -> int:
         environment[name] = value
         redactions.append(value.encode("utf-8"))
     inherited_fds = tuple(spec.get("inherited_fds", ())) if os.name != "nt" else ()
+    writable_roots = tuple(spec.get("writable_roots", ()))
+    if writable_roots:
+        command = [
+            sys.executable,
+            str(Path(__file__).with_name("sandbox_exec.py")),
+            json.dumps(writable_roots),
+            *spec["command"],
+        ]
+    else:
+        command = spec["command"]
     if os.name == "nt":
         process = subprocess.Popen(
-            spec["command"],
+            command,
             cwd=spec["cwd"],
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -276,7 +286,7 @@ def main() -> int:
         )
     else:
         process = subprocess.Popen(
-            spec["command"],
+            command,
             cwd=spec["cwd"],
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -286,7 +296,7 @@ def main() -> int:
             pass_fds=inherited_fds,
         )
     try:
-        windows_job = _assign_kill_on_close_job(process)
+        windows_job = _assign_kill_on_close_job(cast(subprocess.Popen[bytes], process))
     except BaseException:
         process.terminate()
         process.wait()

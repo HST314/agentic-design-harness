@@ -17,6 +17,7 @@ from ..storage.locks import FileLock
 from ..storage.repository import utc_now
 from ..storage.safe_open import is_link_or_reparse, open_regular_readonly
 from ..storage.store import FileStateStore
+from ..write_sandbox import require_write_sandbox
 from .process_control import process_tree_exists
 
 ACTIVE_LAUNCH_STATES = frozenset({"PREPARED", "STARTING", "RUNNING"})
@@ -170,6 +171,7 @@ class ProcessSpec:
     runtime_artifact: AgentRuntimeArtifact
     verified_runtime_identity: AgentRuntimeIdentity | None = None
     public_environment: dict[str, str] = field(default_factory=dict)
+    writable_roots: tuple[Path, ...] = ()
     health_path: str = "/healthz"
     readiness_path: str = "/readyz"
     ui_path: str = "/"
@@ -183,6 +185,29 @@ class ProcessSpec:
         ):
             raise HarnessError("PROCESS_START_FAILED", "The process command is invalid.")
         self.runtime_artifact.validate()
+        if self.writable_roots:
+            try:
+                require_write_sandbox()
+            except RuntimeError as exc:
+                raise HarnessError(
+                    "PROCESS_START_FAILED",
+                    "The requested filesystem write sandbox is unavailable.",
+                    {"reason": str(exc)},
+                ) from None
+            for root in self.writable_roots:
+                try:
+                    safe = (
+                        root.is_absolute()
+                        and not root.is_symlink()
+                        and root.is_dir()
+                        and root.resolve(strict=True) == root
+                    )
+                except OSError:
+                    safe = False
+                if not safe:
+                    raise HarnessError(
+                        "PROCESS_START_FAILED", "A sandbox writable root is unsafe or missing."
+                    )
         entrypoint = (
             self.runtime_artifact.source_root
             / PurePosixPath(self.runtime_artifact.entrypoint_relpath)
@@ -229,6 +254,7 @@ def process_spec_digest(spec: ProcessSpec) -> str:
                 else spec.verified_runtime_identity.digest
             ),
             "public_environment": spec.public_environment,
+            "writable_roots": [str(path) for path in spec.writable_roots],
             "health_path": spec.health_path,
             "readiness_path": spec.readiness_path,
             "ui_path": spec.ui_path,

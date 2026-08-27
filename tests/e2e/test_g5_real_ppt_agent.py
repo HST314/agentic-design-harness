@@ -197,7 +197,15 @@ class RealPptAdapterG5Tests(unittest.TestCase):
     def _wait_for_instance(self, client: TestClient, app) -> dict:
         for _ in range(300):
             instance = client.get("/api/v1/instances/i_ppt_smoke?refresh=false").json()["instance"]
-            if instance["status"] == "RUNNING" and instance.get("ui_url"):
+            operation = app.state.container.application.latest_start_operation(
+                "t_ppt_smoke", instance_id="i_ppt_smoke"
+            )
+            if (
+                instance["status"] == "RUNNING"
+                and instance.get("ui_url")
+                and operation is not None
+                and operation["state"] == "COMMITTED"
+            ):
                 return instance
             self.assertNotIn(instance["status"], {"FAILED", "FAILED_TO_START"}, instance)
             time.sleep(0.05)

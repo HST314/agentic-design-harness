@@ -30,6 +30,13 @@ BACKEND_ROOT = ROOT / "backend"
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from harness.adapters.ppt_attestation import (  # noqa: E402
+    PPT_DEPENDENCY_STAMP,
+    attest_ppt_runtime,
+    dependency_lock_set_sha256,
+)
+from harness.adapters.ppt_lock import load_ppt_agent_lock  # noqa: E402
+from harness.core.errors import HarnessError  # noqa: E402
 from harness.runtime_identity import (  # noqa: E402
     PythonInterpreterIdentity,
     RuntimeIdentityError,
@@ -230,6 +237,14 @@ class DevelopmentLauncher:
     @property
     def ppt_agent_root(self) -> Path:
         return self.root / "agents" / "ppt-agent"
+
+    @property
+    def ppt_agent_lock_path(self) -> Path:
+        return self.root / "agents" / "ppt-agent.lock.json"
+
+    @property
+    def ppt_requirements_lock(self) -> Path:
+        return self.root / "requirements" / "ppt-agent.lock"
 
     @property
     def venv_root(self) -> Path:
@@ -737,18 +752,21 @@ class DevelopmentLauncher:
     def install_ppt_dependencies(self, *, force: bool = False) -> None:
         """Install PPT Agent's declared runtime dependencies in an isolated target."""
 
-        marker = self.ppt_dependency_root / ".requirements-installed"
-        expected = input_digest(
-            [self.root / "agents" / "ppt-agent.lock.json", self.ppt_agent_root / "pyproject.toml"],
-            root=self.root,
-        )
-        if (
-            not force
-            and marker.is_file()
-            and marker.read_text(encoding="utf-8").strip() == expected
-        ):
-            print("[ok] PPT Agent isolated dependencies match their lock.", flush=True)
-            return
+        release_lock = load_ppt_agent_lock(self.ppt_agent_lock_path)
+        if not force:
+            try:
+                attest_ppt_runtime(
+                    release_lock,
+                    source_root=self.ppt_agent_root,
+                    dependency_root=self.ppt_dependency_root,
+                    harness_root=self.root,
+                    interpreter=self.venv_python,
+                )
+            except HarnessError:
+                pass
+            else:
+                print("[ok] PPT Agent isolated dependencies match their lock.", flush=True)
+                return
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=".ppt-agent-deps-", dir=self.runtime_root))
         backup: Path | None = None
@@ -760,21 +778,31 @@ class DevelopmentLauncher:
                     "install",
                     "--disable-pip-version-check",
                     "--upgrade",
+                    "--require-hashes",
                     "--target",
                     temporary,
-                    "fastapi>=0.110,<1",
-                    "html5lib>=1.1,<2",
-                    "openai>=1.0,<2",
-                    "pydantic>=2.6,<3",
-                    "PyYAML>=6.0,<7",
-                    "tinycss2>=1.4,<2",
-                    "uvicorn>=0.29,<1",
+                    "-r",
+                    self.ppt_requirements_lock,
                 ],
                 cwd=self.root,
                 environment=self.pip_environment(),
             )
-            marker_path = temporary / ".requirements-installed"
-            marker_path.write_text(expected + "\n", encoding="utf-8")
+            runtime_identity = self.interpreter_identity([self.venv_python])
+            write_json(
+                temporary / PPT_DEPENDENCY_STAMP,
+                {
+                    "schema_version": "1.0",
+                    "dependency_lock_set_sha256": dependency_lock_set_sha256(
+                        release_lock, self.root, self.ppt_agent_root
+                    ),
+                    "dependency_sha256": content_tree_digest(temporary),
+                    "interpreter": {
+                        "implementation": runtime_identity.implementation,
+                        "cache_tag": runtime_identity.cache_tag,
+                        "version": runtime_identity.version,
+                    },
+                },
+            )
             if self.ppt_dependency_root.exists():
                 backup = self.runtime_root / f".ppt-agent-deps-backup-{uuid.uuid4().hex}"
                 self.ppt_dependency_root.replace(backup)
