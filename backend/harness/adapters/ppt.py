@@ -118,6 +118,11 @@ class PptAgentAdapter:
         images_root, input_sha256 = self._prepare_read_only_input(
             source_images_root, instance_root / "work" / "input-snapshot"
         )
+        read_only_mirrors = (
+            ((source_images_root.resolve(), images_root),)
+            if input_source == "shared"
+            else ()
+        )
         mapped = self.map_task_card(request)
         card_path = runtime_root / "ppt-task-card.json"
         atomic_write_json(card_path, mapped, mode=0o640)
@@ -128,29 +133,29 @@ class PptAgentAdapter:
             "instance_id": instance_id,
             "task_card_sha256": digest_json(mapped),
             "source_revision": self.release_lock.revision,
+            "input_source": input_source,
             "input_sha256": input_sha256,
             "project_created": False,
             "operation_id": None,
         }
-        if state_path.exists():
-            current = read_json(state_path)
-            if any(
-                current.get(key) != expected[key]
-                for key in (
-                    "task_id",
-                    "instance_id",
-                    "task_card_sha256",
-                    "source_revision",
-                    "input_sha256",
-                )
-            ):
-                raise HarnessError(
-                    "IDEMPOTENCY_CONFLICT",
-                    "The prepared PPT runtime no longer matches its task card.",
-                    {"instance_id": instance_id},
-                )
-        else:
-            atomic_write_json(state_path, expected)
+        current = read_json(state_path) if state_path.exists() else None
+        if current is not None and any(
+            current.get(key) != expected[key]
+            for key in (
+                "task_id",
+                "instance_id",
+                "task_card_sha256",
+                "source_revision",
+                "input_source",
+            )
+        ):
+            raise HarnessError(
+                "IDEMPOTENCY_CONFLICT",
+                "The prepared PPT runtime no longer matches its task card.",
+                {"instance_id": instance_id},
+            )
+        state = expected if current is None else {**current, "input_sha256": input_sha256}
+        atomic_write_json(state_path, state)
         artifact = self._runtime_artifact()
         entrypoint = self.runtime_root / "main_front.py"
         identity = runtime_artifact_identity(
@@ -181,6 +186,7 @@ class PptAgentAdapter:
                 "PYTHONPATH": pythonpath,
             },
             writable_roots=(projects_root,),
+            read_only_mirrors=read_only_mirrors,
             health_path="/api/health",
             readiness_path="/api/health",
             ui_path="/",
@@ -353,7 +359,7 @@ class PptAgentAdapter:
         )
 
     def _prepare_read_only_input(self, source: Path, destination: Path) -> tuple[Path, str]:
-        """Publish a private immutable copy; the child never receives the shared path."""
+        """Publish the initial private mirror; the child never receives the shared path."""
 
         source_sha256 = content_tree_sha256(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -371,8 +377,8 @@ class PptAgentAdapter:
                     "PROCESS_START_FAILED", "The PPT input snapshot does not match shared assets."
                 )
             for path in sorted(temporary.rglob("*"), reverse=True):
-                path.chmod(0o555 if path.is_dir() else 0o444)
-            temporary.chmod(0o555)
+                path.chmod(0o700 if path.is_dir() else 0o600)
+            temporary.chmod(0o700)
             if destination.exists():
                 self._make_removable(destination)
                 shutil.rmtree(destination)

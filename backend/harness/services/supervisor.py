@@ -293,6 +293,10 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                             else []
                         ),
                         "writable_roots": [str(path) for path in spec.writable_roots],
+                        "read_only_mirrors": [
+                            {"source": str(source), "destination": str(destination)}
+                            for source, destination in spec.read_only_mirrors
+                        ],
                     },
                     mode=0o600,
                 )

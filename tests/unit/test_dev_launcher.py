@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +25,22 @@ from scripts.dev import (
 
 
 class DevelopmentLauncherTests(unittest.TestCase):
+    def test_setup_entrypoint_imports_with_stdlib_only(self) -> None:
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONNOUSERSITE": "1",
+        }
+        completed = subprocess.run(
+            [sys.executable, "-S", "scripts/dev.py", "setup", "--help"],
+            cwd=Path(__file__).resolve().parents[2],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("usage:", completed.stdout)
+
     def test_child_output_is_safe_for_legacy_windows_console_encoding(self) -> None:
         message = "[frontend] ➜ ready"
 
