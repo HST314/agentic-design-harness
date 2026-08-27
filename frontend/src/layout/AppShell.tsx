@@ -42,7 +42,6 @@ function taskIdFromPath(pathname: string): string | null {
 function sectionFromPath(pathname: string): string {
   if (pathname === "/settings") return "全局设置";
   if (pathname === "/inbox") return "收件箱";
-  if (pathname === "/tasks") return "已验收任务面板";
   if (pathname.includes("/work-items/")) return "Image 工作台";
   if (pathname.endsWith("/master")) return "Master 线程";
   if (pathname.endsWith("/board")) return "任务看板";
@@ -218,7 +217,7 @@ export function AppShell(): React.JSX.Element {
   const groups = useMemo(() => historyGroups(tasks.data?.items ?? [], search), [search, tasks.data?.items]);
   const currentTask = taskId ? tasks.data?.items.find((task) => task.task_id === taskId) : undefined;
   const sectionLabel = sectionFromPath(location.pathname);
-  const flushMain = location.pathname.includes("/work-items/");
+  const flushMain = taskId !== null;
   const presentation = useMutation({
     mutationFn: ({ task, patch }: { task: TaskSummary; patch: { title?: string; pinned?: boolean; archived?: boolean } }) => api.updateTaskPresentation(task.task_id, {
       ...patch,
@@ -300,7 +299,6 @@ export function AppShell(): React.JSX.Element {
           </nav>
 
           <nav className="workbench-utilities" aria-label="工作台工具">
-            <NavLink to="/tasks" end><Icon name="history" /><span className="workbench-label">已验收任务面板</span></NavLink>
             <NavLink to="/inbox"><Icon name="inbox" /><span className="workbench-label">收件箱</span></NavLink>
             <NavLink to="/settings"><Icon name="settings" /><span className="workbench-label">全局设置</span></NavLink>
           </nav>

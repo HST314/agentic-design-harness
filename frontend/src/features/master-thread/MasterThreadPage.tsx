@@ -109,41 +109,43 @@ function startStageIndex(operation: StartOperation | null | undefined): number {
 function StartProgressBar({ operation }: { operation: StartOperation | null | undefined }): React.JSX.Element {
   const failed = operation?.state === "RETRYABLE_FAILED" || operation?.state === "ABORTED";
   const current = startStageIndex(operation);
+  const ready = !failed && current === startStageLabels.length - 1;
   return (
     <section
-      className={`master-start-progress${failed ? " master-start-progress--failed" : ""}`}
+      className={`master-start-progress${failed ? " master-start-progress--failed" : ready ? " master-start-progress--ready" : ""}`}
       aria-labelledby="master-start-progress-title"
     >
-      <header>
-        <div>
+      <div className="master-start-progress__row">
+        <div className="master-start-progress__lead">
+          <span className="master-start-progress__dot" aria-hidden="true" />
           <p className="workbench-eyebrow">实例启动</p>
-          <h2 id="master-start-progress-title">{failed ? "启动未完成" : current === 4 ? "专业工作台已就绪" : "正在启动专业工作台"}</h2>
+          <h2 id="master-start-progress-title">{failed ? "启动未完成" : ready ? "专业工作台已就绪" : "正在启动专业工作台"}</h2>
         </div>
-        <span role="status" aria-live="polite">{failed ? "需要重试" : `${current + 1} / ${startStageLabels.length}`}</span>
-      </header>
-      <ol
-        className="master-start-progress__steps"
-        role="progressbar"
-        aria-label="实例启动进度"
-        aria-valuemin={1}
-        aria-valuemax={startStageLabels.length}
-        aria-valuenow={current + 1}
-      >
-        {startStageLabels.map((label, index) => (
-          <li
-            key={label}
-            className={index < current ? "is-complete" : index === current ? "is-current" : ""}
-          >
-            <span aria-hidden="true">{index + 1}</span>
-            <strong>{label}</strong>
-          </li>
-        ))}
-      </ol>
+        <ol
+          className="master-start-progress__steps"
+          role="progressbar"
+          aria-label="实例启动进度"
+          aria-valuemin={1}
+          aria-valuemax={startStageLabels.length}
+          aria-valuenow={current + 1}
+        >
+          {startStageLabels.map((label, index) => (
+            <li
+              key={label}
+              className={index < current ? "is-complete" : index === current ? "is-current" : ""}
+            >
+              <span className="master-start-progress__bar" aria-hidden="true" />
+              <strong>{label}</strong>
+            </li>
+          ))}
+        </ol>
+        <span className="master-start-progress__count" role="status" aria-live="polite">{failed ? "需要重试" : `${current + 1} / ${startStageLabels.length}`}</span>
+      </div>
       {failed ? (
         <p className="master-start-progress__message" role="alert">
           {operation?.last_error?.message ?? "实例启动失败，请在任务看板中由用户手动重试。"}
         </p>
-      ) : (
+      ) : ready ? null : (
         <p className="master-start-progress__message">启动会在后台继续；你可以随时手动切换到任务看板查看进度。</p>
       )}
     </section>
