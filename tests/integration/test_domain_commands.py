@@ -322,7 +322,7 @@ class TaskCommandTests(unittest.TestCase):
 
 
 class PlanAppendGateTests(unittest.TestCase):
-    """Save-plan mode gate: replace keeps the old whitelist, append extends live plans."""
+    """Save-plan mode gates for replacing, extending, and revising live plans."""
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -518,6 +518,83 @@ class PlanAppendGateTests(unittest.TestCase):
         self.assertEqual(appended_stage["type"], "ppt")
         self.assertEqual(appended_stage["depends_on"], ["s_image"])
         self.assertEqual(appended_stage["status"], "PENDING")
+
+    def test_merge_updates_only_unstarted_cards_and_preserves_started_instances(self) -> None:
+        task_id = "t_merge_cards"
+        create_task(self.service, task_id, "auto")
+        self._save(task_id, image_plan(task_id, count=3))
+        self._transition(task_id, "i_image_1", "STARTING", "starting")
+        self._transition(task_id, "i_image_1", "RUNNING", "running")
+
+        landed = self.store.plan.get(task_id, task_id)
+        self.assertIsNotNone(landed)
+        assert landed is not None
+        started_instance = next(
+            item for item in landed["instances"] if item["instance_id"] == "i_image_1"
+        )
+        started_card = next(
+            item for item in landed["task_cards"] if item["instance_id"] == "i_image_1"
+        )
+        unchanged_card = next(
+            item for item in landed["task_cards"] if item["instance_id"] == "i_image_3"
+        )
+        started_projection_revision = self.store.instance.revision(task_id, "i_image_1")
+
+        revised = image_plan(task_id, count=3)
+        revised_started_card = next(
+            item for item in revised["task_cards"] if item["instance_id"] == "i_image_1"
+        )
+        revised_started_card.update(
+            {"revision": 9, "objective": "This started card must not be replaced."}
+        )
+        revised_unstarted_card = next(
+            item for item in revised["task_cards"] if item["instance_id"] == "i_image_2"
+        )
+        revised_unstarted_card.update(
+            {"revision": 2, "objective": "Use the revised direction for the unstarted card."}
+        )
+
+        merged = self._save(
+            task_id,
+            revised,
+            expected=self.store.task.revision(task_id, task_id),
+            key="merge-unstarted-card",
+            mode="merge",
+            plan_revision=landed["task"]["plan_revision"],
+        )
+
+        merged_started_instance = next(
+            item
+            for item in merged["plan"]["instances"]
+            if item["instance_id"] == "i_image_1"
+        )
+        merged_started_card = next(
+            item
+            for item in merged["plan"]["task_cards"]
+            if item["instance_id"] == "i_image_1"
+        )
+        merged_unstarted_card = next(
+            item
+            for item in merged["plan"]["task_cards"]
+            if item["instance_id"] == "i_image_2"
+        )
+        merged_unchanged_card = next(
+            item
+            for item in merged["plan"]["task_cards"]
+            if item["instance_id"] == "i_image_3"
+        )
+        self.assertEqual(merged_started_instance, started_instance)
+        self.assertEqual(merged_started_card, started_card)
+        self.assertEqual(merged_unstarted_card["revision"], 2)
+        self.assertEqual(
+            merged_unstarted_card["objective"],
+            "Use the revised direction for the unstarted card.",
+        )
+        self.assertEqual(merged_unchanged_card, unchanged_card)
+        self.assertEqual(
+            self.store.instance.revision(task_id, "i_image_1"),
+            started_projection_revision,
+        )
 
 
 def envelope_key(task_id: str, suffix: str) -> str:

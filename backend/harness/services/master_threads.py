@@ -26,6 +26,8 @@ from .master_orchestrator import (
 from .plan_proposals import PlanProposalValidationService
 from .start_operations import StartOperationRunner
 
+_EDITABLE_INSTANCE_STATUSES = frozenset({"READY", "UNAVAILABLE"})
+
 
 class MasterThreadService:
     """Keep one durable Master thread per task around in-process orchestration."""
@@ -247,7 +249,7 @@ class MasterThreadService:
         editable: dict[str, Any],
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
-        """Create a new pending proposal revision from one human-reviewed card edit."""
+        """Create a pending proposal revision for a card that has not started."""
 
         if envelope.actor_type != "human":
             raise HarnessError("VALIDATION_ERROR", "Only a human may revise a task card.")
@@ -296,10 +298,10 @@ class MasterThreadService:
                     proposal_revision,
                     thread["latest_proposal_revision"],
                 )
-            if proposal["status"] != "PENDING_CONFIRMATION":
+            if proposal["status"] not in {"PENDING_CONFIRMATION", "CONFIRMED"}:
                 raise HarnessError(
                     "INVALID_STATE_TRANSITION",
-                    "Only the latest pending plan may be revised.",
+                    "Only the latest active plan may be revised.",
                 )
             card_index = next(
                 (
@@ -318,6 +320,12 @@ class MasterThreadService:
                     card_id,
                     expected_card_revision,
                     current_card["revision"],
+                )
+            if not self._task_card_is_editable(task_id, proposal, current_card):
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "A TaskCard cannot be revised after its instance has started.",
+                    {"card_id": card_id, "instance_id": current_card["instance_id"]},
                 )
 
             normalized_editable = deepcopy(editable)
@@ -394,7 +402,7 @@ class MasterThreadService:
                 kind="plan_proposal",
                 content=(
                     f"任务卡 {card_id} 已保存为 r{revised_card['revision']}, "
-                    f"计划已更新为 r{next_proposal['revision']}, 请重新审阅后确认。"
+                    f"计划已更新为 r{next_proposal['revision']}, 请审阅未启动任务卡后继续。"
                 ),
                 asset_refs=[],
                 created_at=now,
@@ -478,6 +486,11 @@ class MasterThreadService:
                     "expected_card_revisions": deepcopy(expected_card_revisions),
                     "task_expected_revision": task_expected_revision,
                     "instance_ids": start_subset,
+                    "plan_mode": (
+                        "merge"
+                        if self.store.plan.get(task_id, task_id) is not None
+                        else "replace"
+                    ),
                     "actor": {
                         "actor_type": envelope.actor_type,
                         "actor_id": envelope.actor_id,
@@ -524,7 +537,9 @@ class MasterThreadService:
                 instances=cast(list[AgentInstanceSnapshot], instances),
                 task_cards=cast(list[TaskCard], cards),
                 operation_id=self._identifier("master_plan", task_id, proposal["proposal_id"]),
-                mode="replace",
+                # Intents created before per-card editing existed always represented
+                # the first plan save, so a missing field safely falls back to replace.
+                mode=intent.get("plan_mode", "replace"),
                 envelope=CommandEnvelope(
                     idempotency_key=self._identifier(
                         "save_master_plan", task_id, proposal["proposal_id"]
@@ -1115,6 +1130,22 @@ class MasterThreadService:
             "parameters": deepcopy(card["parameters"]),
         }
 
+    def _task_card_is_editable(
+        self,
+        task_id: str,
+        proposal: dict[str, Any],
+        card: dict[str, Any],
+    ) -> bool:
+        instance = self.store.instance.get(task_id, card["instance_id"])
+        if instance is None:
+            return proposal["status"] == "PENDING_CONFIRMATION"
+        if instance["status"] not in _EDITABLE_INSTANCE_STATUSES:
+            return False
+        latest_start = getattr(self.application, "latest_start_operation", None)
+        if callable(latest_start):
+            return latest_start(task_id, instance_id=card["instance_id"]) is None
+        return True
+
     def _session(self, task_id: str) -> dict[str, Any]:
         task = self._task(task_id)
         thread = self.store.master_thread.get(task_id, task_id)
@@ -1124,6 +1155,19 @@ class MasterThreadService:
         messages.sort(key=lambda item: (item["sequence"], item["created_at"], item["message_id"]))
         proposals = self.store.plan_proposal.list(task_id)
         latest = max(proposals, key=lambda item: item["revision"], default=None)
+        instance_statuses = {
+            instance["instance_id"]: instance["status"]
+            for instance in self.store.instance.list(task_id)
+        }
+        editable_card_ids = (
+            []
+            if latest is None
+            else [
+                card["card_id"]
+                for card in latest["execution_cards"]
+                if self._task_card_is_editable(task_id, latest, card)
+            ]
+        )
         message_ids = {message["message_id"] for message in messages}
         proposal_entries = [
             {
@@ -1154,6 +1198,8 @@ class MasterThreadService:
             "messages": deepcopy(messages),
             "latest_proposal": deepcopy(latest),
             "proposals": proposal_entries,
+            "editable_card_ids": editable_card_ids,
+            "instance_statuses": instance_statuses,
             "task": deepcopy(task),
             "task_revision": self.store.task.revision(task_id, task_id),
             # Kept until the designer-shell cleanup stage removes the old response field.

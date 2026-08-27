@@ -20,6 +20,7 @@ import {
   taskIntakeQuery,
 } from "../../api/queries";
 import type {
+  ContractAgentInstance,
   ContractMasterMessage,
   ContractPlanProposal,
 } from "../../api/generated-contracts";
@@ -425,6 +426,7 @@ function MiniTaskCard({
   card,
   title,
   proposalStatus,
+  instanceStatus,
   launchPending,
   launchBlocked,
   onLaunch,
@@ -433,13 +435,17 @@ function MiniTaskCard({
   card: ProposalTaskCard;
   title: string;
   proposalStatus: ContractPlanProposal["status"];
+  instanceStatus: ContractAgentInstance["status"] | undefined;
   launchPending: boolean;
   launchBlocked: boolean;
   onLaunch: () => void;
   onShowDetail: (trigger: HTMLButtonElement) => void;
 }): React.JSX.Element {
   const queryClient = useQueryClient();
-  const start = useQuery(instanceStartQuery(card.instance_id, proposalStatus === "CONFIRMED"));
+  const start = useQuery(instanceStartQuery(
+    card.instance_id,
+    proposalStatus !== "SUPERSEDED" && instanceStatus !== undefined,
+  ));
   const detail = start.data;
   const retry = useMutation({
     mutationFn: () => {
@@ -458,13 +464,14 @@ function MiniTaskCard({
     },
   });
 
-  const starting = launchPending || Boolean(detail?.start_in_progress) || retry.isPending;
-  const instanceReady = detail?.instance.status === "RUNNING" || detail?.instance.status === "WAITING_APPROVAL";
+  const currentStatus = detail?.instance.status ?? instanceStatus;
+  const starting = launchPending || currentStatus === "STARTING" || Boolean(detail?.start_in_progress) || retry.isPending;
+  const instanceReady = currentStatus === "RUNNING" || currentStatus === "WAITING_APPROVAL";
   const ready = !starting && (instanceReady || detail?.start_progress?.state === "RUNNING");
   const failed = !starting && !ready && (
-    detail?.instance.status === "FAILED_TO_START" || Boolean(detail?.start_progress?.last_error)
+    currentStatus === "FAILED_TO_START" || Boolean(detail?.start_progress?.last_error)
   );
-  const unavailable = !starting && !ready && !failed && detail?.instance.status === "UNAVAILABLE";
+  const unavailable = !starting && !ready && !failed && currentStatus === "UNAVAILABLE";
   const failureMessage = detail?.start_progress?.last_error?.message ?? detail?.instance.start_failure?.message ?? "实例启动失败。";
   const retryable = failed && Boolean(detail?.start_retry_allowed && detail.start_operation_id);
 
@@ -528,12 +535,14 @@ function MiniTaskCard({
 
 function ProposalCardGroup({
   proposal,
+  instanceStatuses,
   launchingCardId,
   onLaunchCard,
   onShowDetail,
   onAdjust,
 }: {
   proposal: MasterSessionProposal;
+  instanceStatuses: MasterSessionResponse["instance_statuses"];
   launchingCardId: string | null;
   onLaunchCard: (proposal: MasterSessionProposal, card: ProposalTaskCard) => void;
   onShowDetail: (proposal: MasterSessionProposal, card: ProposalTaskCard, trigger: HTMLButtonElement) => void;
@@ -562,6 +571,7 @@ function ProposalCardGroup({
             card={card}
             title={titleByCardId.get(card.card_id) ?? card.card_id}
             proposalStatus={proposal.status}
+            instanceStatus={instanceStatuses[card.instance_id]}
             launchPending={launchingCardId === card.card_id}
             launchBlocked={launchingCardId !== null}
             onLaunch={() => onLaunchCard(proposal, card)}
@@ -734,7 +744,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
       queryClient.setQueryData(masterSessionQuery(taskId).queryKey, response);
       const revised = response.latest_proposal;
       closeCardEditor();
-      setNotice(revised ? `任务卡已保存；计划已更新为 r${revised.revision}，请重新审阅全部卡片。` : "任务卡修订已保存。");
+      setNotice(revised ? `任务卡已保存；计划已更新为 r${revised.revision}，可继续启动未启动任务。` : "任务卡修订已保存。");
     },
     onError: (error) => {
       if (error instanceof ApiError && error.code === "REVISION_CONFLICT") {
@@ -775,6 +785,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
           <ProposalCardGroup
             key={`proposal-${item.proposal.proposal_id}-r${item.proposal.revision}`}
             proposal={item.proposal}
+            instanceStatuses={data.instance_statuses ?? {}}
             launchingCardId={launchingCardId}
             onLaunchCard={(proposal, card) => {
               launch.reset();
@@ -822,7 +833,11 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
       />
       <TaskCardDetailDialog
         detail={detail}
-        editable={detail?.proposal.status === "PENDING_CONFIRMATION"}
+        editable={Boolean(
+          detail
+          && detail.proposal.revision === data.thread.latest_proposal_revision
+          && (data.editable_card_ids ?? []).includes(detail.card.card_id)
+        )}
         onClose={closeDetail}
         onEdit={() => {
           if (!detail) return;

@@ -195,7 +195,7 @@ class TaskCommandService:
         mode: str = "replace",
         expected_plan_revision: int | None = None,
     ) -> dict[str, Any]:
-        if mode not in {"replace", "append"}:
+        if mode not in {"replace", "append", "merge"}:
             raise HarnessError("VALIDATION_ERROR", "The plan save mode is invalid.", {"mode": mode})
         request = {
             "task_id": task_id,
@@ -227,7 +227,7 @@ class TaskCommandService:
     ) -> None:
         """Validate a plan without allocating credentials or committing projections."""
 
-        if mode not in {"replace", "append"}:
+        if mode not in {"replace", "append", "merge"}:
             raise HarnessError("VALIDATION_ERROR", "The plan save mode is invalid.", {"mode": mode})
         task = self._task(task_id)
         self._guard_plan_save_state(task, mode)
@@ -244,6 +244,10 @@ class TaskCommandService:
             if existing is None:
                 raise HarnessError("TASK_NOT_FOUND", "The task does not have a saved plan.")
             self._normalize_append(task, existing, plan_revision, stages, instances, task_cards)
+        elif mode == "merge":
+            if existing is None:
+                raise HarnessError("TASK_NOT_FOUND", "The task does not have a saved plan.")
+            self._normalize_merge(task, existing, plan_revision, stages, instances, task_cards)
         else:
             self._normalize_plan(task, plan_revision, stages, instances, task_cards)
 
@@ -257,6 +261,14 @@ class TaskCommandService:
             raise HarnessError(
                 "INVALID_STATE_TRANSITION",
                 "A plan can only be appended while this task is running or awaiting approval.",
+                {"current": task["status"]},
+            )
+        if mode == "merge":
+            if task["status"] in {"RUNNING", "WAITING_APPROVAL", "BLOCKED_UNAVAILABLE"}:
+                return
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "A plan can only be merged while this task has active instances.",
                 {"current": task["status"]},
             )
         if task["status"] not in {"DRAFT", "PLANNED", "BLOCKED_UNAVAILABLE", "FAILED"}:
@@ -308,6 +320,26 @@ class TaskCommandService:
                 plan["task"]["status"] = target
             plan["task"]["updated_at"] = utc_now()
             return self._persist_aggregate(plan, envelope, "save_plan", request, actual)
+        if mode == "merge":
+            if existing is None:
+                raise HarnessError("TASK_NOT_FOUND", "The task does not have a saved plan.")
+            plan = self._normalize_merge(
+                task,
+                existing,
+                business_revision,
+                request["stages"],
+                request["instances"],
+                request["task_cards"],
+            )
+            plan["task"]["updated_at"] = utc_now()
+            return self._persist_aggregate(
+                plan,
+                envelope,
+                "save_plan",
+                request,
+                actual,
+                skip_unchanged_projections=True,
+            )
         plan = self._normalize_plan(
             task,
             business_revision,
@@ -813,6 +845,115 @@ class TaskCommandService:
         validate_plan(self.contracts, plan)
         return plan
 
+    def _normalize_merge(
+        self,
+        task: dict[str, Any],
+        existing_plan: dict[str, Any],
+        plan_revision: int,
+        stages: list[dict[str, Any]],
+        instances: list[dict[str, Any]],
+        task_cards: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Apply card revisions to not-yet-started instances without touching started ones.
+
+        A merge keeps the landed stage/instance projections exactly as they are:
+        an instance that already entered its start lifecycle keeps its record and
+        its landed task card, so a running Agent is never replaced or rewritten.
+        Only the task cards of instances still waiting to start (READY or
+        UNAVAILABLE) are refreshed from the incoming payload. The merge cannot
+        change the plan topology: stage, instance, and card sets must match the
+        landed revision.
+        """
+
+        landed_stage_by_id = {item["stage_id"]: item for item in existing_plan["stages"]}
+        incoming_stage_by_id = {item["stage_id"]: item for item in stages}
+        if set(incoming_stage_by_id) != set(landed_stage_by_id):
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "A plan merge cannot add or remove stages while instances are started.",
+            )
+        landed_instance_by_id = {item["instance_id"]: item for item in existing_plan["instances"]}
+        incoming_instance_by_id = {item["instance_id"]: item for item in instances}
+        if set(incoming_instance_by_id) != set(landed_instance_by_id):
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "A plan merge cannot add or remove instances while instances are started.",
+            )
+        for instance_id, raw in incoming_instance_by_id.items():
+            landed = landed_instance_by_id[instance_id]
+            if raw["stage_id"] != landed["stage_id"] or raw["agent_type"] != landed["agent_type"]:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "A plan merge cannot rewire a landed instance.",
+                    {"instance_id": instance_id},
+                )
+        for stage_id, raw in incoming_stage_by_id.items():
+            landed_stage = landed_stage_by_id[stage_id]
+            if raw["type"] != landed_stage["type"] or set(raw["instance_ids"]) != set(
+                landed_stage["instance_ids"]
+            ):
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "A plan merge cannot rewire a landed stage.",
+                    {"stage_id": stage_id},
+                )
+        landed_card_by_id = {item["card_id"]: item for item in existing_plan["task_cards"]}
+        incoming_card_by_id = {item["card_id"]: item for item in task_cards}
+        if set(incoming_card_by_id) != set(landed_card_by_id):
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "A plan merge cannot add or remove task cards while instances are started.",
+            )
+        now = utc_now()
+        merged_cards = []
+        for landed_card in existing_plan["task_cards"]:
+            card_id = landed_card["card_id"]
+            raw = incoming_card_by_id[card_id]
+            if raw["instance_id"] != landed_card["instance_id"]:
+                raise HarnessError(
+                    "VALIDATION_ERROR",
+                    "A plan merge cannot move a task card to another instance.",
+                    {"card_id": card_id},
+                )
+            instance = landed_instance_by_id[landed_card["instance_id"]]
+            if instance["status"] in {"READY", "UNAVAILABLE"}:
+                if raw["revision"] < landed_card["revision"]:
+                    raise HarnessError(
+                        "REVISION_CONFLICT",
+                        "A plan merge cannot restore an older TaskCard revision.",
+                        {
+                            "card_id": card_id,
+                            "expected_revision": landed_card["revision"],
+                            "actual_revision": raw["revision"],
+                        },
+                    )
+                if raw["revision"] == landed_card["revision"]:
+                    merged_cards.append(deepcopy(landed_card))
+                    continue
+                merged_cards.append(
+                    {
+                        **deepcopy(raw),
+                        "schema_version": raw.get("schema_version", "1.0"),
+                        "task_id": task["task_id"],
+                        "created_at": raw.get("created_at", now),
+                    }
+                )
+            else:
+                merged_cards.append(deepcopy(landed_card))
+        plan = {
+            "schema_version": "1.0",
+            "task": {
+                **deepcopy(task),
+                "plan_revision": plan_revision,
+                "updated_at": now,
+            },
+            "stages": deepcopy(existing_plan["stages"]),
+            "instances": deepcopy(existing_plan["instances"]),
+            "task_cards": merged_cards,
+        }
+        validate_plan(self.contracts, plan)
+        return plan
+
     def _refresh_stages(self, plan: dict[str, Any], now: str, *, activate_new: bool = True) -> None:
         stage_by_id = {item["stage_id"]: item for item in plan["stages"]}
         instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
@@ -896,6 +1037,8 @@ class TaskCommandService:
         command: str,
         request: dict[str, Any],
         expected_task_revision: int,
+        *,
+        skip_unchanged_projections: bool = False,
     ) -> dict[str, Any]:
         validate_plan(self.contracts, plan)
         task_id = plan["task"]["task_id"]
@@ -929,6 +1072,11 @@ class TaskCommandService:
             idempotency_key=envelope.idempotency_key,
         )
         for stage in plan["stages"]:
+            if (
+                skip_unchanged_projections
+                and self.store.stage.get(task_id, stage["stage_id"]) == stage
+            ):
+                continue
             self.store.stage.put(
                 task_id,
                 stage["stage_id"],
@@ -939,6 +1087,11 @@ class TaskCommandService:
                 idempotency_key=envelope.idempotency_key,
             )
         for instance in plan["instances"]:
+            if (
+                skip_unchanged_projections
+                and self.store.instance.get(task_id, instance["instance_id"]) == instance
+            ):
+                continue
             self.store.instance.put(
                 task_id,
                 instance["instance_id"],

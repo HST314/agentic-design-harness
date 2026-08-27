@@ -126,6 +126,35 @@ class RecordingOrchestrator:
         return int(run_id.rsplit("_", 1)[1])
 
 
+class TwoCardRecordingOrchestrator(RecordingOrchestrator):
+    def load_plan(self, task_id: str, run_id: str) -> dict[str, Any]:
+        proposal = super().load_plan(task_id, run_id)
+        revision = proposal["revision"]
+        first_item = proposal["work_items"][0]
+        first_card = proposal["execution_cards"][0]
+        instance_id = f"instance_master_b_{revision}"
+        card_id = f"card_master_b_{revision}"
+        proposal["work_items"].append(
+            {
+                **deepcopy(first_item),
+                "work_item_id": f"work_master_b_{revision}",
+                "title": f"主视觉方向 B {revision}",
+                "current_instance_id": instance_id,
+                "instance_ids": [instance_id],
+                "task_card_ids": [card_id],
+            }
+        )
+        proposal["execution_cards"].append(
+            {
+                **deepcopy(first_card),
+                "card_id": card_id,
+                "instance_id": instance_id,
+                "objective": f"生成主视觉方向 B {revision}。",
+            }
+        )
+        return proposal
+
+
 class RecordingApplication:
     def __init__(self) -> None:
         self.saved: list[dict[str, Any]] = []
@@ -139,6 +168,89 @@ class RecordingApplication:
     def confirm_and_start_ready_instances(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         self.started.append({"task_id": task_id, **deepcopy(kwargs)})
         return {"task_id": task_id, "launches": [{"instance_id": "recorded"}], "unavailable": []}
+
+
+class LandedRecordingApplication(RecordingApplication):
+    def __init__(self, commands: Any, store: Any) -> None:
+        super().__init__()
+        self.commands = commands
+        self.store = store
+        self.started_instance_ids: set[str] = set()
+        self.merge_preserved_started_instances: list[bool] = []
+
+    def save_plan_and_create_instances(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+        self.saved.append({"task_id": task_id, **deepcopy(kwargs)})
+        before_plan = self.store.plan.get(task_id, task_id)
+        before_started = {}
+        if before_plan is not None:
+            card_by_instance = {
+                card["instance_id"]: card for card in before_plan["task_cards"]
+            }
+            before_started = {
+                instance["instance_id"]: {
+                    "instance": deepcopy(instance),
+                    "card": deepcopy(card_by_instance[instance["instance_id"]]),
+                    "projection_revision": self.store.instance.revision(
+                        task_id, instance["instance_id"]
+                    ),
+                }
+                for instance in before_plan["instances"]
+                if instance["instance_id"] in self.started_instance_ids
+                or instance["status"] not in {"READY", "UNAVAILABLE"}
+            }
+        result = self.commands.save_plan(
+            task_id,
+            stages=kwargs["stages"],
+            instances=kwargs["instances"],
+            task_cards=kwargs["task_cards"],
+            envelope=kwargs["envelope"],
+            mode=kwargs.get("mode", "replace"),
+            expected_plan_revision=kwargs.get("expected_plan_revision"),
+        )
+        if kwargs.get("mode") == "merge":
+            after_plan = result["plan"]
+            after_card_by_instance = {
+                card["instance_id"]: card for card in after_plan["task_cards"]
+            }
+            after_instance_by_id = {
+                instance["instance_id"]: instance for instance in after_plan["instances"]
+            }
+            self.merge_preserved_started_instances.extend(
+                after_instance_by_id[instance_id] == snapshot["instance"]
+                and after_card_by_instance[instance_id] == snapshot["card"]
+                and self.store.instance.revision(task_id, instance_id)
+                == snapshot["projection_revision"]
+                for instance_id, snapshot in before_started.items()
+            )
+        return result
+
+    def confirm_and_start_ready_instances(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+        self.started.append({"task_id": task_id, **deepcopy(kwargs)})
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            raise AssertionError("expected a landed plan before starting instances")
+        operation_id = kwargs["operation_id"]
+        if plan["task"]["status"] == "AWAITING_START_CONFIRMATION":
+            self.commands.confirm_start(
+                task_id,
+                CommandEnvelope(
+                    idempotency_key=f"{operation_id}-confirm-start",
+                    actor_type="human",
+                    actor_id="human_operator",
+                    expected_revision=self.store.task.revision(task_id, task_id),
+                ),
+            )
+        selected = kwargs.get("only_instance_ids") or []
+        self.started_instance_ids.update(selected)
+        launches = [{"instance_id": instance_id} for instance_id in selected]
+        return {"task_id": task_id, "launches": launches, "unavailable": []}
+
+    def latest_start_operation(
+        self, task_id: str, *, instance_id: str | None = None
+    ) -> dict[str, Any] | None:
+        if instance_id not in self.started_instance_ids:
+            return None
+        return {"task_id": task_id, "instance_id": instance_id, "state": "QUEUED"}
 
 
 class InterruptedApplication(RecordingApplication):
@@ -279,7 +391,7 @@ class MasterThreadApiTests(unittest.TestCase):
                     proposal["execution_cards"][0]["objective"],
                     "生成更克制的自然光主视觉。",
                 )
-                self.assertIn("请重新审阅后确认", session["messages"][-1]["content"])
+                self.assertIn("请审阅未启动任务卡后继续", session["messages"][-1]["content"])
                 proposals = app.state.container.store.plan_proposal.list(task_id)
                 self.assertEqual(
                     {item["revision"]: item["status"] for item in proposals},
@@ -321,6 +433,108 @@ class MasterThreadApiTests(unittest.TestCase):
                 self.assertEqual(
                     application.saved[0]["task_cards"][0]["objective"],
                     "生成更克制的自然光主视觉。",
+                )
+
+    def test_started_card_locks_while_an_unstarted_peer_remains_editable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = self._app(Path(temporary))
+            container = app.state.container
+            container.master_threads.orchestrator = TwoCardRecordingOrchestrator()
+            application = LandedRecordingApplication(container.commands, container.store)
+            container.master_threads.application = application
+            with TestClient(app) as client:
+                task_id = self._create_submit(client, "manual")
+                initial = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                cards = {
+                    card["instance_id"]: card
+                    for card in initial["latest_proposal"]["execution_cards"]
+                }
+                started_card = cards["instance_master_1"]
+                unstarted_card = cards["instance_master_b_1"]
+                self.assertCountEqual(
+                    initial["editable_card_ids"],
+                    [started_card["card_id"], unstarted_card["card_id"]],
+                )
+
+                started = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/confirm",
+                    json={
+                        "task_expected_revision": initial["task_revision"],
+                        "expected_card_revisions": {
+                            started_card["card_id"]: 1,
+                            unstarted_card["card_id"]: 1,
+                        },
+                        "instance_ids": [started_card["instance_id"]],
+                        "envelope": self._envelope("start-first-card", 1),
+                    },
+                )
+                self.assertEqual(started.status_code, 200, started.text)
+                started_session = started.json()["session"]
+                self.assertEqual(started_session["editable_card_ids"], [unstarted_card["card_id"]])
+                self.assertEqual(
+                    started_session["instance_statuses"][started_card["instance_id"]],
+                    "READY",
+                )
+                self.assertEqual(
+                    started_session["instance_statuses"][unstarted_card["instance_id"]],
+                    "READY",
+                )
+
+                locked_edit = client.patch(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/task-cards/{started_card['card_id']}",
+                    json={
+                        "expected_proposal_revision": 1,
+                        "expected_card_revision": 1,
+                        **self._editable_card_request(started_card),
+                        "objective": "不得覆盖已启动任务卡。",
+                        "envelope": self._envelope("reject-started-card-edit", 1),
+                    },
+                )
+                self.assertEqual(locked_edit.status_code, 409, locked_edit.text)
+                self.assertEqual(
+                    locked_edit.json()["error"]["code"], "INVALID_STATE_TRANSITION"
+                )
+
+                editable_request = {
+                    "expected_proposal_revision": 1,
+                    "expected_card_revision": 1,
+                    **self._editable_card_request(unstarted_card),
+                    "objective": "生成更克制的第二条主视觉方向。",
+                    "envelope": self._envelope("revise-unstarted-card", 1),
+                }
+                revised = client.patch(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/1/task-cards/{unstarted_card['card_id']}",
+                    json=editable_request,
+                )
+                self.assertEqual(revised.status_code, 200, revised.text)
+                revised_session = revised.json()
+                revised_proposal = revised_session["latest_proposal"]
+                revised_cards = {
+                    card["instance_id"]: card
+                    for card in revised_proposal["execution_cards"]
+                }
+                self.assertEqual(revised_proposal["revision"], 2)
+                self.assertEqual(revised_session["editable_card_ids"], [unstarted_card["card_id"]])
+                self.assertEqual(revised_cards[started_card["instance_id"]], started_card)
+                self.assertEqual(revised_cards[unstarted_card["instance_id"]]["revision"], 2)
+
+                confirmed_revision = client.post(
+                    f"/api/v1/tasks/{task_id}/plan-proposals/2/confirm",
+                    json={
+                        "task_expected_revision": revised_session["task_revision"],
+                        "expected_card_revisions": {
+                            started_card["card_id"]: 1,
+                            unstarted_card["card_id"]: 2,
+                        },
+                        "instance_ids": [unstarted_card["instance_id"]],
+                        "envelope": self._envelope("start-revised-peer", 2),
+                    },
+                )
+                self.assertEqual(confirmed_revision.status_code, 200, confirmed_revision.text)
+                self.assertEqual(application.saved[-1]["mode"], "merge")
+                self.assertEqual(application.merge_preserved_started_instances, [True])
+                self.assertEqual(
+                    confirmed_revision.json()["session"]["editable_card_ids"], []
                 )
 
     def test_task_card_edit_revalidates_secrets_manifests_and_delivery_contracts(self) -> None:
@@ -736,6 +950,16 @@ class MasterThreadApiTests(unittest.TestCase):
                 self.assertEqual(len(resumed_application.started), 1)
                 recovered = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
                 self.assertEqual(recovered["latest_proposal"]["status"], "CONFIRMED")
+
+    @staticmethod
+    def _editable_card_request(card: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "objective": card["objective"],
+            "instructions": deepcopy(card["instructions"]),
+            "input_assets": deepcopy(card["input_assets"]),
+            "expected_deliveries": deepcopy(card["expected_deliveries"]),
+            "parameters": deepcopy(card["parameters"]),
+        }
 
     def _create_submit(self, client: TestClient, start_policy: str) -> str:
         created = client.post(
