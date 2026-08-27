@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.1",
+  "agent": "ppt-agent",
+  "repository": "https://github.com/HST314/ppt-agent.git",
+  "revision": "042deab091adcc65ee2f0d22b5f929bf1638e31f",
+  "package_version": "0.3.0",
+  "contract_version": "1.0",
+  "embedded_path": "agents/ppt-agent",
+  "source_content_sha256": "1be4843abe888d65045b792baa48c87657c8b03df9857e7a07209d5101af241a",
+  "dependencies": {
+    "files": [
+      {
+        "scope": "harness",
+        "path": "requirements/ppt-agent.lock",
+        "sha256": "06dccf0ec76b929ab95337faf3ac0876e111526e3c58c9197ae96283c2122c54"
+      },
+      {
+        "scope": "ppt_agent",
+        "path": "pyproject.toml",
+        "sha256": "950f04e42b92874bfb5ccfdd37b15c8e81d5003ee8fb0cb8add850407b8d3ba4"
+      }
+    ],
+    "lock_set_sha256": "df93bb7b107c1fdaebacacfd56358570d6544ba78724177035404aae72d7e186"
+  }
+}

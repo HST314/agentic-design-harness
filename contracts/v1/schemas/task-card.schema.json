@@ -142,6 +142,11 @@
           "minimum": 1,
           "maximum": 500
         },
+        "input_source": {
+          "type": "string",
+          "enum": ["shared", "empty"],
+          "default": "shared"
+        },
         "planned_asset_role": {
           "$ref": "common.schema.json#/$defs/credentialSafeText",
           "type": "string",

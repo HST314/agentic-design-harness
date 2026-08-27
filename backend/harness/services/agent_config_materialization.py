@@ -269,6 +269,29 @@ class ImageAgentConfigMaterializer:
             provider_environment=self._provider_environment(snapshot),
         )
 
+    def resolve_ppt_launch(
+        self,
+        task_id: str,
+        *,
+        runtime_path: Path,
+        model_config_path: Path,
+    ) -> ImageAgentLaunchConfiguration:
+        """Resolve the shared provider/supervisor boundary for a PPT process."""
+
+        snapshot = self.task_config.resolve(task_id)
+        current = self.task_config.get_public(task_id)
+        return ImageAgentLaunchConfiguration(
+            source_config_revision=snapshot.revision,
+            task_config_revision_id=str(current["config_revision_id"]),
+            runtime_config_revision_id="ppt-agent-managed-v1",
+            config_hash=str(current["config_hash"]),
+            runtime_path=runtime_path,
+            model_config_path=model_config_path,
+            config_root=None,
+            supervisor=snapshot.runtime.supervisor,
+            provider_environment=self._provider_environment(snapshot),
+        )
+
     def validate_overrides(
         self,
         task_revision: dict[str, Any],
@@ -373,9 +396,7 @@ class ImageAgentConfigMaterializer:
                 or boundary.get("release") not in {"auto", "manual", "off"}
                 or set(boundary) != {"release"}
             ):
-                raise HarnessError(
-                    "VALIDATION_ERROR", f"{field_name}.release is invalid."
-                )
+                raise HarnessError("VALIDATION_ERROR", f"{field_name}.release is invalid.")
         if runtime.get("response_format") not in {"url", "b64_json"}:
             raise HarnessError("VALIDATION_ERROR", "response_format is invalid.")
         if type(runtime.get("watermark")) is not bool:
@@ -469,10 +490,7 @@ class ImageAgentConfigMaterializer:
             }[image["question_preference"]],
             "max_auto_questions": image["max_auto_questions"],
             "clarification_total_budget": image["clarification_total_budget"],
-            **{
-                field_name: deepcopy(image[field_name])
-                for field_name in LIBRARY_RELEASE_FIELDS
-            },
+            **{field_name: deepcopy(image[field_name]) for field_name in LIBRARY_RELEASE_FIELDS},
             "candidate_concurrency": image["candidate_concurrency"],
             "default_output_size": image["default_output_size"],
             "response_format": image["response_format"],

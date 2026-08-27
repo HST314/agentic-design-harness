@@ -232,8 +232,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                         "Only a planned task may start ready Agent instances.",
                         {"current": plan["task"]["status"]},
                     )
+                ready_stage_ids = {
+                    item["stage_id"]
+                    for item in plan["stages"]
+                    if item["status"] == "READY"
+                }
                 targets = [
-                    item["instance_id"] for item in plan["instances"] if item["status"] == "READY"
+                    item["instance_id"]
+                    for item in plan["instances"]
+                    if item["status"] == "READY" and item["stage_id"] in ready_stage_ids
                 ]
                 unavailable = [
                     item["instance_id"]
@@ -688,6 +695,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                         "This instance state cannot execute the requested operation.",
                         {"current": instance["status"], "operation": kind},
                     )
+                if kind == "START_INSTANCE":
+                    self._require_ppt_start_gate(task_id, instance_id)
                 intent = {
                     "schema_version": "1.0",
                     "kind": kind,
@@ -940,6 +949,33 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 config_ref=task_root / "instances" / instance_id / "runtime" / "runtime.yaml",
             )
         )
+
+    def _require_ppt_start_gate(self, task_id: str, instance_id: str) -> None:
+        """Require every Image branch to be manually finished before PPT starts."""
+
+        plan = self._plan(task_id)
+        target = next(
+            (item for item in plan["instances"] if item["instance_id"] == instance_id),
+            None,
+        )
+        if target is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        if target["agent_type"] != "ppt":
+            return
+        unfinished = [
+            item["instance_id"]
+            for item in plan["instances"]
+            if item["agent_type"] == "image" and not item.get("manual_finished", False)
+        ]
+        if unfinished:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "All Image instances must be manually marked finished before PPT can start.",
+                {
+                    "instance_id": instance_id,
+                    "unfinished_instance_ids": unfinished,
+                },
+            )
 
 
 

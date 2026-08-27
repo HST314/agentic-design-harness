@@ -1,0 +1,44 @@
+model_config_id: harness-ppt-agent-ark
+state_bindings:
+  - state: intake_clarify
+    model_role: reasoning_llm
+    provider: ark
+    model: deepseek-v4-flash-ga-260731
+    parameters: {}
+    fallback_model: null
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY
+  - state: narrative_structure
+    model_role: reasoning_llm
+    provider: ark
+    model: deepseek-v4-flash-ga-260731
+    parameters: {}
+    fallback_model: null
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY
+  - state: slide_outline
+    model_role: reasoning_llm
+    provider: ark
+    model: deepseek-v4-flash-ga-260731
+    parameters: {}
+    fallback_model: null
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY
+  - state: ppt_sample
+    model_role: reasoning_llm
+    provider: ark
+    model: deepseek-v4-flash-ga-260731
+    parameters:
+      max_tokens: 16384
+    fallback_model: null
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY
+  - state: ppt_full
+    model_role: reasoning_llm
+    provider: ark
+    model: deepseek-v4-flash-ga-260731
+    parameters:
+      max_tokens: 32768
+    fallback_model: null
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY

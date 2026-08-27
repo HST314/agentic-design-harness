@@ -9,7 +9,7 @@ from .base import (
     ValidationResult,
 )
 from .image import ImageAgentAdapter
-from .ppt import PptAgentContractAdapter
+from .ppt import PptAgentAdapter
 from .registry import AdapterRegistry
 from .types import (
     AgentInstanceSnapshot,
@@ -28,7 +28,7 @@ __all__ = [
     "AgentInstanceSnapshot",
     "DeliveryCandidate",
     "ImageAgentAdapter",
-    "PptAgentContractAdapter",
+    "PptAgentAdapter",
     "PrepareRequest",
     "StageSnapshot",
     "TaskCard",

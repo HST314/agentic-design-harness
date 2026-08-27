@@ -82,6 +82,7 @@ class AgentInstanceSnapshot(TypedDict):
     requirement_lifecycle: RequirementLifecycle
     status: AgentInstanceStatus
     approval_mode: Literal["human", "master"]
+    manual_finished: NotRequired[bool]
     config_revision: int
     workspace_relpath: str
     task_card_relpath: str

@@ -9,6 +9,7 @@
 | 架构评审者 | [配置与 Master 资料理解架构重构方案](configuration-architecture-refactor-v1.md) | 三份 YAML、内置 Master、资料解析与用户/管理员边界的目标设计 |
 | 系统管理员 | [配置指南](configuration.md) | 四个根事实源、秘密轮换与配置检查 |
 | Image Agent 维护者 | [Image Agent 集成](image-agent-integration.md) | 受管模式、进程边界、版本锁、双资产与回滚 |
+| PPT 前端接入者 | [PPT 前端接入 API](ppt-agent-frontend-api.md) | 工作台 iframe、Image 人工结束门禁与 PPT 输入源 |
 | Master / API 集成者 | [Master API](master-api.md) | 任务、消息、TaskCard 修订、确认启动与错误处理 |
 | 代码贡献者 | [贡献指南](../CONTRIBUTING.md) | 分层、测试、契约优先和双仓提交 |
 | 单机运维人员 | [运行手册](operations.md) | 备份恢复、容量、发布门禁、升级回滚与日志安全 |

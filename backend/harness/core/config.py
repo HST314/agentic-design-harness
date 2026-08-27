@@ -28,6 +28,12 @@ class HarnessSettings(BaseModel):
     image_agent_lock_path: Path = Path("agents/image-agent.lock.json")
     image_agent_python: Path = Field(default_factory=lambda: Path(sys.executable))
     image_agent_dependency_root: Path = Path(".runtime/image-agent-deps")
+    ppt_agent_root: Path = Path("agents/ppt-agent")
+    ppt_agent_lock_path: Path = Path("agents/ppt-agent.lock.json")
+    ppt_agent_python: Path = Field(default_factory=lambda: Path(sys.executable))
+    ppt_agent_dependency_root: Path = Path(".runtime/ppt-agent-deps")
+    ppt_agent_runtime_policy: Path = Path("config/ppt_agent_runtime.yaml")
+    ppt_agent_model_config: Path = Path("config/ppt_agent_model_config.yaml")
     config_snapshot: ConfigSnapshot | None = Field(default=None, repr=False)
 
     @field_validator("log_level")
@@ -47,6 +53,11 @@ class HarnessSettings(BaseModel):
             "image_agent_lock_path",
             "image_agent_python",
             "image_agent_dependency_root",
+            "ppt_agent_lock_path",
+            "ppt_agent_python",
+            "ppt_agent_dependency_root",
+            "ppt_agent_runtime_policy",
+            "ppt_agent_model_config",
         ):
             value = getattr(self, name)
             updates[name] = value if value.is_absolute() else project_root / value
@@ -54,6 +65,11 @@ class HarnessSettings(BaseModel):
             self.image_agent_root
             if self.image_agent_root.is_absolute()
             else project_root / self.image_agent_root
+        )
+        updates["ppt_agent_root"] = (
+            self.ppt_agent_root
+            if self.ppt_agent_root.is_absolute()
+            else project_root / self.ppt_agent_root
         )
         return self.model_copy(update=updates)
 
@@ -70,11 +86,7 @@ def settings_from_snapshot(project_root: Path, snapshot: ConfigSnapshot) -> Harn
     ).resolve_from(project_root)
 
 
-def load_settings(
-    project_root: Path, environ: Mapping[str, str] | None = None
-) -> HarnessSettings:
+def load_settings(project_root: Path, environ: Mapping[str, str] | None = None) -> HarnessSettings:
     """Validate the root configuration and derive internal process settings."""
 
-    return settings_from_snapshot(
-        project_root, load_config_snapshot(project_root, environ)
-    )
+    return settings_from_snapshot(project_root, load_config_snapshot(project_root, environ))

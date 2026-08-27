@@ -405,11 +405,18 @@ def validate_asset_semantics(asset: dict[str, Any]) -> None:
             )
         return
 
-    if not asset["relative_path"].startswith(
+    bundle_id = asset.get("bundle_id")
+    legacy_path = asset["relative_path"].startswith(
         f"resources/shared/{asset['asset_id']}/"
-    ):
+    )
+    bundle_path = (
+        isinstance(bundle_id, str)
+        and Path(asset["relative_path"]).parent.as_posix() == "resources/shared"
+        and Path(asset["relative_path"]).stem == bundle_id
+    )
+    if not (legacy_path or bundle_path):
         raise SemanticContractError(
-            "published asset must resolve inside its shared asset directory"
+            "published asset must use its asset directory or flat bundle stem"
         )
     if not asset["source_relative_path"].startswith(
         f"instances/{producer}/outputs/"

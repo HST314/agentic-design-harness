@@ -1,3 +1,6 @@
 [submodule "agents/image_agent_mvp"]
 	path = agents/image_agent_mvp
 	url = https://github.com/HST314/image_agent_mvp.git
+[submodule "agents/ppt-agent"]
+	path = agents/ppt-agent
+	url = https://github.com/HST314/ppt-agent.git
