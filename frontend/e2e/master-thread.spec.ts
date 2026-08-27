@@ -195,7 +195,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 
 test("reviews a durable plan and sends revision feedback with existing resources", async ({ page }) => {
   await page.goto("/tasks/task_master_e2e/master");
-  await expect(page.getByRole("heading", { name: "秋季发布会主视觉" })).toBeVisible();
+  await expect(page.locator(".workbench-topbar")).toContainText("秋季发布会主视觉");
   await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("已生成两条视觉探索路径");
   await expect(page.getByRole("heading", { name: "执行计划预览" })).toBeVisible();
   await expect(page.getByLabel("计划子任务").getByRole("heading", { name: "自然光主视觉方向" })).toBeVisible();
@@ -310,7 +310,7 @@ test("keeps the permanent thread usable at supported desktop widths", async ({ p
   for (const width of [1280, 1440, 1920]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/tasks/task_master_e2e/master");
-    await expect(page.getByRole("heading", { name: "秋季发布会主视觉" })).toBeVisible();
+    await expect(page.locator(".workbench-topbar")).toContainText("秋季发布会主视觉");
     await expect
       .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth))
       .toBe(true);

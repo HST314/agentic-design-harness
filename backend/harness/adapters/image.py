@@ -330,7 +330,7 @@ class ImageAgentAdapter(ImageObservationMixin):
                     str(path) for path in image_dependency_pythonpath_entries(artifact_root)
                 ),
             },
-            health_path="/api/health",
+            health_path="/healthz",
             readiness_path="/api/health",
             ui_path="/",
         )

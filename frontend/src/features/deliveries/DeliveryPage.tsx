@@ -236,11 +236,7 @@ export function DeliveryPage(): React.JSX.Element {
   }, [bundles.data, selectedBundle]);
 
   return (
-    <section className="workbench-page deliveries-page" aria-labelledby="deliveries-title">
-      <header className="workbench-page__header">
-        <div><p className="workbench-eyebrow">分支级人工门禁</p><h1 id="deliveries-title">交付包</h1><p>逐分支审阅最终图片与 Markdown；只有明确确认后，两份资产才会同批次进入共享资源。</p></div>
-        {bundles.data ? <span className="delivery-count">{bundles.data.candidates.filter((item) => item.status === "PENDING_CONFIRMATION").length} 个待确认</span> : null}
-      </header>
+    <section className="workbench-page deliveries-page" aria-label="任务交付">
       <TaskTabs taskId={taskId} />
       {feedback ? <p className="delivery-feedback" role="status" aria-live="polite"><Icon name="file-check" />{feedback}</p> : null}
       {bundles.isPending ? <div className="task-projection__loading" role="status">正在读取分支交付候选…</div> : null}

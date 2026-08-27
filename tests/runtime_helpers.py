@@ -30,6 +30,8 @@ def build_config_snapshot(
     supervisor_port_end: int = 18199,
     supervisor_startup_timeout: int = 30,
     supervisor_shutdown_grace: int = 5,
+    supervisor_probe_timeout: float = 2.0,
+    supervisor_health_failure_threshold: int = 5,
 ) -> ConfigSnapshot:
     return ConfigSnapshot.model_validate(
         {
@@ -125,6 +127,8 @@ def build_config_snapshot(
                     "port_range_end": supervisor_port_end,
                     "startup_timeout_seconds": supervisor_startup_timeout,
                     "shutdown_grace_seconds": supervisor_shutdown_grace,
+                    "probe_timeout_seconds": supervisor_probe_timeout,
+                    "health_failure_threshold": supervisor_health_failure_threshold,
                 },
             },
         }
