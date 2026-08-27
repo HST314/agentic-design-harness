@@ -225,6 +225,7 @@ class MasterThreadService:
         task_expected_revision: int,
         expected_card_revisions: dict[str, int],
         envelope: CommandEnvelope,
+        instance_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         return self._confirm(
             task_id,
@@ -232,6 +233,7 @@ class MasterThreadService:
             task_expected_revision=task_expected_revision,
             expected_card_revisions=expected_card_revisions,
             envelope=envelope,
+            instance_ids=instance_ids,
         )
 
     def revise_task_card(
@@ -427,6 +429,7 @@ class MasterThreadService:
         task_expected_revision: int,
         expected_card_revisions: dict[str, int],
         envelope: CommandEnvelope,
+        instance_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         self._require_human_confirmation(envelope.actor_type)
         intent_path = self._confirm_intent_path(task_id, proposal_revision)
@@ -448,6 +451,24 @@ class MasterThreadService:
                         envelope.expected_revision,
                         proposal_revision,
                     )
+                start_subset = None
+                if instance_ids is not None:
+                    known = {card["instance_id"] for card in proposal["execution_cards"]}
+                    unknown = [
+                        instance_id for instance_id in instance_ids if instance_id not in known
+                    ]
+                    if unknown:
+                        raise HarnessError(
+                            "VALIDATION_ERROR",
+                            "Only instances of the selected plan may be started.",
+                            {"instance_ids": unknown},
+                        )
+                    start_subset = sorted(set(instance_ids))
+                    if not start_subset:
+                        raise HarnessError(
+                            "VALIDATION_ERROR",
+                            "At least one instance must be selected to start.",
+                        )
                 intent = {
                     "schema_version": "1.0",
                     "kind": "CONFIRM_MASTER_PLAN",
@@ -456,6 +477,7 @@ class MasterThreadService:
                     "proposal_revision": proposal_revision,
                     "expected_card_revisions": deepcopy(expected_card_revisions),
                     "task_expected_revision": task_expected_revision,
+                    "instance_ids": start_subset,
                     "actor": {
                         "actor_type": envelope.actor_type,
                         "actor_id": envelope.actor_id,
@@ -536,6 +558,7 @@ class MasterThreadService:
                     actor_id=actor["actor_id"],
                     expected_revision=cast(int, saved_task_revision),
                 ),
+                only_instance_ids=intent.get("instance_ids"),
             )
             intent.update({"state": "STARTED", "start_result": start_result})
             atomic_write_json(intent_path, intent)
@@ -1101,6 +1124,16 @@ class MasterThreadService:
         messages.sort(key=lambda item: (item["sequence"], item["created_at"], item["message_id"]))
         proposals = self.store.plan_proposal.list(task_id)
         latest = max(proposals, key=lambda item: item["revision"], default=None)
+        message_ids = {message["message_id"] for message in messages}
+        proposal_entries = [
+            {
+                **deepcopy(proposal),
+                "message_id": self._proposal_message_id(
+                    task_id, proposal["proposal_id"], message_ids
+                ),
+            }
+            for proposal in sorted(proposals, key=lambda item: item["revision"])
+        ]
         intake = self.store.task_intake.get(task_id, task_id)
         assets = []
         if intake is not None:
@@ -1120,12 +1153,22 @@ class MasterThreadService:
             "thread_revision": self.store.master_thread.revision(task_id, task_id),
             "messages": deepcopy(messages),
             "latest_proposal": deepcopy(latest),
+            "proposals": proposal_entries,
             "task": deepcopy(task),
             "task_revision": self.store.task.revision(task_id, task_id),
             # Kept until the designer-shell cleanup stage removes the old response field.
             "gateway_available": True,
             "assets": assets,
         }
+
+    def _proposal_message_id(
+        self, task_id: str, proposal_id: str, message_ids: set[str]
+    ) -> str | None:
+        for prefix in ("message_plan", "message_card_edit"):
+            candidate = self._identifier(prefix, task_id, proposal_id)
+            if candidate in message_ids:
+                return candidate
+        return None
 
     def _ensure_thread(
         self, task_id: str, task: dict[str, Any] | None = None

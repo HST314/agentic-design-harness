@@ -75,6 +75,7 @@ class SavePlanRequest(StrictRequest):
 class StartTaskRequest(StrictRequest):
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     envelope: CommandEnvelope
+    instance_ids: list[str] | None = Field(default=None, max_length=100)
 
 
 class RetryStartOperationRequest(StrictRequest):
@@ -139,6 +140,7 @@ class ConfirmPlanProposalRequest(StrictRequest):
         Annotated[int, Field(ge=1)],
     ] = Field(min_length=1, max_length=100)
     envelope: CommandEnvelope
+    instance_ids: list[str] | None = Field(default=None, max_length=100)
 
 
 class InstanceOperationRequest(StrictRequest):
@@ -486,6 +488,7 @@ def build_v1_router(container: Container) -> APIRouter:
             task_expected_revision=body.task_expected_revision,
             expected_card_revisions=body.expected_card_revisions,
             envelope=body.envelope,
+            instance_ids=body.instance_ids,
         )
 
     @router.patch("/tasks/{task_id}/presentation", tags=["tasks"])
@@ -621,6 +624,7 @@ def build_v1_router(container: Container) -> APIRouter:
             task_id,
             operation_id=body.operation_id,
             envelope=body.envelope,
+            only_instance_ids=body.instance_ids,
         )
 
     @router.get("/tasks/{task_id}/start-operations/latest", tags=["tasks"])
@@ -698,6 +702,14 @@ def build_v1_router(container: Container) -> APIRouter:
                 "task_id": task_id,
                 "task_revision": container.store.task.revision(task_id, task_id),
                 "pending_approval": pending[0] if pending else None,
+                "start_operation_id": (
+                    None if start_operation is None else start_operation["operation_id"]
+                ),
+                "start_progress": start_progress,
+                "start_in_progress": start_in_progress,
+                "start_retry_allowed": (
+                    False if start_operation is None else start_operation["retry_allowed"]
+                ),
                 **result,
             }
 

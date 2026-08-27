@@ -547,6 +547,103 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(self.fake_adapter.start_calls), 1)
         self.application.cancel_instance("t_prompt_only_image", "i_image_1")
 
+    def test_subset_start_launches_only_selected_instances(self) -> None:
+        self._configure_runtime_artifact("subset-start-fake-agent")
+        created = create_task(self.commands, "t_subset_start")
+        draft = image_plan("t_subset_start", count=2)
+        saved = self.application.save_plan_and_create_instances(
+            "t_subset_start",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save-subset-start",
+            envelope=envelope("save-subset-start", created["revision"]),
+        )
+
+        first = self.application.confirm_and_start_ready_instances(
+            "t_subset_start",
+            operation_id="start-subset-first",
+            envelope=envelope("start-subset-first", saved["task_revision"]),
+            only_instance_ids=["i_image_1"],
+        )
+
+        self.assertEqual(len(first["launches"]), 1)
+        self.assertEqual(
+            self.store.instance.get("t_subset_start", "i_image_1")["status"],
+            "RUNNING",
+        )
+        self.assertEqual(
+            self.store.instance.get("t_subset_start", "i_image_2")["status"],
+            "READY",
+        )
+
+        second = self.application.confirm_and_start_ready_instances(
+            "t_subset_start",
+            operation_id="start-subset-second",
+            envelope=envelope(
+                "start-subset-second",
+                self.store.task.revision("t_subset_start", "t_subset_start"),
+            ),
+            only_instance_ids=["i_image_2"],
+        )
+
+        self.assertEqual(len(second["launches"]), 1)
+        self.assertEqual(
+            self.store.instance.get("t_subset_start", "i_image_2")["status"],
+            "RUNNING",
+        )
+        self.assertEqual(len(self.fake_adapter.start_calls), 2)
+        self.application.cancel_instance("t_subset_start", "i_image_1")
+        self.application.cancel_instance("t_subset_start", "i_image_2")
+
+    def test_subset_start_rejects_instances_that_are_not_ready(self) -> None:
+        self._configure_runtime_artifact("subset-reject-fake-agent")
+        created = create_task(self.commands, "t_subset_reject")
+        draft = image_plan("t_subset_reject", count=2)
+        saved = self.application.save_plan_and_create_instances(
+            "t_subset_reject",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save-subset-reject",
+            envelope=envelope("save-subset-reject", created["revision"]),
+        )
+
+        with self.assertRaises(HarnessError) as unknown:
+            self.application.confirm_and_start_ready_instances(
+                "t_subset_reject",
+                operation_id="start-subset-unknown",
+                envelope=envelope("start-subset-unknown", saved["task_revision"]),
+                only_instance_ids=["i_image_1", "i_unknown"],
+            )
+        self.assertEqual(unknown.exception.code, "INVALID_STATE_TRANSITION")
+        self.assertEqual(
+            unknown.exception.details["instance_ids"],
+            ["i_unknown"],
+        )
+
+        started = self.application.confirm_and_start_ready_instances(
+            "t_subset_reject",
+            operation_id="start-subset-all",
+            envelope=envelope("start-subset-all", saved["task_revision"]),
+            only_instance_ids=["i_image_1", "i_image_2"],
+        )
+        self.assertEqual(len(started["launches"]), 2)
+
+        with self.assertRaises(HarnessError) as already_running:
+            self.application.confirm_and_start_ready_instances(
+                "t_subset_reject",
+                operation_id="start-subset-again",
+                envelope=envelope(
+                    "start-subset-again",
+                    self.store.task.revision("t_subset_reject", "t_subset_reject"),
+                ),
+                only_instance_ids=["i_image_1"],
+            )
+        self.assertEqual(already_running.exception.code, "INVALID_STATE_TRANSITION")
+        self.application.cancel_instance("t_subset_reject", "i_image_1")
+        self.application.cancel_instance("t_subset_reject", "i_image_2")
+
     def test_start_failure_is_persisted_and_retry_resumes_the_same_operation(self) -> None:
         created = create_task(self.commands, "t_start_failure")
         draft = image_plan("t_start_failure")

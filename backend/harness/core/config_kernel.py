@@ -193,6 +193,7 @@ class MasterConfig(StrictConfigModel):
     max_tool_rounds: int = Field(ge=1, le=100)
     max_clarification_questions: int = Field(ge=0, le=20)
     require_plan_confirmation: bool
+    default_start_policy: Literal["manual", "auto"] = "manual"
 
 
 class DocumentProcessingConfig(StrictConfigModel):

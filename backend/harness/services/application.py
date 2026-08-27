@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
@@ -193,11 +193,14 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         operation_id: str,
         envelope: CommandEnvelope,
         crash_hook: CrashHook | None = None,
+        only_instance_ids: Collection[str] | None = None,
     ) -> dict[str, Any]:
         validate_identifier(operation_id, "operation_id")
+        only = None if only_instance_ids is None else sorted(set(only_instance_ids))
         request = {
             "task_id": task_id,
             "envelope": envelope.model_dump(mode="json"),
+            "only_instance_ids": only,
         }
         request_sha256 = digest_json(request)
         intent_path = self._intent_path(operation_id)
@@ -240,6 +243,21 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     for item in plan["instances"]
                     if item["status"] == "UNAVAILABLE"
                 ]
+                if only is not None:
+                    startable = set(targets)
+                    rejected = [instance_id for instance_id in only if instance_id not in startable]
+                    if rejected:
+                        raise HarnessError(
+                            "INVALID_STATE_TRANSITION",
+                            "Only ready instances of this task may be started.",
+                            {"instance_ids": rejected},
+                        )
+                    targets = [instance_id for instance_id in targets if instance_id in set(only)]
+                    if not targets:
+                        raise HarnessError(
+                            "VALIDATION_ERROR",
+                            "At least one ready instance must be selected to start.",
+                        )
                 intent = {
                     "schema_version": "1.1",
                     "kind": "START_READY_INSTANCES",
