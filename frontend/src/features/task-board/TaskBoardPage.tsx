@@ -1,14 +1,22 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import type { WorkItemStageProjection } from "../../api/client";
-import { workItemDetailQuery, workItemsQuery } from "../../api/queries";
+import { api, workItemDetailQuery, workItemsQuery } from "../../api/queries";
 import type { ContractWorkItemProjection } from "../../api/generated-contracts";
 import { Icon } from "../../components/Icon";
 import { TaskTabs } from "../master-thread/MasterThreadPage";
 
 type BusinessStatus = ContractWorkItemProjection["business_status"];
+type EditableBusinessStatus = Exclude<BusinessStatus, "EXCEPTION">;
 type View = "board" | "plan";
+
+const editableStatuses: EditableBusinessStatus[] = [
+  "TODO",
+  "RUNNING",
+  "WAITING_APPROVAL",
+  "COMPLETED",
+];
 
 const businessStatusLabel: Record<BusinessStatus, string> = {
   TODO: "待办",
@@ -67,15 +75,30 @@ function detailsSearch(item: ContractWorkItemProjection): string {
 }
 
 export function workbenchPath(item: ContractWorkItemProjection): string {
-  const path = `/tasks/${encodeURIComponent(item.task_id)}/work-items/${encodeURIComponent(item.work_item_id)}`;
-  return item.agent_type === "ppt" && item.business_status === "TODO"
-    ? `${path}?start=1`
-    : path;
+  return `/tasks/${encodeURIComponent(item.task_id)}/work-items/${encodeURIComponent(item.work_item_id)}`;
 }
 
-function WorkItemCard({ item, compact = false }: {
+export function canEnterWorkbench(item: ContractWorkItemProjection): boolean {
+  if (item.agent_type === "image") return true;
+  return ["STARTING", "RUNNING", "WAITING_APPROVAL", "SUCCEEDED"].includes(
+    item.current_instance?.status ?? "",
+  );
+}
+
+function WorkItemCard({
+  item,
+  compact = false,
+  statusPending = false,
+  statusDisabled = false,
+  statusError,
+  onStatusChange,
+}: {
   item: ContractWorkItemProjection;
   compact?: boolean;
+  statusPending?: boolean;
+  statusDisabled?: boolean;
+  statusError?: string;
+  onStatusChange?: (item: ContractWorkItemProjection, status: EditableBusinessStatus) => void;
 }): React.JSX.Element {
   const dependencyText = item.depends_on.length
     ? `依赖 ${item.depends_on.length} 项`
@@ -83,38 +106,69 @@ function WorkItemCard({ item, compact = false }: {
   const attention = item.pending_approvals.length
     ? `${item.pending_approvals.length} 项待审批`
     : item.alerts[0]?.message;
+  const canEnter = canEnterWorkbench(item);
+  const statusValue: EditableBusinessStatus = item.business_status === "EXCEPTION"
+    ? "TODO"
+    : item.business_status;
+  const cardBody = (
+    <>
+      <div>
+        <h3>{item.title}</h3>
+        <code title={item.work_item_id}>{shortId(item.work_item_id)}</code>
+      </div>
+      <dl className="task-card__facts">
+        <div><dt>阶段</dt><dd>S{item.stage.position}</dd></div>
+        <div><dt>依赖</dt><dd>{dependencyText}</dd></div>
+        <div><dt>实例</dt><dd>{item.instance_ids.length}</dd></div>
+        <div><dt>重试</dt><dd>{item.attempts.length}</dd></div>
+      </dl>
+      {attention ? <p className="task-card__attention"><Icon name="status" />{attention}</p> : null}
+      {!canEnter ? <p className="task-card__entry-hint">请从 Master 启动，启动成功后可进入 PPT 工作台</p> : null}
+    </>
+  );
   return (
     <article
       className={`task-card task-card--${item.business_status.toLowerCase()}${compact ? " task-card--compact" : ""}`}
     >
-      <Link
-        className="task-card__entry"
-        to={workbenchPath(item)}
-        aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，进入 ${item.agent_type === "image" ? "Image" : "PPT"} 工作台`}
-      >
-        <div className="task-card__topline">
-          <span className="task-card__agent">{agentLabel(item.agent_type)}</span>
-          <span className={`task-status task-status--${item.business_status.toLowerCase()}`}>
-            <span aria-hidden="true" />{rawStatusLabel[item.raw_status] ?? item.raw_status}
-          </span>
+      <div className="task-card__topline">
+        <span className="task-card__agent">{agentLabel(item.agent_type)}</span>
+        <label className="task-card__status-control">
+          <span className="sr-only">设置 {item.title} 状态</span>
+          <select
+            aria-label={`设置 ${item.title} 状态`}
+            disabled={statusDisabled || !item.current_instance || !onStatusChange}
+            value={statusValue}
+            onChange={(event) => onStatusChange?.(
+              item,
+              event.currentTarget.value as EditableBusinessStatus,
+            )}
+          >
+            {editableStatuses.map((status) => (
+              <option value={status} key={status}>{businessStatusLabel[status]}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {canEnter ? (
+        <Link
+          className="task-card__entry"
+          to={workbenchPath(item)}
+          aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，进入 ${item.agent_type === "image" ? "Image" : "PPT"} 工作台`}
+        >
+          {cardBody}
+        </Link>
+      ) : (
+        <div className="task-card__entry task-card__entry--disabled" aria-label={`${item.title}，PPT 工作台尚未启动`}>
+          {cardBody}
         </div>
-        <div>
-          <h3>{item.title}</h3>
-          <code title={item.work_item_id}>{shortId(item.work_item_id)}</code>
-        </div>
-        <dl className="task-card__facts">
-          <div><dt>阶段</dt><dd>S{item.stage.position}</dd></div>
-          <div><dt>依赖</dt><dd>{dependencyText}</dd></div>
-          <div><dt>实例</dt><dd>{item.instance_ids.length}</dd></div>
-          <div><dt>重试</dt><dd>{item.attempts.length}</dd></div>
-        </dl>
-        {attention ? <p className="task-card__attention"><Icon name="status" />{attention}</p> : null}
-      </Link>
+      )}
       <footer>
         <span>{item.delivery_count ? `${item.delivery_count} 个交付物` : "暂无交付"}</span>
         <time dateTime={item.updated_at}>{formatTime(item.updated_at)}</time>
         <Link className="task-card__details" to={{ search: detailsSearch(item) }}>详情</Link>
       </footer>
+      {statusPending ? <p className="task-card__status-feedback" role="status">正在更新状态…</p> : null}
+      {statusError ? <p className="task-card__status-feedback task-card__status-feedback--error" role="alert">{statusError}</p> : null}
     </article>
   );
 }
@@ -123,25 +177,22 @@ function EmptyColumn({ text }: { text: string }): React.JSX.Element {
   return <p className="task-board__empty">{text}</p>;
 }
 
-export function BoardView({ items }: { items: ContractWorkItemProjection[] }): React.JSX.Element {
-  const [terminalFilter, setTerminalFilter] = useState<"all" | "completed" | "exception">("all");
+export function BoardView({ items, ...cardActions }: {
+  items: ContractWorkItemProjection[];
+  statusPendingId?: string;
+  statusErrorId?: string;
+  statusError?: string;
+  onStatusChange?: (item: ContractWorkItemProjection, status: EditableBusinessStatus) => void;
+}): React.JSX.Element {
   const columns: Array<{
     id: string;
     label: string;
     statuses: BusinessStatus[];
   }> = [
-    { id: "todo", label: "待办", statuses: ["TODO"] },
+    { id: "todo", label: "待办", statuses: ["TODO", "EXCEPTION"] },
     { id: "running", label: "运行中", statuses: ["RUNNING"] },
     { id: "approval", label: "待审批", statuses: ["WAITING_APPROVAL"] },
-    {
-      id: "ended",
-      label: "已结束",
-      statuses: terminalFilter === "completed"
-        ? ["COMPLETED"]
-        : terminalFilter === "exception"
-          ? ["EXCEPTION"]
-          : ["COMPLETED", "EXCEPTION"],
-    },
+    { id: "completed", label: "已完成", statuses: ["COMPLETED"] },
   ];
   return (
     <div className="task-board" aria-label="逻辑子任务状态看板">
@@ -151,19 +202,18 @@ export function BoardView({ items }: { items: ContractWorkItemProjection[] }): R
           <section className="task-board__column" aria-labelledby={`board-column-${column.id}`} key={column.id}>
             <header>
               <div><h2 id={`board-column-${column.id}`}>{column.label}</h2><span>{cards.length}</span></div>
-              {column.id === "ended" ? (
-                <label className="task-board__terminal-filter">
-                  <span className="sr-only">终态筛选</span>
-                  <select value={terminalFilter} onChange={(event) => setTerminalFilter(event.currentTarget.value as typeof terminalFilter)}>
-                    <option value="all">全部终态</option>
-                    <option value="completed">已完成</option>
-                    <option value="exception">异常</option>
-                  </select>
-                </label>
-              ) : null}
             </header>
             <div className="task-board__cards">
-              {cards.length ? cards.map((item) => <WorkItemCard item={item} key={item.work_item_id} />) : <EmptyColumn text="当前没有子任务" />}
+              {cards.length ? cards.map((item) => (
+                <WorkItemCard
+                  item={item}
+                  key={item.work_item_id}
+                  statusPending={cardActions.statusPendingId === item.work_item_id}
+                  statusDisabled={Boolean(cardActions.statusPendingId)}
+                  statusError={cardActions.statusErrorId === item.work_item_id ? cardActions.statusError : undefined}
+                  onStatusChange={cardActions.onStatusChange}
+                />
+              )) : <EmptyColumn text="当前没有子任务" />}
             </div>
           </section>
         );
@@ -188,9 +238,13 @@ function StageDependency({ stage, stages }: {
   );
 }
 
-function PlanView({ stages, items }: {
+function PlanView({ stages, items, ...cardActions }: {
   stages: WorkItemStageProjection[];
   items: ContractWorkItemProjection[];
+  statusPendingId?: string;
+  statusErrorId?: string;
+  statusError?: string;
+  onStatusChange?: (item: ContractWorkItemProjection, status: EditableBusinessStatus) => void;
 }): React.JSX.Element {
   return (
     <div className="task-plan-flow" aria-label="阶段依赖计划">
@@ -219,7 +273,17 @@ function PlanView({ stages, items }: {
               </div>
             ) : null}
             <div className="task-plan-stage__items">
-              {stageItems.length ? stageItems.map((item) => <WorkItemCard compact item={item} key={item.work_item_id} />) : <EmptyColumn text="该阶段暂无逻辑子任务" />}
+              {stageItems.length ? stageItems.map((item) => (
+                <WorkItemCard
+                  compact
+                  item={item}
+                  key={item.work_item_id}
+                  statusPending={cardActions.statusPendingId === item.work_item_id}
+                  statusDisabled={Boolean(cardActions.statusPendingId)}
+                  statusError={cardActions.statusErrorId === item.work_item_id ? cardActions.statusError : undefined}
+                  onStatusChange={cardActions.onStatusChange}
+                />
+              )) : <EmptyColumn text="该阶段暂无逻辑子任务" />}
             </div>
           </section>
         );
@@ -230,6 +294,7 @@ function PlanView({ stages, items }: {
 
 function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
   const { taskId = "" } = useParams();
+  const queryClient = useQueryClient();
   const projection = useQuery(workItemsQuery(taskId));
   const [agent, setAgent] = useState<"all" | "image" | "ppt">("all");
   const [stageId, setStageId] = useState("all");
@@ -238,6 +303,39 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
     && (stageId === "all" || item.stage.stage_id === stageId)
   )), [agent, projection.data?.items, stageId]);
   const title = view === "board" ? "当前任务看板" : "任务计划";
+  const updateStatus = useMutation({
+    mutationFn: ({ item, status }: {
+      item: ContractWorkItemProjection;
+      status: EditableBusinessStatus;
+    }) => {
+      const taskRevision = projection.data?.task_revision;
+      if (taskRevision === undefined) throw new Error("当前任务修订尚未就绪，请重新读取看板。");
+      const suffix = typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID().replaceAll("-", "")
+        : `${Date.now()}${Math.random().toString(16).slice(2)}`;
+      return api.updateWorkItemStatus(taskId, item.work_item_id, status, {
+        idempotency_key: `set_work_item_status_${suffix}`.slice(0, 128),
+        actor_type: "human",
+        actor_id: "human_operator",
+        expected_revision: taskRevision,
+      });
+    },
+    onSuccess: (response) => {
+      queryClient.setQueryData(workItemsQuery(taskId).queryKey, response);
+    },
+    onError: () => {
+      void queryClient.invalidateQueries({ queryKey: workItemsQuery(taskId).queryKey });
+    },
+  });
+  const cardActions = {
+    statusPendingId: updateStatus.isPending ? updateStatus.variables?.item.work_item_id : undefined,
+    statusErrorId: updateStatus.isError ? updateStatus.variables?.item.work_item_id : undefined,
+    statusError: updateStatus.isError ? updateStatus.error.message : undefined,
+    onStatusChange: (item: ContractWorkItemProjection, status: EditableBusinessStatus) => {
+      updateStatus.reset();
+      updateStatus.mutate({ item, status });
+    },
+  };
   return (
     <section className={`workbench-page task-projection task-projection--${view}`} aria-label={title}>
       <TaskTabs taskId={taskId} />
@@ -247,8 +345,8 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
         <>
           <div className="task-projection__toolbar" aria-label="看板筛选">
             <div className="task-projection__counts" aria-label="状态汇总">
-              {(Object.keys(businessStatusLabel) as BusinessStatus[]).map((status) => (
-                <span key={status}><i className={`task-dot task-dot--${status.toLowerCase()}`} aria-hidden="true" />{businessStatusLabel[status]} <strong>{projection.data.summary[status]}</strong></span>
+              {editableStatuses.map((status) => (
+                <span key={status}><i className={`task-dot task-dot--${status.toLowerCase()}`} aria-hidden="true" />{businessStatusLabel[status]} <strong>{status === "TODO" ? projection.data.summary.TODO + projection.data.summary.EXCEPTION : projection.data.summary[status]}</strong></span>
               ))}
             </div>
             <div className="task-projection__filters">
@@ -259,9 +357,9 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
           {projection.data.items.length === 0 ? (
             <div className="task-projection__empty"><Icon name="plan" /><h2>计划尚未生成逻辑子任务</h2><p>在 Master 中确认计划后，看板与阶段依赖会自动出现在这里。</p><Link className="workbench-primary-button" to={`/tasks/${encodeURIComponent(taskId)}/master`}>返回 Master</Link></div>
           ) : view === "board" ? (
-            <BoardView items={filteredItems} />
+            <BoardView items={filteredItems} {...cardActions} />
           ) : (
-            <PlanView stages={projection.data.stages.filter((stage) => stageId === "all" || stage.stage_id === stageId)} items={filteredItems} />
+            <PlanView stages={projection.data.stages.filter((stage) => stageId === "all" || stage.stage_id === stageId)} items={filteredItems} {...cardActions} />
           )}
         </>
       ) : null}

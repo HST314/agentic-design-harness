@@ -137,6 +137,40 @@ class TaskCommandTests(unittest.TestCase):
             )
         self.assertEqual(captured.exception.code, "VALIDATION_ERROR")
 
+    def test_manual_business_status_is_cleared_by_the_next_runtime_transition(self) -> None:
+        create_task(self.service, "t_manual_business_status")
+        saved = self._save(
+            "t_manual_business_status", image_plan("t_manual_business_status")
+        )
+
+        updated = saved
+        for index, status in enumerate(
+            ("TODO", "RUNNING", "WAITING_APPROVAL", "COMPLETED"), start=1
+        ):
+            updated = self.service.set_manual_business_status(
+                "t_manual_business_status",
+                "i_image_1",
+                status,
+                envelope(f"set-image-card-status-{index}", updated["task_revision"]),
+            )
+            instance = updated["plan"]["instances"][0]
+            self.assertEqual(instance["manual_business_status"], status)
+            self.assertEqual(instance["manual_finished"], status == "COMPLETED")
+
+        started = self.service.transition_instance(
+            "t_manual_business_status",
+            "i_image_1",
+            "STARTING",
+            envelope(
+                "runtime-starts-image",
+                updated["task_revision"],
+                actor_type="system",
+            ),
+        )
+        instance = started["plan"]["instances"][0]
+        self.assertNotIn("manual_business_status", instance)
+        self.assertFalse(instance["manual_finished"])
+
     def test_input_registration_is_revisioned_and_image_only_can_complete(self) -> None:
         created = create_task(self.service, "t_complete", "auto")
         registered = self.service.register_input_manifest(

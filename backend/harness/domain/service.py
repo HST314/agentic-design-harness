@@ -441,9 +441,65 @@ class TaskCommandService:
                 {"instance_id": request["instance_id"]},
             )
         instance["manual_finished"] = request["manual_finished"]
+        if request["manual_finished"]:
+            instance["manual_business_status"] = "COMPLETED"
+        else:
+            instance.pop("manual_business_status", None)
         plan["task"]["updated_at"] = utc_now()
         return self._persist_aggregate(
             plan, envelope, "set_manual_finished", request, actual
+        )
+
+    def set_manual_business_status(
+        self,
+        task_id: str,
+        instance_id: str,
+        business_status: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Set a reversible board status until the runtime reports a real transition."""
+
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "business_status": business_status,
+        }
+        return self._idempotent(
+            task_id,
+            "set_manual_business_status",
+            request,
+            envelope,
+            lambda: self._set_manual_business_status(request, envelope),
+        )
+
+    def _set_manual_business_status(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        allowed = {"TODO", "RUNNING", "WAITING_APPROVAL", "COMPLETED"}
+        if request["business_status"] not in allowed:
+            raise HarnessError("VALIDATION_ERROR", "The WorkItem business status is invalid.")
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only a human or Master may change the WorkItem business status.",
+            )
+        task_id = request["task_id"]
+        plan = self._plan(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        instance = next(
+            (item for item in plan["instances"] if item["instance_id"] == request["instance_id"]),
+            None,
+        )
+        if instance is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        instance["manual_business_status"] = request["business_status"]
+        if instance["agent_type"] == "image":
+            instance["manual_finished"] = request["business_status"] == "COMPLETED"
+        plan["task"]["updated_at"] = utc_now()
+        return self._persist_aggregate(
+            plan, envelope, "set_manual_business_status", request, actual
         )
 
     def transition_instance(
@@ -546,6 +602,9 @@ class TaskCommandService:
             raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
         self.machine.transition("agent_instance", instance["status"], request["target_status"])
         instance["status"] = request["target_status"]
+        cleared_manual_status = instance.pop("manual_business_status", None)
+        if cleared_manual_status is not None and instance["agent_type"] == "image":
+            instance["manual_finished"] = False
         if request["target_status"] in {
             "SUCCEEDED",
             "FAILED_TO_START",
@@ -594,6 +653,9 @@ class TaskCommandService:
         rejection["rejected_at"] = utc_now()
         rejection["retryable"] = True
         instance["status"] = "FAILED"
+        cleared_manual_status = instance.pop("manual_business_status", None)
+        if cleared_manual_status is not None and instance["agent_type"] == "image":
+            instance["manual_finished"] = False
         instance["delivery_rejection"] = rejection
         self._refresh_stages(plan, utc_now())
         task = plan["task"]
@@ -642,6 +704,8 @@ class TaskCommandService:
         for instance in plan["instances"]:
             if "CANCELLED" in transitions[instance["status"]]:
                 instance["status"] = "CANCELLED"
+                if instance.pop("manual_business_status", None) is not None:
+                    instance["manual_finished"] = False
         stage_transitions = self.machine.catalog["stage"]["transitions"]
         for stage in plan["stages"]:
             if "CANCELLED" in stage_transitions[stage["status"]]:

@@ -142,6 +142,7 @@ export interface WorkItemStageProjection {
 export interface WorkItemListResponse {
   schema_version: string;
   task: ContractMainTask;
+  task_revision: number;
   stages: WorkItemStageProjection[];
   items: ContractWorkItemProjection[];
   summary: Record<ContractWorkItemProjection["business_status"], number>;
@@ -855,6 +856,19 @@ export class ApiClient {
     return this.get(
       `/api/v1/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}`,
       signal,
+    );
+  }
+
+  updateWorkItemStatus(
+    taskId: string,
+    workItemId: string,
+    businessStatus: "TODO" | "RUNNING" | "WAITING_APPROVAL" | "COMPLETED",
+    envelope: CommandEnvelope,
+  ): Promise<WorkItemListResponse> {
+    return this.send(
+      "PATCH",
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}/status`,
+      { business_status: businessStatus, envelope },
     );
   }
 

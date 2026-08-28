@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -230,6 +231,28 @@ class WorkItemProjectionApiTests(unittest.TestCase):
                 self.assertEqual(projection["items"][0]["business_status"], "TODO")
                 self.assertEqual(projection["items"][0]["alerts"], [])
 
+                updated = client.patch(
+                    f"/api/v1/tasks/{task_id}/work-items/work_{self._work_id('card_board_ppt')}/status",
+                    json={
+                        "business_status": "COMPLETED",
+                        "envelope": self._envelope(
+                            "complete-board-ppt",
+                            projection["task_revision"],
+                        ),
+                    },
+                )
+                self.assertEqual(updated.status_code, 200, updated.text)
+                updated_projection = updated.json()
+                self.assertEqual(
+                    updated_projection["items"][0]["business_status"], "COMPLETED"
+                )
+                self.assertEqual(updated_projection["summary"]["COMPLETED"], 1)
+                stored = app.state.container.store.plan.get(task_id, task_id)
+                self.assertEqual(
+                    stored["instances"][0]["manual_business_status"], "COMPLETED"
+                )
+                self.assertFalse(stored["instances"][0]["manual_finished"])
+
     @staticmethod
     def _app(root: Path):
         return create_app(
@@ -254,6 +277,10 @@ class WorkItemProjectionApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 200, response.text)
+
+    @staticmethod
+    def _work_id(card_id: str) -> str:
+        return hashlib.sha256(card_id.encode("utf-8")).hexdigest()[:24]
 
     def _save_image_plan(
         self,

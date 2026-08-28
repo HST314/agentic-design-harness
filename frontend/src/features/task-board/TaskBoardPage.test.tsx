@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, test } from "vitest";
 import type { ContractWorkItemProjection } from "../../api/generated-contracts";
-import { BoardView, workbenchPath } from "./TaskBoardPage";
+import { BoardView, canEnterWorkbench, workbenchPath } from "./TaskBoardPage";
 
 function runningWorkItem(index: number, title: string): ContractWorkItemProjection {
   return {
@@ -102,12 +102,23 @@ describe("BoardView", () => {
     expect(markup.match(/当前没有子任务/g)).toHaveLength(3);
   });
 
-  test("marks a pending PPT card link for one-click automatic startup", () => {
+  test("keeps an unstarted PPT card on the board until Master launches it", () => {
     const item = pendingPptWorkItem();
     const markup = renderBoard([item]);
 
-    expect(workbenchPath(item)).toBe("/tasks/task_board/work-items/work_2?start=1");
-    expect(markup).toContain("/tasks/task_board/work-items/work_2?start=1");
-    expect(markup).toContain("进入 PPT 工作台");
+    expect(workbenchPath(item)).toBe("/tasks/task_board/work-items/work_2");
+    expect(canEnterWorkbench(item)).toBe(false);
+    expect(markup).not.toContain('href="/tasks/task_board/work-items/work_2"');
+    expect(markup).toContain("请从 Master 启动");
+  });
+
+  test("opens a PPT workbench after its instance has started", () => {
+    const item = pendingPptWorkItem();
+    item.business_status = "RUNNING";
+    item.current_instance!.status = "RUNNING";
+    const markup = renderBoard([item]);
+
+    expect(canEnterWorkbench(item)).toBe(true);
+    expect(markup).toContain('href="/tasks/task_board/work-items/work_2"');
   });
 });

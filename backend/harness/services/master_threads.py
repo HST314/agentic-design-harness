@@ -1192,6 +1192,8 @@ class MasterThreadService:
             instance["instance_id"]
             for instance in instances
             if instance["agent_type"] == "image"
+            and instance["status"]
+            not in {"SUCCEEDED", "SKIPPED", "SUPERSEDED", "ARCHIVED"}
             and not instance.get("manual_finished", False)
         ]
         if latest is not None:

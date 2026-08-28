@@ -91,7 +91,7 @@ describe("ApiClient", () => {
     );
   });
 
-  test("uses controlled instance endpoints for the reversible Image gate and PPT start", async () => {
+  test("uses controlled endpoints for WorkItem status and PPT start", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse({ schema_version: "1.0" }));
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("https://control.example");
@@ -104,14 +104,20 @@ describe("ApiClient", () => {
 
     await client.setManualFinished("image/1", true, envelope);
     await client.setManualFinished("image/1", false, envelope);
+    await client.updateWorkItemStatus("task/1", "work/1", "COMPLETED", envelope);
     await client.startInstance("ppt/1", "start_ppt_once", envelope);
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "https://control.example/api/v1/instances/image%2F1/manual-finished",
       "https://control.example/api/v1/instances/image%2F1/manual-in-progress",
+      "https://control.example/api/v1/tasks/task%2F1/work-items/work%2F1/status",
       "https://control.example/api/v1/instances/ppt%2F1/start",
     ]);
     expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
+      business_status: "COMPLETED",
+      envelope,
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toEqual({
       operation_id: "start_ppt_once",
       envelope,
     });

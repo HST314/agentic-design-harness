@@ -171,6 +171,35 @@ function MessageCard({ message }: { message: ContractMasterMessage }): React.JSX
   );
 }
 
+function PendingUserMessage({
+  content,
+  refs,
+}: {
+  content: string;
+  refs: MasterAssetReference[];
+}): React.JSX.Element {
+  return (
+    <article className="master-message master-message--user master-message--pending" aria-label="用户消息，正在发送">
+      <header><span>用户消息</span><span>正在发送</span></header>
+      <p>{content}</p>
+      {refs.length ? (
+        <ul className="master-message__assets" aria-label="引用资源">
+          {refs.map((asset) => <li key={asset.asset_id}><Icon name="file-check" />{asset.asset_id}</li>)}
+        </ul>
+      ) : null}
+    </article>
+  );
+}
+
+function MasterThinking(): React.JSX.Element {
+  return (
+    <div className="master-thinking" role="status" aria-live="polite">
+      <span className="master-mini-card__spinner" aria-hidden="true" />
+      <span><strong>Master 正在分析与思考</strong><small>新的回复与任务卡会在这里实时出现</small></span>
+    </div>
+  );
+}
+
 function TaskCardReview({
   card,
   workItem,
@@ -500,7 +529,7 @@ function MiniTaskCard({
     action = (
       <span className="master-mini-card__state master-mini-card__state--blocked">
         <strong>待上游就绪</strong>
-        <small>{upstreamBlockedCount} 个图片任务标记人工结束后激活</small>
+        <small>{upstreamBlockedCount} 个图片任务状态设为已完成后激活</small>
       </span>
     );
   } else if (failed) {
@@ -674,6 +703,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
   const [pageAlert, setPageAlert] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const threadEndRef = useRef<HTMLDivElement>(null);
   const cardEditorTriggerRef = useRef<HTMLButtonElement | null>(null);
   const detailTriggerRef = useRef<HTMLButtonElement | null>(null);
   const closeCardEditor = () => {
@@ -779,6 +809,15 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
     },
   });
 
+  useEffect(() => {
+    threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [
+    append.isPending,
+    session.data?.messages.length,
+    session.data?.proposals.length,
+    session.data?.thread.active_run?.status,
+  ]);
+
   if (session.isPending) return <section className="workbench-page"><div className="workbench-intake-card" role="status">正在恢复 Master 永久线程…</div></section>;
   if (!session.data) {
     return <section className="workbench-page"><div className="workbench-intake-card"><p className="workbench-inline-error" role="alert">{session.error?.message ?? "无法读取 Master 线程。"}</p><button type="button" className="workbench-secondary-button" onClick={() => void session.refetch()}>重新读取</button></div></section>;
@@ -799,8 +838,6 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
       {session.isError ? <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>后台同步暂时失败</strong><p>已保留当前页面数据，系统会继续重试；也可稍后手动刷新。</p></div></div> : null}
       {data.thread.last_error && !busy ? (
         <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>本次智能分析未完成</strong><p>任务内容和对话记录已保留。请稍后重新发送；若持续失败，请联系支持人员。</p></div></div>
-      ) : busy ? (
-        <div className="master-alert" role="status"><Icon name="status" /><div><strong>已进入 Master 分析阶段</strong><p>消息与运行标识已保存；页面会每 3 秒读取一次版本化结果。</p></div></div>
       ) : null}
       <div className="master-thread" role="log" aria-live="polite" aria-label="Master 消息记录">
         {timeline.length ? timeline.map((item) => item.kind === "message" ? (
@@ -828,6 +865,11 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
             }}
           />
         )) : <p className="master-thread__empty">尚无消息。发送目标或补充要求以开始规划。</p>}
+        {append.isPending && append.variables ? (
+          <PendingUserMessage content={append.variables.text} refs={append.variables.refs} />
+        ) : null}
+        {append.isPending || busy ? <MasterThinking /> : null}
+        <div ref={threadEndRef} aria-hidden="true" />
       </div>
       <form
         className="master-composer"

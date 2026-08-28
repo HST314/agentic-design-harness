@@ -99,8 +99,9 @@ class WorkItemProjectionService:
         if task is None:
             raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
         plan = self.store.plan.get(task_id, task_id)
+        task_revision = self.store.task.revision(task_id, task_id)
         if plan is None:
-            return self._response(task, [], [], self.store.task.revision(task_id, task_id))
+            return self._response(task, [], [], task_revision, 0)
 
         stages = sorted(plan["stages"], key=lambda item: item["position"])
         stage_by_id = {item["stage_id"]: item for item in stages}
@@ -123,7 +124,7 @@ class WorkItemProjectionService:
         ]
         stage_views = self._stage_views(stages, projected)
         plan_revision = self.store.plan.revision(task_id, task_id)
-        return self._response(task, stage_views, projected, plan_revision)
+        return self._response(task, stage_views, projected, task_revision, plan_revision)
 
     def get(self, task_id: str, work_item_id: str) -> dict[str, Any]:
         validate_identifier(work_item_id, "work_item_id")
@@ -270,6 +271,10 @@ class WorkItemProjectionService:
         current: dict[str, Any] | None,
         approvals: list[dict[str, Any]],
     ) -> tuple[str, str]:
+        if current is not None:
+            manual_status = current.get("manual_business_status")
+            if manual_status in {"TODO", "RUNNING", "WAITING_APPROVAL", "COMPLETED"}:
+                return current["status"], manual_status
         active = next(
             (item["status"] for item in instances if item["status"] in _ACTIVE_STATUSES),
             None,
@@ -390,6 +395,7 @@ class WorkItemProjectionService:
         task: dict[str, Any],
         stages: list[dict[str, Any]],
         items: list[dict[str, Any]],
+        task_revision: int,
         plan_revision: int,
     ) -> dict[str, Any]:
         summary = {
@@ -399,6 +405,7 @@ class WorkItemProjectionService:
         response = {
             "schema_version": "1.0",
             "task": deepcopy(task),
+            "task_revision": task_revision,
             "stages": stages,
             "items": items,
             "summary": summary,

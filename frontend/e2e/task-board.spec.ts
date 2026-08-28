@@ -44,6 +44,7 @@ function item(
       instance_id: `instance_${id}`,
       status: rawStatus,
       approval_mode: "human",
+      manual_finished: status === "COMPLETED" && !ppt,
       process_state: status === "RUNNING" ? "RUNNING" : null,
       restart_required: false,
       created_at: "2026-08-22T10:00:00Z",
@@ -68,6 +69,7 @@ const items = [
 const projection = {
   schema_version: "1.0",
   task,
+  task_revision: 6,
   stages: [
     { stage_id: "stage_image", position: 1, type: "image", required: true, depends_on: [], status: "RUNNING", available: true, work_item_ids: ["work_todo", "work_kv_a", "work_approval", "work_complete"] },
     { stage_id: "stage_ppt", position: 2, type: "ppt", required: true, depends_on: ["stage_image"], status: "UNAVAILABLE", available: false, work_item_ids: ["work_ppt"] },
@@ -87,15 +89,31 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ status: selected ? 200 : 404, contentType: "application/json", body: JSON.stringify(selected ? { schema_version: "1.0", task, item: selected, refresh_after_ms: 3000, projection_revision: "abc123" } : { error: { message: "WorkItem not found" } }) });
   });
   await page.route("**/api/v1/tasks/task_board_e2e/work-items", async (route) => route.fulfill({ status: 200, contentType: "application/json", headers: { ETag: '"abc123"' }, body: JSON.stringify(projection) }));
+  await page.route("**/api/v1/tasks/task_board_e2e/work-items/*/status", async (route) => {
+    const segments = new URL(route.request().url()).pathname.split("/");
+    const workItemId = decodeURIComponent(segments.at(-2) ?? "");
+    const body = route.request().postDataJSON() as { business_status: typeof items[number]["business_status"] };
+    const updatedItems = items.map((candidate) => candidate.work_item_id === workItemId
+      ? { ...candidate, business_status: body.business_status }
+      : candidate);
+    const summary = {
+      TODO: updatedItems.filter((candidate) => candidate.business_status === "TODO").length,
+      RUNNING: updatedItems.filter((candidate) => candidate.business_status === "RUNNING").length,
+      WAITING_APPROVAL: updatedItems.filter((candidate) => candidate.business_status === "WAITING_APPROVAL").length,
+      COMPLETED: updatedItems.filter((candidate) => candidate.business_status === "COMPLETED").length,
+      EXCEPTION: updatedItems.filter((candidate) => candidate.business_status === "EXCEPTION").length,
+    };
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...projection, task_revision: 7, items: updatedItems, summary, projection_revision: "status-updated" }) });
+  });
 });
 
-test("shows one stable logical card per WorkItem and supports terminal filtering", async ({ page }) => {
+test("shows one stable logical card per WorkItem in four business columns", async ({ page }) => {
   await page.goto("/tasks/task_board_e2e/board");
   await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "待办" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "运行中" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "待审批" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "已结束" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "已完成" })).toBeVisible();
 
   const runningCard = page.getByRole("link", { name: "KV 方向 A，运行中，进入 Image 工作台" });
   await expect(runningCard).toHaveCount(1);
@@ -103,12 +121,19 @@ test("shows one stable logical card per WorkItem and supports terminal filtering
   await expect(runningCard).toContainText("重试1");
 
   await page.getByLabel("Agent").selectOption("ppt");
-  await expect(page.getByText("整合演示文稿")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "整合演示文稿" })).toBeVisible();
   await expect(page.getByText("KV 方向 A")).toHaveCount(0);
   await page.getByLabel("Agent").selectOption("all");
-  await page.getByLabel("终态筛选").selectOption("exception");
-  await expect(page.getByText("整合演示文稿")).toBeVisible();
-  await expect(page.getByText("KV 方向 D")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "整合演示文稿" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "KV 方向 D" })).toBeVisible();
+});
+
+test("moves a card to the selected status column", async ({ page }) => {
+  await page.goto("/tasks/task_board_e2e/board");
+  await page.getByLabel("设置 KV 方向 B 状态").selectOption("COMPLETED");
+
+  const completedColumn = page.getByRole("region", { name: "已完成" });
+  await expect(completedColumn.getByRole("heading", { name: "KV 方向 B" })).toBeVisible();
 });
 
 test("opens a refresh-safe WorkItem drawer with raw status and attempt history", async ({ page }) => {

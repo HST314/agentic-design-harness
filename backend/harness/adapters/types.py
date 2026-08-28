@@ -83,6 +83,9 @@ class AgentInstanceSnapshot(TypedDict):
     status: AgentInstanceStatus
     approval_mode: Literal["human", "master"]
     manual_finished: NotRequired[bool]
+    manual_business_status: NotRequired[
+        Literal["TODO", "RUNNING", "WAITING_APPROVAL", "COMPLETED"]
+    ]
     config_revision: int
     workspace_relpath: str
     task_card_relpath: str

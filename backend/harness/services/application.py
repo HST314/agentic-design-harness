@@ -925,12 +925,14 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         unfinished = [
             item["instance_id"]
             for item in plan["instances"]
-            if item["agent_type"] == "image" and not item.get("manual_finished", False)
+            if item["agent_type"] == "image"
+            and item["status"] not in {"SUCCEEDED", "SKIPPED", "SUPERSEDED", "ARCHIVED"}
+            and not item.get("manual_finished", False)
         ]
         if unfinished:
             raise HarnessError(
                 "INVALID_STATE_TRANSITION",
-                "All Image instances must be manually marked finished before PPT can start.",
+                "All Image WorkItems must be completed before PPT can start.",
                 {
                     "instance_id": instance_id,
                     "unfinished_instance_ids": unfinished,

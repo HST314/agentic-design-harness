@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }, testInfo) => {
   const startPolicy: "manual" | "auto" = testInfo.title.includes("auto mode") ? "auto" : "manual";
+  const delayMessageResponse = testInfo.title.includes("sends revision feedback");
   let threadRevision = 4;
   let confirmed = false;
   let busy = false;
@@ -255,6 +256,7 @@ test.beforeEach(async ({ page }, testInfo) => {
       messages.push({ schema_version: "1.0", message_id: "message_adjust", task_id: "task_master_e2e", sequence: 3, role: "user", kind: "text", content: body.content, asset_refs: [{ asset_id: "asset_brief", manifest_relpath: "inputs/manifests/asset_brief.json" }], created_at: "2026-08-22T10:03:00Z" });
       threadRevision += 1;
       busy = true;
+      if (delayMessageResponse) await new Promise((resolve) => setTimeout(resolve, 700));
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(session()) });
   });
@@ -338,6 +340,8 @@ test("shows plan cards inside the message flow and sends revision feedback with 
   await page.getByLabel("发送给 Master").fill("请调整计划 r1：降低整体饱和度。");
   await page.getByRole("checkbox", { name: /brief\.md/ }).check();
   await page.locator(".master-composer button[type='submit']").click();
+  await expect(page.getByLabel("用户消息，正在发送")).toContainText("降低整体饱和度");
+  await expect(page.getByText("Master 正在分析与思考")).toBeVisible();
   await expect(page.getByText("消息已保存，Master 正在处理。")).toBeVisible();
   await expect(page.getByText("等待 Master 完成")).toBeVisible();
 });

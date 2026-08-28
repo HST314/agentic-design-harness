@@ -104,6 +104,11 @@ class UpdateTaskPresentationRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class UpdateWorkItemStatusRequest(StrictRequest):
+    business_status: Literal["TODO", "RUNNING", "WAITING_APPROVAL", "COMPLETED"]
+    envelope: CommandEnvelope
+
+
 class MasterAssetReference(StrictRequest):
     asset_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     manifest_relpath: str = Field(min_length=1, max_length=512)
@@ -452,6 +457,28 @@ def build_v1_router(container: Container) -> APIRouter:
     @router.get("/tasks/{task_id}/work-items/{work_item_id}", tags=["tasks"])
     async def get_work_item(task_id: str, work_item_id: str) -> dict[str, Any]:
         return await run_in_threadpool(container.work_items.get, task_id, work_item_id)
+
+    @router.patch("/tasks/{task_id}/work-items/{work_item_id}/status", tags=["tasks"])
+    async def update_work_item_status(
+        task_id: str,
+        work_item_id: str,
+        body: UpdateWorkItemStatusRequest,
+    ) -> dict[str, Any]:
+        item = await run_in_threadpool(container.work_items.get, task_id, work_item_id)
+        current = item["item"].get("current_instance")
+        if not isinstance(current, dict) or not isinstance(current.get("instance_id"), str):
+            raise HarnessError(
+                "INSTANCE_NOT_FOUND",
+                "The selected WorkItem has no current instance to update.",
+            )
+        await run_in_threadpool(
+            container.commands.set_manual_business_status,
+            task_id,
+            current["instance_id"],
+            body.business_status,
+            body.envelope,
+        )
+        return await run_in_threadpool(container.work_items.list, task_id)
 
     @router.patch(
         "/tasks/{task_id}/plan-proposals/{proposal_revision}/task-cards/{card_id}",
