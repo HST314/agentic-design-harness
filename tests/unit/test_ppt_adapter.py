@@ -83,6 +83,11 @@ class PptAgentAdapterTests(unittest.TestCase):
             spec.public_environment["PPT_AGENT_PROJECTS_ROOT"],
             str(task_root / "instances" / instance_id / "work" / "projects"),
         )
+        self.assertEqual(
+            spec.public_environment["PPT_AGENT_MANAGED_PROJECT_ID"], instance_id
+        )
+        self.assertEqual(spec.public_environment["HARNESS_TASK_ID"], task_id)
+        self.assertEqual(spec.public_environment["HARNESS_INSTANCE_ID"], instance_id)
         mapped = self.adapter.map_task_card(
             PrepareRequest(instance, card, task_root, task_root / "unused.yaml")
         )

@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, test } from "vitest";
 import type { ContractWorkItemProjection } from "../../api/generated-contracts";
-import { BoardView } from "./TaskBoardPage";
+import { BoardView, workbenchPath } from "./TaskBoardPage";
 
 function runningWorkItem(index: number, title: string): ContractWorkItemProjection {
   return {
@@ -38,6 +38,28 @@ function runningWorkItem(index: number, title: string): ContractWorkItemProjecti
     delivery_count: 0,
     alerts: [],
     updated_at: "2026-08-27T00:00:00Z",
+  };
+}
+
+function pendingPptWorkItem(): ContractWorkItemProjection {
+  return {
+    ...runningWorkItem(2, "学院介绍 PPT"),
+    agent_type: "ppt",
+    business_status: "TODO",
+    raw_status: "READY",
+    stage: {
+      stage_id: "stage_ppt",
+      position: 2,
+      type: "ppt",
+      status: "READY",
+      depends_on: ["stage_image"],
+      available: true,
+    },
+    current_instance: {
+      ...runningWorkItem(2, "学院介绍 PPT").current_instance!,
+      status: "READY",
+      process_state: null,
+    },
   };
 }
 
@@ -78,5 +100,14 @@ describe("BoardView", () => {
     expect(markup.match(/task-card__entry/g)).toHaveLength(1);
     expect(markup).toContain('id="board-column-running">运行中</h2><span>1</span>');
     expect(markup.match(/当前没有子任务/g)).toHaveLength(3);
+  });
+
+  test("marks a pending PPT card link for one-click automatic startup", () => {
+    const item = pendingPptWorkItem();
+    const markup = renderBoard([item]);
+
+    expect(workbenchPath(item)).toBe("/tasks/task_board/work-items/work_2?start=1");
+    expect(markup).toContain("/tasks/task_board/work-items/work_2?start=1");
+    expect(markup).toContain("进入 PPT 工作台");
   });
 });

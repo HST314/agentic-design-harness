@@ -719,11 +719,12 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         });
         return { confirmation };
       }
-      await api.confirmTaskStart(taskId, {
-        operation_id: operationId("start_card"),
-        envelope: envelope(operationId("start_card"), taskRevision),
-        instance_ids: [card.instance_id],
-      });
+      const operation = operationId("start_card");
+      await api.startInstance(
+        card.instance_id,
+        operation,
+        envelope(operation, taskRevision),
+      );
       return { confirmation: null };
     },
     onMutate: ({ card }) => {

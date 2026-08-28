@@ -173,6 +173,9 @@ class PptAgentAdapter:
             public_environment={
                 "PPT_AGENT_IMAGES_ROOT": str(images_root),
                 "PPT_AGENT_PROJECTS_ROOT": str(projects_root),
+                "PPT_AGENT_MANAGED_PROJECT_ID": instance_id,
+                "HARNESS_TASK_ID": task_id,
+                "HARNESS_INSTANCE_ID": instance_id,
                 "PPT_AGENT_MODEL_CONFIG": str(self.model_config),
                 "PPT_AGENT_RUNTIME_POLICY": str(self.runtime_policy),
                 "PYTHONPATH": pythonpath,

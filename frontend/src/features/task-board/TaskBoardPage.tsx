@@ -66,6 +66,13 @@ function detailsSearch(item: ContractWorkItemProjection): string {
   return `?${params.toString()}`;
 }
 
+export function workbenchPath(item: ContractWorkItemProjection): string {
+  const path = `/tasks/${encodeURIComponent(item.task_id)}/work-items/${encodeURIComponent(item.work_item_id)}`;
+  return item.agent_type === "ppt" && item.business_status === "TODO"
+    ? `${path}?start=1`
+    : path;
+}
+
 function WorkItemCard({ item, compact = false }: {
   item: ContractWorkItemProjection;
   compact?: boolean;
@@ -82,8 +89,8 @@ function WorkItemCard({ item, compact = false }: {
     >
       <Link
         className="task-card__entry"
-        to={`/tasks/${encodeURIComponent(item.task_id)}/work-items/${encodeURIComponent(item.work_item_id)}`}
-        aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，${item.agent_type === "image" ? "进入 Image 工作台" : "查看能力边界"}`}
+        to={workbenchPath(item)}
+        aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，进入 ${item.agent_type === "image" ? "Image" : "PPT"} 工作台`}
       >
         <div className="task-card__topline">
           <span className="task-card__agent">{agentLabel(item.agent_type)}</span>

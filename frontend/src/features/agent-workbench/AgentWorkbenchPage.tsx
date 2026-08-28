@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   agentWorkbenchLinkQuery,
   api,
@@ -21,6 +21,24 @@ import {
 } from "./runtimeSettingsBridge";
 
 type FrameState = "loading" | "ready" | "failed";
+type PptAutoLaunchAction = "start" | "recover" | null;
+
+export function pptAutoLaunchAction({
+  requested,
+  canStart,
+  linkStatus,
+  retryAllowed,
+}: {
+  requested: boolean;
+  canStart: boolean;
+  linkStatus: AgentWorkbenchLinkResponse["link_status"] | undefined;
+  retryAllowed: boolean;
+}): PptAutoLaunchAction {
+  if (!requested) return null;
+  if (linkStatus === "START_FAILED" && retryAllowed) return "recover";
+  if (canStart && linkStatus === "NO_UI_URL") return "start";
+  return null;
+}
 
 function operationId(prefix: string): string {
   const suffix = typeof crypto.randomUUID === "function"
@@ -142,6 +160,8 @@ function WorkbenchFailure({
 export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean }): React.JSX.Element {
   const queryClient = useQueryClient();
   const { taskId = "", workItemId = "" } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const autoLaunchRequested = searchParams.get("start") === "1";
   const detail = useQuery(workItemDetailQuery(taskId, workItemId));
   const workItems = useQuery({ ...workItemsQuery(taskId), enabled: Boolean(taskId) });
   const item = detail.data?.item;
@@ -154,8 +174,14 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
   const enterWorkbenchRef = useRef<HTMLButtonElement>(null);
   const loadTimeoutRef = useRef<number | undefined>(undefined);
   const announceBridgeRef = useRef<() => void>(() => undefined);
+  const autoLaunchAttemptRef = useRef<string | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [frameState, setFrameState] = useState<FrameState>("loading");
+  const consumeAutoLaunch = (): void => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("start");
+    setSearchParams(next, { replace: true });
+  };
   const refreshWorkbench = (): void => {
     void queryClient.invalidateQueries({ queryKey: workItemDetailQuery(taskId, workItemId).queryKey });
     void queryClient.invalidateQueries({ queryKey: workItemsQuery(taskId).queryKey });
@@ -186,7 +212,10 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
         expected_revision: taskRevision,
       });
     },
-    onSuccess: refreshWorkbench,
+    onSuccess: () => {
+      consumeAutoLaunch();
+      refreshWorkbench();
+    },
   });
   const recoverStart = useMutation({
     mutationFn: () => {
@@ -206,8 +235,10 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
       });
     },
     onSuccess: () => {
+      consumeAutoLaunch();
       void queryClient.invalidateQueries({ queryKey: agentWorkbenchLinkQuery(taskId, workItemId, instanceId).queryKey });
       void queryClient.invalidateQueries({ queryKey: workItemDetailQuery(taskId, workItemId).queryKey });
+      void queryClient.invalidateQueries({ queryKey: workItemsQuery(taskId).queryKey });
     },
   });
 
@@ -298,6 +329,29 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
     ? () => recoverStart.mutate()
     : retry;
   const retryLabel = link.data?.link_status === "START_FAILED" ? "恢复启动" : "重新检查链接";
+  const unfinishedImages = (workItems.data?.items ?? [])
+    .filter((workItem) => workItem.agent_type === "image" && !workItem.current_instance?.manual_finished)
+    .map((workItem) => workItem.current_instance?.instance_id)
+    .filter((value): value is string => Boolean(value));
+  const taskConfirmed = detail.data?.task.status === "RUNNING" || detail.data?.task.status === "FAILED";
+  const pptReady = item?.agent_type === "ppt" && item.current_instance?.status === "READY";
+  const canStartPpt = Boolean(pptReady && taskConfirmed && workItems.isSuccess && unfinishedImages.length === 0);
+  const autoLaunchAction = item?.agent_type === "ppt"
+    ? pptAutoLaunchAction({
+        requested: autoLaunchRequested,
+        canStart: canStartPpt,
+        linkStatus: link.data?.link_status,
+        retryAllowed: Boolean(link.data?.start_operation?.retry_allowed),
+      })
+    : null;
+  useEffect(() => {
+    if (!autoLaunchAction || !instanceId) return;
+    const attemptKey = `${instanceId}:${autoLaunchAction}:${link.data?.start_operation?.operation_id ?? "new"}`;
+    if (autoLaunchAttemptRef.current === attemptKey) return;
+    autoLaunchAttemptRef.current = attemptKey;
+    if (autoLaunchAction === "recover") recoverStart.mutate();
+    else startPpt.mutate();
+  }, [autoLaunchAction, instanceId, link.data?.start_operation?.operation_id]);
 
   if (detail.isPending) {
     return <section className={`workbench-page agent-workbench-state${focusMode ? " agent-workbench--focus" : ""}`} role="status">正在读取专业 WorkItem…</section>;
@@ -328,13 +382,6 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
 
   const readyLink = link.data?.embeddable && link.data.ui_url ? link.data : undefined;
   const imageManuallyFinished = Boolean(item.current_instance?.manual_finished);
-  const unfinishedImages = (workItems.data?.items ?? [])
-    .filter((workItem) => workItem.agent_type === "image" && !workItem.current_instance?.manual_finished)
-    .map((workItem) => workItem.current_instance?.instance_id)
-    .filter((value): value is string => Boolean(value));
-  const taskConfirmed = detail.data.task.status === "RUNNING" || detail.data.task.status === "FAILED";
-  const pptReady = item.agent_type === "ppt" && item.current_instance?.status === "READY";
-  const canStartPpt = pptReady && taskConfirmed && workItems.isSuccess && unfinishedImages.length === 0;
   const gateDetails = startPpt.error instanceof ApiError
     && Array.isArray(startPpt.error.details?.unfinished_instance_ids)
       ? startPpt.error.details.unfinished_instance_ids.filter((value): value is string => typeof value === "string")
