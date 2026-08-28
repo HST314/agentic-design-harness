@@ -828,7 +828,11 @@ class TaskCommandService:
                         "first_activated_at": None,
                         "authorized_downgrade": None,
                     },
-                    "status": "READY" if raw["agent_type"] in {"image", "ppt"} else "UNAVAILABLE",
+                    "status": (
+                        "READY"
+                        if raw["agent_type"] in {"general", "image", "ppt"}
+                        else "UNAVAILABLE"
+                    ),
                     "manual_finished": False,
                     "process": None,
                     "ui_url": None,
@@ -935,7 +939,11 @@ class TaskCommandService:
                         "first_activated_at": None,
                         "authorized_downgrade": None,
                     },
-                    "status": "READY" if raw["agent_type"] in {"image", "ppt"} else "UNAVAILABLE",
+                    "status": (
+                        "READY"
+                        if raw["agent_type"] in {"general", "image", "ppt"}
+                        else "UNAVAILABLE"
+                    ),
                     "manual_finished": False,
                     "process": None,
                     "ui_url": None,

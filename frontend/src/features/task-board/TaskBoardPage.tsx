@@ -61,8 +61,8 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
-function agentLabel(agentType: "image" | "ppt"): string {
-  return agentType === "image" ? "图片" : "PPT";
+function agentLabel(agentType: "general" | "image" | "ppt"): string {
+  return agentType === "general" ? "通用" : agentType === "image" ? "图片" : "PPT";
 }
 
 function detailsSearch(item: ContractWorkItemProjection): string {
@@ -75,7 +75,7 @@ export function workbenchPath(item: ContractWorkItemProjection): string {
 }
 
 export function canEnterWorkbench(item: ContractWorkItemProjection): boolean {
-  if (item.agent_type === "image") return true;
+  if (item.agent_type !== "ppt") return true;
   return ["STARTING", "RUNNING", "WAITING_APPROVAL", "SUCCEEDED"].includes(
     item.current_instance?.status ?? "",
   );
@@ -148,7 +148,7 @@ function WorkItemCard({
         <Link
           className="task-card__entry"
           to={workbenchPath(item)}
-          aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，进入 ${item.agent_type === "image" ? "图片" : "PPT"}工作台`}
+          aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，进入 ${agentLabel(item.agent_type)}工作台`}
         >
           {cardBody}
         </Link>
@@ -291,7 +291,7 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
   const { taskId = "" } = useParams();
   const queryClient = useQueryClient();
   const projection = useQuery(workItemsQuery(taskId));
-  const [agent, setAgent] = useState<"all" | "image" | "ppt">("all");
+  const [agent, setAgent] = useState<"all" | "general" | "image" | "ppt">("all");
   const [stageId, setStageId] = useState("all");
   const filteredItems = useMemo(() => (projection.data?.items ?? []).filter((item) => (
     (agent === "all" || item.agent_type === agent)
@@ -345,7 +345,7 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
               ))}
             </div>
             <div className="task-projection__filters">
-              <label><span>创作类型</span><select value={agent} onChange={(event) => setAgent(event.currentTarget.value as typeof agent)}><option value="all">全部</option><option value="image">图片</option><option value="ppt">PPT</option></select></label>
+              <label><span>创作类型</span><select value={agent} onChange={(event) => setAgent(event.currentTarget.value as typeof agent)}><option value="all">全部</option><option value="general">通用</option><option value="image">图片</option><option value="ppt">PPT</option></select></label>
               <label><span>执行阶段</span><select value={stageId} onChange={(event) => setStageId(event.currentTarget.value)}><option value="all">全部</option>{projection.data.stages.map((stage) => <option value={stage.stage_id} key={stage.stage_id}>第 {stage.position} 阶段 · {agentLabel(stage.type)}</option>)}</select></label>
             </div>
           </div>

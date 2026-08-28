@@ -205,18 +205,24 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 raise HarnessError("INVALID_STATE_TRANSITION", "An archived instance is read-only.")
             if not preserve_business_state:
                 self._validate_start_eligibility(task_id, instance)
-            if instance["agent_type"] not in {"image", "ppt"}:
+            if instance["agent_type"] not in {"general", "image", "ppt"}:
                 raise HarnessError(
                     "ADAPTER_UNAVAILABLE",
                     "The requested Agent process materialization is unavailable.",
                 )
             if instance["agent_type"] == "image":
                 launch_config = self.image_config.resolve_launch(task_id, instance_id)
-            else:
+            elif instance["agent_type"] == "ppt":
                 launch_config = self.image_config.resolve_ppt_launch(
                     task_id,
                     runtime_path=Path(spec.public_environment["PPT_AGENT_RUNTIME_POLICY"]),
                     model_config_path=Path(spec.public_environment["PPT_AGENT_MODEL_CONFIG"]),
+                )
+            else:
+                launch_config = self.image_config.resolve_ppt_launch(
+                    task_id,
+                    runtime_path=Path(spec.public_environment["GENERAL_AGENT_RUNTIME_CONFIG"]),
+                    model_config_path=Path(spec.public_environment["GENERAL_AGENT_MODEL_CONFIG"]),
                 )
             runtime_identity = pinned_artifact.identity
             code_identity = runtime_identity.digest

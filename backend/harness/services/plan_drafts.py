@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 # A single plan may fan out to at most six parallel image stages (one per
 # independent deliverable); the schema stage cap leaves room for one PPT tail.
 _MAX_IMAGE_STAGES = 6
-_MAX_STAGES = 7
+_MAX_STAGES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +193,19 @@ def master_response_schema(asset_ids: list[str]) -> dict[str, Any]:
             },
         },
     }
+    general_stage = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": required_stage_fields,
+        "properties": {
+            **common_stage_properties,
+            "type": {"const": "general"},
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+            },
+        },
+    }
     plan_draft = {
         "type": "object",
         "additionalProperties": False,
@@ -202,7 +215,7 @@ def master_response_schema(asset_ids: list[str]) -> dict[str, Any]:
                 "type": "array",
                 "minItems": 1,
                 "maxItems": _MAX_STAGES,
-                "items": {"oneOf": [image_stage, ppt_stage]},
+                "items": {"oneOf": [general_stage, image_stage, ppt_stage]},
             }
         },
     }
@@ -249,7 +262,7 @@ def materialize_plan_draft(
     """Convert a valid semantic draft into server-owned durable planning objects."""
 
     stages = draft["stages"]
-    if any(stage["type"] not in {"image", "ppt"} for stage in stages):
+    if any(stage["type"] not in {"general", "image", "ppt"} for stage in stages):
         _invalid("plan-draft", "stages", "unsupported_topology")
     if sum(1 for stage in stages if stage["type"] == "image") > _MAX_IMAGE_STAGES:
         _invalid("plan-draft", "stages", "too_many_image_stages")

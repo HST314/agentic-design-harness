@@ -16,7 +16,7 @@
     "event_id": {"$ref": "common.schema.json#/$defs/identifier"},
     "task_id": {"$ref": "common.schema.json#/$defs/identifier"},
     "instance_id": {"$ref": "common.schema.json#/$defs/identifier"},
-    "agent_type": {"type": "string", "enum": ["image", "ppt", "master"]},
+    "agent_type": {"type": "string", "enum": ["general", "image", "ppt", "master"]},
     "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "provider_request_id": {
       "oneOf": [

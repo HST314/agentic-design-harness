@@ -34,7 +34,7 @@
     },
     "agent_type": {
       "type": "string",
-      "enum": ["image", "ppt", "master"]
+      "enum": ["general", "image", "ppt", "master"]
     },
     "request_id": {
       "type": "string",

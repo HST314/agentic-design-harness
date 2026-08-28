@@ -10,6 +10,13 @@ export interface AgentUiDescriptor {
   unavailableDetail?: string;
 }
 const descriptors: Record<string, AgentUiDescriptor> = {
+  general: {
+    agentType: "general",
+    label: "通用",
+    instanceTitle: "通用 Agent 实例",
+    icon: "layers",
+    available: true,
+  },
   image: {
     agentType: "image",
     label: "Image Agent",

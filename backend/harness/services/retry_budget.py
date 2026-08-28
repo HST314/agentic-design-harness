@@ -32,7 +32,7 @@ class RetryPolicy(BaseModel):
     @field_validator("retry_token_reservation_by_agent")
     @classmethod
     def validate_reservations(cls, value: dict[str, int]) -> dict[str, int]:
-        if set(value) - {"image", "ppt", "master"}:
+        if set(value) - {"general", "image", "ppt", "master"}:
             raise ValueError("retry reservations contain an unknown Agent type")
         if any(isinstance(item, bool) or item <= 0 for item in value.values()):
             raise ValueError("retry reservations must be positive integers")

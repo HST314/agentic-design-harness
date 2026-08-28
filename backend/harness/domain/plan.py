@@ -1,8 +1,7 @@
 """Cross-object validation for task plans.
 
-Stage topology rule: stage types are image or ppt; same-type stages run in
-parallel (no dependency between them) and the only cross-type dependency is
-Image-to-PPT.
+Stage topology rule: General, Image, and PPT stages run independently unless
+an Image-to-PPT dependency is materialized.
 """
 
 from __future__ import annotations

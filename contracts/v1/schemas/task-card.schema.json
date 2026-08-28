@@ -115,9 +115,19 @@
         "agent_type": {"const": "ppt"},
         "parameters": {"$ref": "#/$defs/pptParameters"}
       }
+    },
+    {
+      "properties": {
+        "agent_type": {"const": "general"},
+        "parameters": {"$ref": "#/$defs/generalParameters"}
+      }
     }
   ],
   "$defs": {
+    "generalParameters": {
+      "type": "object",
+      "additionalProperties": false
+    },
     "imageParameters": {
       "type": "object",
       "additionalProperties": false,

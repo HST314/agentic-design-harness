@@ -24,6 +24,7 @@ class HarnessSettings(BaseModel):
     log_level: str = "INFO"
     lock_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     contracts_root: Path = Path("contracts/v1")
+    general_agent_root: Path = Path("agents/general-agent")
     image_agent_root: Path = Path("agents/image_agent_mvp")
     image_agent_lock_path: Path = Path("agents/image-agent.lock.json")
     image_agent_python: Path = Field(default_factory=lambda: Path(sys.executable))
@@ -65,6 +66,11 @@ class HarnessSettings(BaseModel):
             self.image_agent_root
             if self.image_agent_root.is_absolute()
             else project_root / self.image_agent_root
+        )
+        updates["general_agent_root"] = (
+            self.general_agent_root
+            if self.general_agent_root.is_absolute()
+            else project_root / self.general_agent_root
         )
         updates["ppt_agent_root"] = (
             self.ppt_agent_root

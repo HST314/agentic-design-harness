@@ -52,7 +52,7 @@ function sectionFromPath(pathname: string): string {
 
 function disabledAdapterLabel(readiness: ReadyResponse | undefined): string {
   const names = (readiness?.disabled_adapters ?? []).map((name) => (
-    name === "image" ? "图片" : name === "ppt" ? "演示文稿" : "专业"
+    name === "general" ? "通用" : name === "image" ? "图片" : name === "ppt" ? "演示文稿" : "专业"
   ));
   return names.length ? names.join("、") : "部分专业能力";
 }

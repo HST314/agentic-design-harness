@@ -80,9 +80,9 @@ function WorkbenchFailure({
   taskId: string;
   workItemId: string;
   focusMode: boolean;
-  agentType: "image" | "ppt";
+  agentType: "general" | "image" | "ppt";
 }): React.JSX.Element {
-  const agentLabel = agentType === "image" ? "图片助手" : "演示文稿助手";
+  const agentLabel = agentType === "general" ? "通用助手" : agentType === "image" ? "图片助手" : "演示文稿助手";
   const heading = link?.link_status === "FRAME_BLOCKED"
     ? `${agentLabel} 无法安全内嵌`
     : link?.link_status === "START_FAILED"
@@ -243,7 +243,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
     );
   }
 
-  const agentLabel = item.agent_type === "image" ? "图片助手" : "演示文稿助手";
+  const agentLabel = item.agent_type === "general" ? "通用助手" : item.agent_type === "image" ? "图片助手" : "演示文稿助手";
   if (!item.stage.available) {
     return (
       <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-labelledby="agent-workbench-title">

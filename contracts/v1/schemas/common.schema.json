@@ -28,7 +28,7 @@
     },
     "agentType": {
       "type": "string",
-      "enum": ["image", "ppt"]
+      "enum": ["general", "image", "ppt"]
     },
     "actorType": {
       "type": "string",

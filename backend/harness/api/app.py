@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -19,6 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from .. import __version__
 from ..adapters import (
     AdapterRegistry,
+    GeneralAgentAdapter,
     ImageAgentAdapter,
     PptAgentAdapter,
     UnavailableAgentAdapter,
@@ -138,6 +140,14 @@ def build_container(
     approvals = ApprovalInboxService(store)
     usage = UsageService(store)
     task_config = TaskConfigService(store, settings.config_snapshot)
+    general_adapter = GeneralAgentAdapter(
+        store,
+        contracts,
+        task_config,
+        source_root=settings.general_agent_root,
+        interpreter=Path(sys.executable),
+        host=settings.host,
+    )
     image_agent_config = ImageAgentConfigMaterializer(store, task_config)
     model_clients = model_clients or OpenAICompatibleProviderAdapter()
     asset_understanding = AssetUnderstandingService(
@@ -198,7 +208,7 @@ def build_container(
             cause,
             "Run scripts/dev.py setup-ppt-runtime --force, then scripts/dev.py doctor.",
         )
-    adapters = AdapterRegistry([image_adapter, ppt_adapter])
+    adapters = AdapterRegistry([image_adapter, ppt_adapter, general_adapter])
     runtime_config_observability = RuntimeConfigObservability(store)
     runtime_settings = InstanceRuntimeSettingsService(
         store,

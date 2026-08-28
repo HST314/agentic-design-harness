@@ -131,7 +131,7 @@ export type EditableTaskCard = Pick<
 export interface WorkItemStageProjection {
   stage_id: string;
   position: number;
-  type: "image" | "ppt";
+  type: "general" | "image" | "ppt";
   required: boolean;
   depends_on: string[];
   status: string;
@@ -163,7 +163,7 @@ export interface AgentWorkbenchLinkResponse {
   task_id: string;
   work_item_id: string;
   instance_id: string;
-  agent_type: "image" | "ppt";
+  agent_type: "general" | "image" | "ppt";
   instance_status: string;
   task_revision: number;
   ui_url: string | null;

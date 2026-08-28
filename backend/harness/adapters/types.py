@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from typing_extensions import NotRequired, TypedDict
 
-AgentType = Literal["image", "ppt", "master"]
+AgentType = Literal["general", "image", "ppt", "master"]
 AgentInstanceStatus = Literal[
     "CREATED",
     "READY",
@@ -77,7 +77,7 @@ class AgentInstanceSnapshot(TypedDict):
     instance_id: str
     task_id: str
     stage_id: str
-    agent_type: Literal["image", "ppt"]
+    agent_type: Literal["general", "image", "ppt"]
     required: bool
     requirement_lifecycle: RequirementLifecycle
     status: AgentInstanceStatus
@@ -101,7 +101,7 @@ class StageSnapshot(TypedDict):
     schema_version: str
     stage_id: str
     task_id: str
-    type: Literal["image", "ppt"]
+    type: Literal["general", "image", "ppt"]
     position: int
     depends_on: list[str]
     required: bool
@@ -129,7 +129,7 @@ class TaskCard(TypedDict):
     task_id: str
     stage_id: str
     instance_id: str
-    agent_type: Literal["image", "ppt"]
+    agent_type: Literal["general", "image", "ppt"]
     objective: str
     instructions: list[str]
     input_assets: list[AssetReference]

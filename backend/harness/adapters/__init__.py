@@ -9,6 +9,7 @@ from .base import (
     UnavailableAgentAdapter,
     ValidationResult,
 )
+from .general import GeneralAgentAdapter
 from .image import ImageAgentAdapter
 from .ppt import PptAgentAdapter
 from .registry import AdapterRegistry
@@ -28,6 +29,7 @@ __all__ = [
     "AgentAdapter",
     "AgentInstanceSnapshot",
     "DeliveryCandidate",
+    "GeneralAgentAdapter",
     "ImageAgentAdapter",
     "PptAgentAdapter",
     "PrepareRequest",

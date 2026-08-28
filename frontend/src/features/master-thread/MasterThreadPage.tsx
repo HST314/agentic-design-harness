@@ -32,6 +32,14 @@ const ACTOR_ID = "human_operator";
 type ProposalTaskCard = ContractPlanProposal["execution_cards"][number];
 type ExpectedDelivery = ProposalTaskCard["expected_deliveries"][number];
 
+function agentLabel(agentType: ProposalTaskCard["agent_type"]): string {
+  return agentType === "general" ? "通用" : agentType === "image" ? "图片" : "PPT";
+}
+
+function agentTaskTitle(agentType: ProposalTaskCard["agent_type"]): string {
+  return agentType === "general" ? "通用任务" : agentType === "image" ? "图片设计任务" : "演示文稿设计任务";
+}
+
 const messageLabel: Record<ContractMasterMessage["kind"], string> = {
   text: "用户消息",
   clarification: "Master 澄清",
@@ -218,7 +226,7 @@ function TaskCardReview({
   editable: boolean;
   onEdit: (trigger: HTMLButtonElement) => void;
 }): React.JSX.Element {
-  const fallbackTitle = card.agent_type === "image" ? "图片设计任务" : "演示文稿设计任务";
+  const fallbackTitle = agentTaskTitle(card.agent_type);
   const parameterItems = card.agent_type === "image"
     ? [
       ["画幅", textParameter(card, "aspect_ratio") || "由专业助手决定"],
@@ -229,15 +237,15 @@ function TaskCardReview({
         textParameter(card, "category_id") ? "已指定" : "未指定",
       ],
     ]
-    : [
+    : card.agent_type === "ppt" ? [
       ["页数", numberParameter(card, "slide_count") || "默认"],
       ["计划资产角色", textParameter(card, "planned_asset_role") || "未指定"],
-    ];
+    ] : [["工具边界", "共享文件夹读写"]];
   return (
     <article className="master-task-card" aria-labelledby={`task-card-${card.card_id}`}>
       <header>
         <div>
-          <span className="master-agent-chip">{card.agent_type === "image" ? "图片" : "PPT"}</span>
+          <span className="master-agent-chip">{agentLabel(card.agent_type)}</span>
         </div>
         {editable ? (
           <button
@@ -368,10 +376,10 @@ function TaskCardEditorDialog({
               ...(categoryId.trim() ? { category_id: categoryId.trim() } : {}),
               ...(categoryVersion.trim() ? { category_version: categoryVersion.trim() } : {}),
             }
-            : {
+            : card.agent_type === "ppt" ? {
               ...(slideCount === "" ? {} : { slide_count: slideCount }),
               ...(plannedAssetRole.trim() ? { planned_asset_role: plannedAssetRole.trim() } : {}),
-            };
+            } : {};
           onSave({
             objective: objective.trim(),
             instructions: instructions.split("\n").map((item) => item.trim()).filter(Boolean),
@@ -428,7 +436,7 @@ function TaskCardEditorDialog({
                   <button type="button" className="workbench-text-button" disabled={deliveries.length === 1} onClick={() => setDeliveries((current) => current.filter((_, itemIndex) => itemIndex !== index))}>移除此项</button>
                 </fieldset>
               ))}
-              <button type="button" className="workbench-secondary-button" onClick={() => setDeliveries((current) => [...current, { kind: card.agent_type === "image" ? "image" : "presentation", role: card.agent_type === "image" ? "supporting_visual" : "presentation", required: false, accepted_mime_types: [card.agent_type === "image" ? "image/png" : "application/pdf"] }])}>添加交付项</button>
+              <button type="button" className="workbench-secondary-button" onClick={() => setDeliveries((current) => [...current, card.agent_type === "general" ? { kind: "document", role: "output", required: false, accepted_mime_types: ["text/plain"] } : { kind: card.agent_type === "image" ? "image" : "presentation", role: card.agent_type === "image" ? "supporting_visual" : "presentation", required: false, accepted_mime_types: [card.agent_type === "image" ? "image/png" : "application/pdf"] }])}>添加交付项</button>
             </div>
           </fieldset>
           {card.agent_type === "image" ? (
@@ -442,7 +450,7 @@ function TaskCardEditorDialog({
                 <label><span>品类版本</span><input maxLength={64} value={categoryVersion} onChange={(event) => setCategoryVersion(event.currentTarget.value)} /></label>
               </div>
             </fieldset>
-          ) : (
+          ) : card.agent_type === "ppt" ? (
             <fieldset>
               <legend>PPT 参数</legend>
               <div className="master-card-editor__grid">
@@ -450,7 +458,7 @@ function TaskCardEditorDialog({
                 <label><span>计划资产角色</span><input maxLength={128} value={plannedAssetRole} onChange={(event) => setPlannedAssetRole(event.currentTarget.value)} /></label>
               </div>
             </fieldset>
-          )}
+          ) : null}
           {error ? <p className="workbench-inline-error" role="alert">{error}</p> : null}
         </div>
         <footer className="workbench-dialog-actions master-card-editor__actions">
@@ -564,7 +572,7 @@ function MiniTaskCard({
   return (
     <article className="master-mini-card">
       <div className="master-mini-card__lead">
-        <span className="master-agent-chip">{card.agent_type === "image" ? "图片" : "PPT"}</span>
+        <span className="master-agent-chip">{agentLabel(card.agent_type)}</span>
         <h4>{title}</h4>
       </div>
       <div className="master-mini-card__actions">
@@ -621,7 +629,7 @@ function ProposalCardGroup({
           <MiniTaskCard
             key={card.card_id}
             card={card}
-            title={titleByCardId.get(card.card_id) ?? (card.agent_type === "image" ? "图片设计任务" : "演示文稿设计任务")}
+            title={titleByCardId.get(card.card_id) ?? agentTaskTitle(card.agent_type)}
             proposalStatus={proposal.status}
             instanceStatus={instanceStatuses[card.instance_id]}
             upstreamBlockedCount={
