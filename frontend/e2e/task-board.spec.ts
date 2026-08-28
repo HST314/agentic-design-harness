@@ -115,15 +115,15 @@ test("shows one stable logical card per WorkItem in four business columns", asyn
   await expect(page.getByRole("heading", { name: "待审批" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "已完成" })).toBeVisible();
 
-  const runningCard = page.getByRole("link", { name: "KV 方向 A，运行中，进入 Image 工作台" });
+  const runningCard = page.getByRole("link", { name: "KV 方向 A，运行中，进入 图片工作台" });
   await expect(runningCard).toHaveCount(1);
-  await expect(runningCard).toContainText("实例2");
+  await expect(runningCard).toContainText("执行2");
   await expect(runningCard).toContainText("重试1");
 
-  await page.getByLabel("Agent").selectOption("ppt");
+  await page.getByLabel("创作类型").selectOption("ppt");
   await expect(page.getByRole("heading", { name: "整合演示文稿" })).toBeVisible();
   await expect(page.getByText("KV 方向 A")).toHaveCount(0);
-  await page.getByLabel("Agent").selectOption("all");
+  await page.getByLabel("创作类型").selectOption("all");
   await expect(page.getByRole("heading", { name: "整合演示文稿" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "KV 方向 D" })).toBeVisible();
 });
@@ -136,14 +136,15 @@ test("moves a card to the selected status column", async ({ page }) => {
   await expect(completedColumn.getByRole("heading", { name: "KV 方向 B" })).toBeVisible();
 });
 
-test("opens a refresh-safe WorkItem drawer with raw status and attempt history", async ({ page }) => {
+test("opens a refresh-safe task drawer with designer-facing status and attempt history", async ({ page }) => {
   await page.goto("/tasks/task_board_e2e/board");
   await page.locator("article.task-card").filter({ hasText: "KV 方向 A" }).getByRole("link", { name: "详情" }).click();
   await expect(page).toHaveURL(/drawer=work-item&target=work_kv_a/);
   const drawer = page.getByRole("dialog", { name: "工作台详情抽屉" });
   await expect(drawer.getByRole("heading", { name: "子任务详情" })).toBeVisible();
-  await expect(drawer).toContainText("RUNNING · 运行中");
-  await expect(drawer).toContainText("2 个实例 · 1 次自动重试");
+  await expect(drawer).toContainText("当前进度运行中");
+  await expect(drawer).toContainText("2 次执行 · 1 次自动重试");
+  await expect(drawer).not.toContainText(/work_|instance_|RUNNING/);
   await page.reload();
   await expect(page.getByRole("heading", { name: "子任务详情" })).toBeVisible();
   await page.getByRole("button", { name: "关闭详情抽屉" }).click();
@@ -152,9 +153,9 @@ test("opens a refresh-safe WorkItem drawer with raw status and attempt history",
 
 test("renders ordered Stage dependencies and a truthful PPT boundary", async ({ page }) => {
   await page.goto("/tasks/task_board_e2e/plan");
-  await expect(page.getByRole("heading", { name: "Image 设计阶段" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "图片 设计阶段" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "PPT 设计阶段" })).toBeVisible();
-  await expect(page.getByText("依赖 S1 Image")).toBeVisible();
+  await expect(page.getByText("依赖 第 1 阶段 · 图片")).toBeVisible();
   await expect(page.getByText("PPT 能力未接入", { exact: true })).toBeVisible();
   await expect(page.getByText(/不会进入伪工作台/)).toBeVisible();
 

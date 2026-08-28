@@ -120,8 +120,9 @@ export function actionLabel(action: string): string {
     submit_manual_action: "提交人工动作",
     regenerate: "重新生成",
     approve_once: "批准一次预算越权",
+    publish_bundle: "发布图片与设计说明",
   };
-  return labels[action] ?? action;
+  return labels[action] ?? "继续处理";
 }
 
 export function commandLabel(command: string): string {

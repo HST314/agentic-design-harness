@@ -70,7 +70,7 @@ test("embeds only the server-approved current Image instance", async ({ page }) 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_image");
   await expect(page.locator(".agent-workbench")).toBeVisible();
   await expect(page.locator("body")).not.toContainText(/Adapter|frame 策略|iframe|sandbox/);
-  const iframe = page.locator("iframe[title='Image Agent 工作台：KV 方向 A']");
+  const iframe = page.locator("iframe[title='图片助手 工作台：KV 方向 A']");
   await expect(iframe).toHaveAttribute("src", "http://127.0.0.1:19091/");
   await expect(iframe).toHaveAttribute("sandbox", /allow-downloads/);
   await expect(iframe).toHaveAttribute("sandbox", /allow-scripts/);
@@ -175,7 +175,7 @@ test("shows frame-policy failure with a controlled external fallback", async ({ 
   await page.route("**/api/v1/instances/instance_image/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_image", agent_type: "image", instance_status: "RUNNING", ui_url: "http://127.0.0.1:19092/", link_status: "FRAME_BLOCKED", embeddable: false, frame_policy: "X_FRAME_OPTIONS_BLOCKED", diagnostic: "Image Agent only permits same-origin framing." }) }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_image");
-  await expect(page.getByRole("heading", { name: "Image Agent 无法安全内嵌" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "图片助手 无法安全内嵌" })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
   const fallback = page.getByRole("link", { name: "直接打开原始工作台" });
   await expect(fallback).toHaveAttribute("href", "http://127.0.0.1:19092/");
@@ -194,7 +194,7 @@ test("embeds a server-approved READY PPT workbench", async ({ page }) => {
   await page.route("http://127.0.0.1:19094/", async (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><html><body><main><h1>PPT Agent Studio</h1></main></body></html>" }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
-  await expect(page.locator("iframe[title='PPT Agent 工作台：发布会演示文稿']")).toHaveAttribute("src", "http://127.0.0.1:19094/");
+  await expect(page.locator("iframe[title='演示文稿助手 工作台：发布会演示文稿']")).toHaveAttribute("src", "http://127.0.0.1:19094/");
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "PPT Agent Studio" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
 });
@@ -209,7 +209,7 @@ test("shows PPT STARTING without creating an iframe", async ({ page }) => {
   await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "STARTING", task_revision: 8, ui_url: null, link_status: "STARTING", start_operation: { operation_id: "start_ppt", state: "RUNNING" }, embeddable: false, frame_policy: "NOT_CHECKED", diagnostic: "Starting." }) }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
-  await expect(page.getByRole("heading", { name: "PPT Agent 正在启动" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "演示文稿助手 正在启动" })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
 });
 
@@ -232,7 +232,7 @@ test("shows PPT FRAME_BLOCKED with a controlled external fallback", async ({ pag
   await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "RUNNING", task_revision: 9, ui_url: "http://127.0.0.1:19095/", link_status: "FRAME_BLOCKED", start_operation: null, embeddable: false, frame_policy: "X_FRAME_OPTIONS_BLOCKED", diagnostic: "Blocked." }) }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
-  await expect(page.getByRole("heading", { name: "PPT Agent 无法安全内嵌" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "演示文稿助手 无法安全内嵌" })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "直接打开原始工作台" })).toHaveAttribute("href", "http://127.0.0.1:19095/");
 });

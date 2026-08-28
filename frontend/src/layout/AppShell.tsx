@@ -52,7 +52,7 @@ function sectionFromPath(pathname: string): string {
 
 function disabledAdapterLabel(readiness: ReadyResponse | undefined): string {
   const names = (readiness?.disabled_adapters ?? []).map((name) => (
-    name === "image" ? "Image" : name === "ppt" ? "PPT" : name.toUpperCase()
+    name === "image" ? "图片" : name === "ppt" ? "演示文稿" : "专业"
   ));
   return names.length ? names.join("、") : "部分专业能力";
 }
@@ -197,8 +197,8 @@ function DetailsDrawer({
       </div>
       {drawer === "status" ? (
         <div className="workbench-drawer__body">
-          <div className="workbench-status-card"><Icon name="status" /><div><strong>{readiness.data?.status === "ready" ? "控制面连接正常" : readiness.data?.status === "degraded" ? "控制面已降级运行" : "正在等待控制面"}</strong><p>{readiness.data?.status === "degraded" ? `${disabledAdapterLabel(readiness.data)} Agent 当前不可用；其他控制面能力保持可用。` : "状态来自 `/readyz`，工作台每 10 秒重新校验。"}</p></div></div>
-          <dl className="workbench-definition-list"><div><dt>当前上下文</dt><dd>{taskId ?? "新任务"}</dd></div><div><dt>刷新策略</dt><dd>窗口聚焦时重新校验</dd></div></dl>
+          <div className="workbench-status-card"><Icon name="status" /><div><strong>{readiness.data?.status === "ready" ? "服务连接正常" : readiness.data?.status === "degraded" ? "部分服务暂不可用" : "正在连接服务"}</strong><p>{readiness.data?.status === "degraded" ? `${disabledAdapterLabel(readiness.data)}助手当前不可用；其他创作能力保持可用。` : "工作台会定时检查服务状态。"}</p></div></div>
+          <dl className="workbench-definition-list"><div><dt>当前任务</dt><dd>{taskId ? "已载入" : "新任务"}</dd></div><div><dt>更新方式</dt><dd>回到窗口时自动更新</dd></div></dl>
         </div>
       ) : drawer === "work-item" && taskId && target ? (
         <div className="workbench-drawer__body workbench-drawer__body--work-item"><WorkItemDetailsPanel taskId={taskId} workItemId={target} /></div>

@@ -995,16 +995,23 @@
 }
 
 .master-composer__field { display: grid; gap: var(--space-2); font-size: 13px; font-weight: 700; }
+.master-composer__field-header { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .master-composer__textarea { position: relative; }
-.master-composer textarea { width: 100%; max-height: min(40dvh, 320px); display: block; resize: vertical; padding: var(--space-3) 64px var(--space-3) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); color: var(--color-foreground); background: var(--color-muted-surface); font: inherit; line-height: 1.6; }
+.master-composer textarea { width: 100%; max-height: min(40dvh, 320px); display: block; resize: vertical; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); color: var(--color-foreground); background: var(--color-muted-surface); font: inherit; line-height: 1.6; }
 .master-composer__expand {
-  position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
+  width: 44px;
+  min-height: 44px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
   color: var(--color-primary-strong);
-  background: var(--color-surface);
-  box-shadow: var(--shadow-panel);
+  background: transparent;
+  cursor: pointer;
 }
+.master-composer__expand:hover { background: var(--color-primary-softer); }
+.master-composer__expand:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .master-composer__expand svg { width: 19px; height: 19px; }
 .master-composer fieldset { margin: 0; padding: 0; border: 0; }
 .master-composer legend { margin-bottom: var(--space-2); color: var(--color-muted-foreground); font-size: 12px; font-weight: 700; }

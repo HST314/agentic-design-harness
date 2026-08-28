@@ -18,17 +18,11 @@ export function ExpandableComposerTextarea({
 
   return (
     <div className="master-composer__field">
-      <label htmlFor={id}>{label}</label>
-      <div className="master-composer__textarea">
-        <textarea
-          {...textareaProps}
-          id={id}
-          ref={textareaRef}
-          rows={expanded ? 12 : 4}
-        />
+      <div className="master-composer__field-header">
+        <label htmlFor={id}>{label}</label>
         <button
           type="button"
-          className="workbench-icon-button master-composer__expand"
+          className="master-composer__expand"
           aria-controls={id}
           aria-expanded={expanded}
           aria-label={actionLabel}
@@ -37,6 +31,14 @@ export function ExpandableComposerTextarea({
         >
           <Icon name={expanded ? "collapse" : "expand"} />
         </button>
+      </div>
+      <div className="master-composer__textarea">
+        <textarea
+          {...textareaProps}
+          id={id}
+          ref={textareaRef}
+          rows={expanded ? 12 : 4}
+        />
       </div>
     </div>
   );

@@ -275,6 +275,7 @@ test("keeps the create thread flush with the shell and the Master composer at th
   await textarea.fill("秋季发布会三套主视觉方向");
   await page.getByRole("button", { name: "发送并创建任务" }).click();
   await expect(page).toHaveURL(/\/tasks\/task_e2e_intake\/master$/);
+  await expect(page.locator(".master-composer")).toBeVisible();
   const continuedLayout = await page.evaluate(() => {
     const composer = document.querySelector(".master-composer");
     const messageInput = document.querySelector("#master-message");

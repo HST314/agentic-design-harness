@@ -7,6 +7,7 @@ import {
 } from "react-router-dom";
 import { TaskIntakePage } from "../features/task-intake/TaskIntakePage";
 import { AgentWorkbenchPage } from "../features/agent-workbench/AgentWorkbenchPage";
+import { InstanceWorkbenchRedirectPage } from "../features/agent-workbench/InstanceWorkbenchRedirectPage";
 import { DeliveryPage } from "../features/deliveries/DeliveryPage";
 import { InboxPage } from "../features/inbox/InboxPage";
 import { MasterRoutePage } from "../features/master-thread/MasterThreadPage";
@@ -72,6 +73,7 @@ export function AppRouter(): React.JSX.Element {
           path="/tasks/:taskId/work-items/:workItemId/focus"
           element={<AgentWorkbenchPage focusMode />}
         />
+        <Route path="/instances/:instanceId" element={<InstanceWorkbenchRedirectPage />} />
         <Route path="*" element={<LegacyRoute />} />
       </Routes>
     </BrowserRouter>

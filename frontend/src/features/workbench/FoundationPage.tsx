@@ -7,22 +7,22 @@ const pageCopy: Record<View, { eyebrow: string; title: string; description: stri
   master: {
     eyebrow: "Master 永久线程",
     title: "任务分析与计划确认",
-    description: "F2 将在此接入持久化消息、澄清与 PlanProposal 修订。",
+    description: "此处将接入持久化消息、澄清与执行计划更新。",
   },
   board: {
     eyebrow: "逻辑工作项",
     title: "当前任务看板",
-    description: "F3 将在此投影 WorkItem 状态；看板不会通过拖拽写领域状态。",
+    description: "此处将呈现子任务状态；看板不会通过拖拽直接改写执行状态。",
   },
   plan: {
-    eyebrow: "Stage 与依赖",
+    eyebrow: "阶段与依赖",
     title: "任务计划",
-    description: "F3 将按阶段位置展示依赖、required/optional 与 Agent 可用性。",
+    description: "此处将按阶段位置展示依赖、是否必需与专业助手可用性。",
   },
   "work-item": {
     eyebrow: "专业工作台边界",
     title: "子任务入口",
-    description: "F4 将从受控 UI link 打开 Image Agent 工作台，并提供失败回退。",
+    description: "此处将通过安全链接打开图片助手工作台，并提供失败回退。",
   },
 };
 

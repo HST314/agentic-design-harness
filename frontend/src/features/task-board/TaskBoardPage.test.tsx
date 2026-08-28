@@ -85,8 +85,8 @@ describe("BoardView", () => {
     expect(markup).toContain("北工大 C 易拉宝");
     // 运行中 column count badge shows all N cards.
     expect(markup).toContain('id="board-column-running">运行中</h2><span>3</span>');
-    // Every card keeps the single-instance data shape.
-    expect(markup.match(/<dt>实例<\/dt><dd>1<\/dd>/g)).toHaveLength(3);
+    // Every card keeps the single-execution data shape.
+    expect(markup.match(/<dt>执行<\/dt><dd>1<\/dd>/g)).toHaveLength(3);
     // Cards deep-link into their own work item workbench.
     expect(markup).toContain("/tasks/task_board/work-items/work_1");
     expect(markup).toContain("/tasks/task_board/work-items/work_3");

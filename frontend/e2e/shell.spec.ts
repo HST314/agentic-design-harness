@@ -343,6 +343,46 @@ test.beforeEach(async ({ page }) => {
       }),
     });
   });
+  const workItem = {
+    schema_version: "1.0",
+    work_item_id: "work_ui",
+    task_id: "t_ui",
+    title: "主视觉设计",
+    agent_type: "image",
+    required: true,
+    depends_on: [],
+    stage: { stage_id: "stage_ui", position: 1, type: "image", status: "RUNNING", depends_on: [], available: true },
+    business_status: "WAITING_APPROVAL",
+    raw_status: "WAITING_APPROVAL",
+    current_instance: { instance_id: "i_ui", status: "WAITING_APPROVAL", approval_mode: "human", manual_finished: false, process_state: "RUNNING", restart_required: false, created_at: "2026-08-20T12:00:00Z" },
+    instance_ids: ["i_ui"],
+    attempts: [],
+    pending_approvals: [],
+    delivery_count: 0,
+    alerts: [],
+    updated_at: "2026-08-20T12:01:00Z",
+  };
+  await page.route("**/api/v1/tasks/t_ui/work-items", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "1.0", task_id: "t_ui", task_revision: 2, projection_revision: "ui", refresh_after_ms: 5000, stages: [workItem.stage], summary: { TODO: 0, RUNNING: 0, WAITING_APPROVAL: 1, COMPLETED: 0, EXCEPTION: 0 }, items: [workItem] }),
+    });
+  });
+  await page.route("**/api/v1/tasks/t_ui/work-items/work_ui", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "1.0", task_id: "t_ui", task_revision: 2, projection_revision: "ui", refresh_after_ms: 5000, item: workItem }),
+    });
+  });
+  await page.route("**/api/v1/instances/i_ui/ui-link?*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "1.0", task_id: "t_ui", work_item_id: "work_ui", instance_id: "i_ui", agent_type: "image", instance_status: "WAITING_APPROVAL", ui_url: null, link_status: "NO_UI_URL", embeddable: false, frame_policy: "NOT_CHECKED", diagnostic: "Preparing." }),
+    });
+  });
   await page.route("**/api/v1/inbox?owner=human", async (route) => {
     await route.fulfill({
       status: 200,
@@ -492,7 +532,7 @@ test("shell has no horizontal overflow on phone and landscape", async ({ page })
   }
 });
 
-test("task and instance pages preserve the Image workbench boundary", async ({ page }) => {
+test("legacy instance links open the corresponding professional workbench", async ({ page }) => {
   await page.goto("/tasks");
   await page.getByRole("link", { name: "查看任务" }).click();
   await expect(page).toHaveURL(/\/tasks\/t_ui$/);
@@ -512,159 +552,16 @@ test("task and instance pages preserve the Image workbench boundary", async ({ p
   await expect(page.getByRole("heading", { name: "final.png" })).toBeVisible();
   await page.getByRole("link", { name: "概览", exact: true }).click();
   await page.getByRole("link", { name: /Image Agent/ }).click();
-  await expect(page).toHaveURL(/\/instances\/i_ui$/);
-  await expect(page.getByText("等待下一步决议")).toBeVisible();
-  await expect(page.getByRole("alert").getByText("专业创作服务暂时不可用")).toBeVisible();
-  await expect(page.locator("body")).not.toContainText(/PID|端口|Timeline 游标|runtime\.yaml|endpoint|Adapter|配置修订|凭据/);
-  const workbench = page.getByRole("link", { name: "打开工作台" });
-  await expect(workbench).toHaveAttribute("href", "http://127.0.0.1:18123/");
-  await expect(workbench).toHaveAttribute("target", "_blank");
+  await expect(page).toHaveURL(/\/tasks\/t_ui\/work-items\/work_ui$/);
+  await expect(page.locator("body")).not.toContainText(/PID|端口|Timeline 游标|runtime\.yaml|endpoint|Adapter|配置修订|凭据|instance_|work_/);
 });
 
-test("instance lifecycle controls submit guarded start, restart, cancel and archive commands", async ({ page }) => {
-  let instanceStatus = "READY";
-  let taskRevision = 10;
-  const submitted: Array<{ action: string; body: Record<string, unknown> }> = [];
-
-  await page.route("**/api/v1/instances/i_ui", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        schema_version: "1.0",
-        task_id: "t_ui",
-        task_revision: taskRevision,
-        pending_approval: null,
-        credential: null,
-        config: { config_revision: 1, restart_required: false, config: {} },
-        instance: {
-          instance_id: "i_ui",
-          task_id: "t_ui",
-          agent_type: "image",
-          status: instanceStatus,
-          required: true,
-          approval_mode: "human",
-          config_revision: 1,
-          ui_url: instanceStatus === "RUNNING" ? "http://127.0.0.1:18123/" : null,
-          process: instanceStatus === "RUNNING"
-            ? {
-                pid: 1234,
-                port: 18123,
-                state: "RUNNING",
-                started_at: "2026-08-20T12:00:00Z",
-              }
-            : null,
-        },
-        observation: null,
-      }),
-    });
-  });
-  await page.route(/\/api\/v1\/instances\/i_ui\/(?:start|restart|cancel|archive)$/, async (route) => {
-    const action = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
-    const body = route.request().postDataJSON() as Record<string, unknown>;
-    submitted.push({ action, body });
-    instanceStatus = {
-      start: "RUNNING",
-      restart: "RUNNING",
-      cancel: "CANCELLED",
-      archive: "ARCHIVED",
-    }[action] ?? instanceStatus;
-    taskRevision += 1;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ schema_version: "1.0", task_revision: taskRevision }),
-    });
-  });
-
-  await page.goto("/instances/i_ui");
-  await page.getByRole("button", { name: "启动实例" }).click();
-  await expect(page.getByRole("button", { name: "重启实例" })).toBeVisible();
-
-  await page.getByRole("button", { name: "重启实例" }).click();
-  await expect.poll(() => submitted.length).toBe(2);
-
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "取消实例" }).click();
-  await expect(page.getByRole("button", { name: "归档实例" })).toBeVisible();
-
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "归档实例" }).click();
-  await expect(page.getByText("已归档", { exact: true })).toBeVisible();
-
-  expect(submitted.map(({ action }) => action)).toEqual(["start", "restart", "cancel", "archive"]);
-  submitted.forEach(({ action, body }, index) => {
-    expect(body.operation_id).toEqual(expect.stringMatching(`^instance_${action}_`));
-    expect(body.envelope).toMatchObject({
-      actor_type: "human",
-      actor_id: "human_operator",
-      expected_revision: 10 + index,
-    });
-    expect((body.envelope as Record<string, unknown>).idempotency_key).toEqual(
-      expect.stringMatching(/^ui_/),
-    );
-  });
-});
-
-test("rejected delivery offers isolated revalidation without an Agent restart", async ({ page }) => {
-  let retried = false;
-  let retryBody: Record<string, unknown> | null = null;
-  await page.route("**/api/v1/instances/i_ui", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        schema_version: "1.0",
-        task_id: "t_ui",
-        task_revision: retried ? 12 : 11,
-        pending_approval: null,
-        credential: null,
-        config: { config_revision: 1, restart_required: false, config: {} },
-        instance: {
-          instance_id: "i_ui",
-          task_id: "t_ui",
-          agent_type: "image",
-          status: retried ? "SUCCEEDED" : "FAILED",
-          required: true,
-          approval_mode: "human",
-          config_revision: 1,
-          ui_url: null,
-          process: null,
-          delivery_rejection: retried
-            ? null
-            : {
-                code: "VALIDATION_ERROR",
-                message: "交付 MIME 与 TaskCard 不一致",
-                details: {},
-                rejected_at: "2026-08-20T12:10:00Z",
-                retryable: true,
-              },
-        },
-        observation: null,
-      }),
-    });
-  });
-  await page.route("**/api/v1/instances/i_ui/deliveries/retry", async (route) => {
-    retryBody = route.request().postDataJSON() as Record<string, unknown>;
-    retried = true;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        schema_version: "1.0",
-        result: { instance: { status: "SUCCEEDED" } },
-      }),
-    });
-  });
-
-  await page.goto("/instances/i_ui");
-  await expect(page.getByRole("alert")).toContainText("交付 MIME 与 TaskCard 不一致");
-  await expect(page.getByRole("button", { name: "重启实例" })).toHaveCount(0);
-  await page.getByRole("button", { name: "重新校验交付" }).click();
-
-  await expect(page.getByRole("alert")).toHaveCount(0);
-  expect(retryBody).not.toBeNull();
-  expect((retryBody?.envelope as Record<string, unknown>).expected_revision).toBe(11);
+test("inbox notifications link straight to the corresponding professional workbench", async ({ page }) => {
+  await page.goto("/inbox");
+  const workbenchLink = page.getByRole("link", { name: "打开专业工作台" });
+  await workbenchLink.click();
+  await expect(page).toHaveURL(/\/tasks\/t_ui\/work-items\/work_ui$/);
+  await expect(page.locator("body")).not.toContainText(/i_ui|t_ui|work_ui|队列序号|JSON/);
 });
 
 test("resources provide an explicit safe preview and a browser download", async ({ page, context }) => {
@@ -731,14 +628,11 @@ test("human approval resolves once and the inbox records it as handled", async (
   page.on("pageerror", (error) => browserErrors.push(error.message));
 
   await page.goto("/inbox?approval_id=ap_ui");
-  await expect(page.getByRole("heading", { name: "按到达顺序处理" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "待处理通知" })).toBeVisible();
   await expect(page.getByText("工作流等待决议")).toBeVisible();
-  const actorId = page.getByLabel("操作人 ID");
-  await expect(actorId).toHaveAttribute("pattern", String.raw`[A-Za-z][A-Za-z0-9_\-]{0,127}`);
-  await actorId.fill("9_invalid");
-  await expect.poll(() => actorId.evaluate((input) => input.checkValidity())).toBe(false);
-  await actorId.fill("human_operator");
-  await expect.poll(() => actorId.evaluate((input) => input.checkValidity())).toBe(true);
+  await expect(page.getByLabel("操作人 ID")).toHaveCount(0);
+  await expect(page.getByText("approve_taskbook")).toHaveCount(0);
+  await expect(page.getByText("taskbook_review")).toHaveCount(0);
   await page.getByRole("button", { name: "批准并推进" }).click();
   await expect(page.getByText("该审批已完成处理。")).toBeVisible();
   await expect(page.getByText("已处理", { exact: true })).toBeVisible();

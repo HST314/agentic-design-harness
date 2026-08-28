@@ -273,17 +273,16 @@ export function SystemSettingsPage(): React.JSX.Element {
     <div className="workbench-page settings-page">
       <header className="workbench-page__header settings-page__header">
         <div>
-          <p className="workbench-eyebrow">全局控制面</p>
+          <p className="workbench-eyebrow">创作偏好</p>
           <h1>全局设置</h1>
-          <p>发布后，新任务立即继承；未启动实例立即同步；运行中 Image Agent 在最近安全检查点自动建立配置分支。</p>
+          <p>发布后，新任务立即继承；尚未启动的子任务立即同步；运行中的图片助手会在最近安全节点应用设置。</p>
         </div>
-        <span className="settings-revision" title={baseRevision}>修订 {baseRevision.slice(-8)}</span>
       </header>
 
       <div className="settings-tabs" role="tablist" aria-label="全局设置范围">
         {([
-          ["harness", "Harness 设置", "运行映射与控制策略"],
-          ["image-agent", "子 Agent 设置", "Image Agent 全局默认"],
+          ["harness", "任务统筹设置", "智能服务与执行策略"],
+          ["image-agent", "专业助手设置", "图片助手全局默认"],
         ] as const).map(([key, label, description], index) => (
           <button
             key={key}
@@ -305,7 +304,7 @@ export function SystemSettingsPage(): React.JSX.Element {
       {tab === "harness" ? (
         <div id="settings-panel-harness" role="tabpanel" aria-labelledby="settings-tab-harness" className="settings-panel">
           <section className="settings-section">
-            <div className="settings-section__heading"><h2>模型映射</h2><p>选择 Harness 和 Image Agent 各类调用的批准模型。</p></div>
+            <div className="settings-section__heading"><h2>智能服务分配</h2><p>为任务统筹与图片创作选择合适的智能服务。</p></div>
             <div className="settings-grid settings-grid--two">
               {([
                 ["master", "Master 编排模型", "text_models"],
@@ -341,8 +340,7 @@ export function SystemSettingsPage(): React.JSX.Element {
           </section>
 
           <section className="settings-section settings-section--muted">
-            <div className="settings-section__heading"><h2>进程边界</h2><p>监听地址与 Supervisor 端口保留在 `config/runtime.yaml`，当前进程不会热切换这些基础设施值。</p></div>
-            <dl className="settings-summary"><div><dt>Harness</dt><dd>{draft.harness.server.host}:{draft.harness.server.port}</dd></div><div><dt>Supervisor</dt><dd>{draft.harness.supervisor.port_range_start}–{draft.harness.supervisor.port_range_end}</dd></div><div><dt>日志级别</dt><dd>{draft.harness.server.log_level}</dd></div></dl>
+            <div className="settings-section__heading"><h2>运行环境</h2><p>基础运行参数由系统统一维护，无需在设计工作台中手动设置。</p></div>
           </section>
         </div>
       ) : (
@@ -367,7 +365,7 @@ export function SystemSettingsPage(): React.JSX.Element {
             <div className="settings-grid settings-grid--three">
               <NumberField id="candidate-concurrency" label="候选并发数" min={1} max={5} value={draft.image.candidate_concurrency} onChange={(value) => update("image.candidate_concurrency", value)} />
               <label className="settings-field" htmlFor="output-size"><span>默认输出尺寸</span><input id="output-size" value={draft.image.default_output_size} pattern="(?:[1-9][0-9]{1,4}x[1-9][0-9]{1,4}|[124]K)" onChange={(event) => update("image.default_output_size", event.currentTarget.value)} /></label>
-              <label className="settings-field" htmlFor="response-format"><span>响应格式</span><select id="response-format" value={draft.image.response_format} onChange={(event) => update("image.response_format", event.currentTarget.value)}><option value="url">URL</option><option value="b64_json">Base64 JSON</option></select></label>
+              <label className="settings-field" htmlFor="response-format"><span>交付方式</span><select id="response-format" value={draft.image.response_format} onChange={(event) => update("image.response_format", event.currentTarget.value)}><option value="url">提供下载链接</option><option value="b64_json">直接嵌入结果</option></select></label>
             </div>
             <div className="settings-toggle-list"><ToggleField id="watermark" label="添加水印" checked={draft.image.watermark} onChange={(value) => update("image.watermark", value)} /></div>
           </section>
@@ -383,16 +381,16 @@ export function SystemSettingsPage(): React.JSX.Element {
           </section>
 
           <section className="settings-section">
-            <div className="settings-section__heading"><h2>高级模型覆盖</h2><p>留空时继承 Harness 模型映射。</p></div>
+            <div className="settings-section__heading"><h2>高级服务覆盖</h2><p>留空时继承任务统筹设置。</p></div>
             <div className="settings-grid settings-grid--two">
               {modelStates.map(({ key, label, group }) => (
-                <label className="settings-field" key={key} htmlFor={`agent-model-${key}`}><span>{label}</span><select id={`agent-model-${key}`} value={draft.image.advanced_model_overrides[key] ?? ""} onChange={(event) => update(`image.advanced_model_overrides.${key}`, event.currentTarget.value || null)}><option value="">继承 Harness 映射</option>{(options[group] ?? []).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+                <label className="settings-field" key={key} htmlFor={`agent-model-${key}`}><span>{label}</span><select id={`agent-model-${key}`} value={draft.image.advanced_model_overrides[key] ?? ""} onChange={(event) => update(`image.advanced_model_overrides.${key}`, event.currentTarget.value || null)}><option value="">继承任务统筹设置</option>{(options[group] ?? []).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
               ))}
             </div>
           </section>
 
           <section className="settings-section">
-            <div className="settings-section__heading"><h2>按任务下发</h2><p>把当前已发布的全局 Image Agent 默认立即推送到所选任务的全部 Image 实例；未启动实例立即生效，运行中实例在最近安全检查点应用，实例私有覆盖保持不变。</p></div>
+            <div className="settings-section__heading"><h2>按任务应用</h2><p>把当前已发布的图片助手默认设置应用到所选任务；尚未启动的子任务立即生效，运行中的子任务会在最近安全节点应用，已有专属设置保持不变。</p></div>
             <div className="settings-grid settings-grid--two">
               <label className="settings-field" htmlFor="broadcast-task">
                 <span>目标任务</span>
@@ -410,7 +408,7 @@ export function SystemSettingsPage(): React.JSX.Element {
                 disabled={broadcastMutation.isPending || !broadcastTaskId}
                 onClick={() => broadcastMutation.mutate()}
               >
-                {broadcastMutation.isPending ? "正在下发…" : "立即下发给本任务所有 image-agent"}
+                {broadcastMutation.isPending ? "正在应用…" : "应用到本任务的全部图片子任务"}
               </button>
             </div>
             {broadcastMessage ? <p role="status">{broadcastMessage}</p> : null}

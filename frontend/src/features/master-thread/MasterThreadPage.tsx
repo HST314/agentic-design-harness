@@ -83,7 +83,32 @@ function deliveryLabel(delivery: ExpectedDelivery): string {
     archive: "压缩包",
     other: "其他",
   }[delivery.kind];
-  return `${kind} · ${delivery.role} · ${delivery.accepted_mime_types.join("、")}`;
+  const role = {
+    primary: "主视觉",
+    supporting_visual: "辅助视觉",
+    presentation: "演示文稿",
+    design_note: "设计说明",
+  }[delivery.role] ?? "交付文件";
+  return `${kind} · ${role}`;
+}
+
+export function designerFacingMessage(message: ContractMasterMessage): string {
+  if (message.role === "user") return message.content;
+  if (message.kind === "plan_confirmation") return "计划已确认，可以开始执行各项设计任务。";
+  return message.content
+    .replace(/PlanProposal(?:\s*·?\s*r?\d+)?/gi, "执行计划")
+    .replace(/TaskCard(?:\s*·?\s*r?\d+)?/gi, "任务卡")
+    .replace(/计划\s*r\d+/gi, "计划")
+    .replace(/任务卡\s*r\d+/gi, "任务卡")
+    .replace(/已保存为\s*r\d+/gi, "已保存")
+    .replace(/已更新为\s*r\d+/gi, "已更新")
+    .replace(/实例\s+instance_[A-Za-z0-9_-]+/gi, "该子任务")
+    .replace(/\b(?:work|stage|instance|card|proposal|attempt|message|task)_[A-Za-z0-9_-]+\b/gi, "")
+    .replace(/\b[A-Za-z]+(?:_[A-Za-z0-9]+)+\b/g, "")
+    .replace(/\br\d+\b/gi, "新版本")
+    .replace(/\s+([，。；：])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
 const startStageLabels: Record<InstanceStartProgress["state"], string> = {
@@ -153,39 +178,20 @@ export function TaskTabs({ taskId, trailing }: { taskId: string; trailing?: Reac
 }
 
 function MessageCard({ message }: { message: ContractMasterMessage }): React.JSX.Element {
+  const pending = message.message_id.startsWith("local_");
   return (
     <article
-      className={`master-message master-message--${message.role} master-message--${message.kind}`}
-      aria-label={`${messageLabel[message.kind]}，${formatTime(message.created_at)}`}
+      className={`master-message master-message--${message.role} master-message--${message.kind}${pending ? " master-message--pending" : ""}`}
+      aria-label={pending ? "用户消息，正在发送" : `${messageLabel[message.kind]}，${formatTime(message.created_at)}`}
     >
       <header>
         <span>{messageLabel[message.kind]}</span>
-        <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+        {pending ? <span>正在发送</span> : <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>}
       </header>
-      <p>{message.content}</p>
+      <p>{designerFacingMessage(message)}</p>
       {message.asset_refs.length ? (
         <ul className="master-message__assets" aria-label="引用资源">
-          {message.asset_refs.map((asset) => <li key={asset.asset_id}><Icon name="file-check" />{asset.asset_id}</li>)}
-        </ul>
-      ) : null}
-    </article>
-  );
-}
-
-function PendingUserMessage({
-  content,
-  refs,
-}: {
-  content: string;
-  refs: MasterAssetReference[];
-}): React.JSX.Element {
-  return (
-    <article className="master-message master-message--user master-message--pending" aria-label="用户消息，正在发送">
-      <header><span>用户消息</span><span>正在发送</span></header>
-      <p>{content}</p>
-      {refs.length ? (
-        <ul className="master-message__assets" aria-label="引用资源">
-          {refs.map((asset) => <li key={asset.asset_id}><Icon name="file-check" />{asset.asset_id}</li>)}
+          <li><Icon name="file-check" />已引用 {message.asset_refs.length} 个任务资源</li>
         </ul>
       ) : null}
     </article>
@@ -212,16 +218,15 @@ function TaskCardReview({
   editable: boolean;
   onEdit: (trigger: HTMLButtonElement) => void;
 }): React.JSX.Element {
+  const fallbackTitle = card.agent_type === "image" ? "图片设计任务" : "演示文稿设计任务";
   const parameterItems = card.agent_type === "image"
     ? [
-      ["画幅", textParameter(card, "aspect_ratio") || "由 Agent 决定"],
+      ["画幅", textParameter(card, "aspect_ratio") || "由专业助手决定"],
       ["候选数量", numberParameter(card, "variants") || "默认"],
       ["使用场景", textParameter(card, "usage_context") || "未填写"],
       [
         "品类版本",
-        textParameter(card, "category_id")
-          ? `${textParameter(card, "category_id")}@${textParameter(card, "category_version") || "未填写"}`
-          : "未指定",
+        textParameter(card, "category_id") ? "已指定" : "未指定",
       ],
     ]
     : [
@@ -233,26 +238,25 @@ function TaskCardReview({
       <header>
         <div>
           <span className="master-agent-chip">{card.agent_type === "image" ? "图片" : "PPT"}</span>
-          <span className="master-task-card__revision">TaskCard · r{card.revision}</span>
         </div>
         {editable ? (
           <button
             type="button"
             className="workbench-secondary-button"
-            aria-label={`编辑任务卡 ${workItem?.title ?? card.card_id}`}
+            aria-label={`编辑任务卡 ${workItem?.title ?? fallbackTitle}`}
             onClick={(event) => onEdit(event.currentTarget)}
           >
             <Icon name="rename" />编辑任务卡
           </button>
         ) : null}
       </header>
-      <h3 id={`task-card-${card.card_id}`}>{workItem?.title ?? card.card_id}</h3>
+      <h3 id={`task-card-${card.card_id}`}>{workItem?.title ?? fallbackTitle}</h3>
       <p className="master-task-card__objective">{card.objective}</p>
       <dl className="master-task-card__parameters">
         {parameterItems.map(([label, value]) => (
           <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
         ))}
-        <div><dt>依赖</dt><dd>{workItem?.depends_on.length ? workItem.depends_on.join("、") : "无前置依赖"}</dd></div>
+        <div><dt>依赖</dt><dd>{workItem?.depends_on.length ? `${workItem.depends_on.length} 项前置任务` : "无前置依赖"}</dd></div>
       </dl>
       <div className="master-task-card__details">
         <section aria-label="执行指令">
@@ -261,14 +265,13 @@ function TaskCardReview({
         </section>
         <section aria-label="输入资产">
           <h4>输入资产</h4>
-          {card.input_assets.length ? <ul>{card.input_assets.map((item) => <li key={item.asset_id}><code>{item.asset_id}</code></li>)}</ul> : <p>无输入资产</p>}
+          {card.input_assets.length ? <p>已引用 {card.input_assets.length} 个任务资源</p> : <p>无输入资产</p>}
         </section>
         <section aria-label="输出要求">
           <h4>输出要求</h4>
           <ul>{card.expected_deliveries.map((item) => <li key={`${item.kind}-${item.role}`}>{deliveryLabel(item)}{item.required ? " · 必需" : " · 可选"}</li>)}</ul>
         </section>
       </div>
-      <code className="master-task-card__id">{card.card_id}</code>
     </article>
   );
 }
@@ -337,7 +340,7 @@ function TaskCardEditorDialog({
     if (!knownAssets.has(asset.asset_id)) {
       knownAssets.set(asset.asset_id, {
         ...asset,
-        filename: asset.asset_id,
+        filename: "未命名任务资源",
         description: "计划引用资产",
       });
     }
@@ -383,11 +386,11 @@ function TaskCardEditorDialog({
         }}
       >
         <header className="workbench-drawer__header">
-          <div><p className="workbench-eyebrow">TaskCard · r{card.revision}</p><h2 id="master-card-editor-title">编辑任务卡</h2></div>
+          <div><p className="workbench-eyebrow">任务设置</p><h2 id="master-card-editor-title">编辑任务卡</h2></div>
           <button type="button" className="workbench-icon-button" aria-label="关闭任务卡编辑" disabled={pending} onClick={onCancel}><Icon name="close" /></button>
         </header>
         <div className="master-card-editor__body">
-          <p className="master-card-editor__notice">保存会创建新的 TaskCard 修订和 PlanProposal 修订；当前版本保留为只读历史。</p>
+          <p className="master-card-editor__notice">保存后会生成新的任务设置和执行计划，当前版本仍保留在历史记录中。</p>
           <label htmlFor="task-card-objective"><span>目标</span><textarea id="task-card-objective" required maxLength={20_000} rows={4} value={objective} onChange={(event) => setObjective(event.currentTarget.value)} /></label>
           <label htmlFor="task-card-instructions"><span>指令（每行一条）</span><textarea id="task-card-instructions" maxLength={100_000} rows={5} value={instructions} onChange={(event) => setInstructions(event.currentTarget.value)} /></label>
           <fieldset>
@@ -420,7 +423,7 @@ function TaskCardEditorDialog({
                   <legend>交付项 {index + 1}</legend>
                   <label><span>类型</span><select value={delivery.kind} onChange={(event) => setDeliveries((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, kind: event.currentTarget.value as ExpectedDelivery["kind"] } : item))}><option value="image">图片</option><option value="presentation">演示文稿</option><option value="document">文档</option><option value="archive">压缩包</option><option value="other">其他</option></select></label>
                   <label><span>角色</span><input required maxLength={128} value={delivery.role} onChange={(event) => setDeliveries((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, role: event.currentTarget.value } : item))} /></label>
-                  <label><span>MIME（逗号分隔）</span><input required value={delivery.accepted_mime_types.join(", ")} onChange={(event) => setDeliveries((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, accepted_mime_types: event.currentTarget.value.split(",") } : item))} /></label>
+                  <label><span>文件格式（逗号分隔）</span><input required value={delivery.accepted_mime_types.join(", ")} onChange={(event) => setDeliveries((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, accepted_mime_types: event.currentTarget.value.split(",") } : item))} /></label>
                   <label className="master-card-editor__checkbox"><input type="checkbox" checked={delivery.required} onChange={(event) => setDeliveries((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, required: event.currentTarget.checked } : item))} /><span>必需交付</span></label>
                   <button type="button" className="workbench-text-button" disabled={deliveries.length === 1} onClick={() => setDeliveries((current) => current.filter((_, itemIndex) => itemIndex !== index))}>移除此项</button>
                 </fieldset>
@@ -430,12 +433,12 @@ function TaskCardEditorDialog({
           </fieldset>
           {card.agent_type === "image" ? (
             <fieldset>
-              <legend>Image 参数</legend>
+              <legend>图片设置</legend>
               <div className="master-card-editor__grid">
                 <label><span>画幅</span><input pattern="[1-9][0-9]{0,3}:[1-9][0-9]{0,3}" placeholder="16:9" value={aspectRatio} onChange={(event) => setAspectRatio(event.currentTarget.value)} /></label>
                 <label><span>候选数量</span><input type="number" min={1} max={64} value={variants} onChange={(event) => setVariants(event.currentTarget.value ? event.currentTarget.valueAsNumber : "")} /></label>
                 <label className="master-card-editor__wide"><span>使用场景</span><input required maxLength={10_000} value={usageContext} onChange={(event) => setUsageContext(event.currentTarget.value)} /></label>
-                <label><span>品类 ID</span><input maxLength={128} value={categoryId} onChange={(event) => setCategoryId(event.currentTarget.value)} /></label>
+                <label><span>设计品类</span><input maxLength={128} value={categoryId} onChange={(event) => setCategoryId(event.currentTarget.value)} /></label>
                 <label><span>品类版本</span><input maxLength={64} value={categoryVersion} onChange={(event) => setCategoryVersion(event.currentTarget.value)} /></label>
               </div>
             </fieldset>
@@ -599,10 +602,11 @@ function ProposalCardGroup({
   const titleByCardId = new Map(
     proposal.work_items.flatMap((item) => item.task_card_ids.map((cardId) => [cardId, item.title] as const)),
   );
+  const planLabel = proposal.status === "SUPERSEDED" ? "历史执行计划" : "当前执行计划";
   return (
-    <section className="master-plan-cards" aria-label={`计划 r${proposal.revision} 任务卡`}>
+    <section className="master-plan-cards" aria-label={`${planLabel}任务卡`}>
       <header className="master-plan-cards__header">
-        <p className="workbench-eyebrow">PlanProposal · r{proposal.revision}</p>
+        <p className="workbench-eyebrow">{planLabel}</p>
         <div className="master-plan-cards__meta">
           <span className={`master-proposal__status master-proposal__status--${proposal.status.toLowerCase()}`}>
             {proposal.status === "PENDING_CONFIRMATION" ? "待确认" : proposal.status === "CONFIRMED" ? "已确认" : "已被替换"}
@@ -617,7 +621,7 @@ function ProposalCardGroup({
           <MiniTaskCard
             key={card.card_id}
             card={card}
-            title={titleByCardId.get(card.card_id) ?? card.card_id}
+            title={titleByCardId.get(card.card_id) ?? (card.agent_type === "image" ? "图片设计任务" : "演示文稿设计任务")}
             proposalStatus={proposal.status}
             instanceStatus={instanceStatuses[card.instance_id]}
             upstreamBlockedCount={
@@ -674,7 +678,7 @@ function TaskCardDetailDialog({
       onCancel={(event) => { event.preventDefault(); onClose(); }}
     >
       <header className="workbench-drawer__header">
-        <div><p className="workbench-eyebrow">PlanProposal · r{detail.proposal.revision}</p><h2 id="master-card-detail-title">任务卡详情</h2></div>
+        <div><p className="workbench-eyebrow">执行计划</p><h2 id="master-card-detail-title">任务卡详情</h2></div>
         <button type="button" className="workbench-icon-button" aria-label="关闭任务卡详情" onClick={onClose}><Icon name="close" /></button>
       </header>
       <div className="master-card-detail__body">
@@ -722,13 +726,43 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
       asset_refs: refs,
       envelope: envelope(operationId("master_message"), session.data?.thread_revision ?? 0),
     }),
-    onSuccess: (response) => {
-      queryClient.setQueryData(masterSessionQuery(taskId).queryKey, response);
+    onMutate: async ({ text, refs }) => {
+      const queryKey = masterSessionQuery(taskId).queryKey;
+      await queryClient.cancelQueries({ queryKey });
+      const previous = queryClient.getQueryData<MasterSessionResponse>(queryKey);
+      const optimisticId = `local_${operationId("message")}`;
+      if (previous) {
+        const sequence = previous.messages.reduce((highest, message) => Math.max(highest, message.sequence), 0) + 1;
+        const optimisticMessage: ContractMasterMessage = {
+          schema_version: "1.0",
+          message_id: optimisticId,
+          task_id: taskId,
+          sequence,
+          role: "user",
+          kind: "text",
+          content: text,
+          asset_refs: refs,
+          created_at: new Date().toISOString(),
+        };
+        queryClient.setQueryData<MasterSessionResponse>(queryKey, {
+          ...previous,
+          messages: [...previous.messages, optimisticMessage],
+        });
+      }
       setContent("");
       setSelectedAssets(new Set());
+      return { previous, text, refs };
+    },
+    onSuccess: (response) => {
+      queryClient.setQueryData(masterSessionQuery(taskId).queryKey, response);
       setNotice("消息已保存，Master 正在处理。");
     },
-    onError: (error) => {
+    onError: (error, _variables, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(masterSessionQuery(taskId).queryKey, context.previous);
+      }
+      setContent(context?.text ?? "");
+      setSelectedAssets(new Set(context?.refs.map((asset) => asset.asset_id) ?? []));
       if (error instanceof ApiError && error.code === "REVISION_CONFLICT") {
         setNotice("线程已更新，已重新读取；请确认内容后再次发送。");
         void queryClient.invalidateQueries({ queryKey: masterSessionQuery(taskId).queryKey });
@@ -767,14 +801,14 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
       if (result.confirmation) {
         queryClient.setQueryData(masterSessionQuery(taskId).queryKey, result.confirmation.session);
         void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
-        setNotice("计划已确认，该子任务实例正在启动；其余子任务可继续单独启动。");
+        setNotice("计划已确认，该子任务正在启动；其余子任务可继续单独启动。");
       } else {
-        setNotice("已受理，该子任务实例正在启动。");
+        setNotice("已受理，该子任务正在启动。");
       }
       void queryClient.invalidateQueries({ queryKey: instanceStartQuery(card.instance_id, true).queryKey });
     },
     onError: (error) => {
-      setPageAlert(error instanceof Error ? error.message : "实例启动失败，请重试。");
+      setPageAlert(error instanceof Error ? error.message : "子任务启动失败，请重试。");
       if (error instanceof ApiError && (error.code === "REVISION_CONFLICT" || error.code === "INVALID_STATE_TRANSITION")) {
         void queryClient.invalidateQueries({ queryKey: masterSessionQuery(taskId).queryKey });
       }
@@ -799,7 +833,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
       queryClient.setQueryData(masterSessionQuery(taskId).queryKey, response);
       const revised = response.latest_proposal;
       closeCardEditor();
-      setNotice(revised ? `任务卡已保存；计划已更新为 r${revised.revision}，可继续启动未启动任务。` : "任务卡修订已保存。");
+      setNotice(revised ? "任务卡已保存；计划已更新，可继续启动未启动任务。" : "任务卡更新已保存。");
     },
     onError: (error) => {
       if (error instanceof ApiError && error.code === "REVISION_CONFLICT") {
@@ -811,7 +845,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   });
 
   useEffect(() => {
-    threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    threadEndRef.current?.scrollIntoView({ behavior: "auto", block: "nearest" });
   }, [
     append.isPending,
     session.data?.messages.length,
@@ -830,19 +864,25 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   const refs = data.assets
     .filter((asset) => selectedAssets.has(asset.asset_id))
     .map(({ asset_id, manifest_relpath }) => ({ asset_id, manifest_relpath }));
+  const sendMessage = (): void => {
+    const text = content.trim();
+    if (!text || busy || append.isPending) return;
+    setNotice(null);
+    append.mutate({ text, refs });
+  };
 
   return (
     <section className="workbench-page master-workspace" aria-labelledby="master-title">
       <h1 id="master-title" className="sr-only">{data.task.title}</h1>
       <TaskTabs taskId={taskId} />
-      {pageAlert ? <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>实例启动未完成</strong><p>{pageAlert}</p></div></div> : null}
+      {pageAlert ? <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>子任务启动未完成</strong><p>{pageAlert}</p></div></div> : null}
       {session.isError ? <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>后台同步暂时失败</strong><p>已保留当前页面数据，系统会继续重试；也可稍后手动刷新。</p></div></div> : null}
       {data.thread.last_error && !busy ? (
         <div className="master-alert master-alert--error" role="alert"><Icon name="status" /><div><strong>本次智能分析未完成</strong><p>任务内容和对话记录已保留。请稍后重新发送；若持续失败，请联系支持人员。</p></div></div>
       ) : null}
       <div className="master-thread" role="log" aria-live="polite" aria-label="Master 消息记录">
         {timeline.length ? timeline.map((item) => item.kind === "message" ? (
-          <MessageCard key={`message-${item.message.message_id}`} message={item.message} />
+          <MessageCard key={`message-${item.message.role}-${item.message.sequence}`} message={item.message} />
         ) : (
           <ProposalCardGroup
             key={`proposal-${item.proposal.proposal_id}-r${item.proposal.revision}`}
@@ -861,14 +901,11 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
               setDetail({ proposal, card });
             }}
             onAdjust={(proposal) => {
-              setContent(`请调整计划 r${proposal.revision}：`);
+              setContent("请调整当前计划：");
               requestAnimationFrame(() => composerRef.current?.focus());
             }}
           />
         )) : <p className="master-thread__empty">尚无消息。发送目标或补充要求以开始规划。</p>}
-        {append.isPending && append.variables ? (
-          <PendingUserMessage content={append.variables.text} refs={append.variables.refs} />
-        ) : null}
         {append.isPending || busy ? <MasterThinking /> : null}
         <div ref={threadEndRef} aria-hidden="true" />
       </div>
@@ -876,10 +913,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         className="master-composer"
         onSubmit={(event) => {
           event.preventDefault();
-          const text = content.trim();
-          if (!text) return;
-          setNotice(null);
-          append.mutate({ text, refs });
+          sendMessage();
         }}
       >
         <ExpandableComposerTextarea
@@ -890,11 +924,17 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
           value={content}
           placeholder="补充目标、回答澄清，或说明需要调整的计划内容…"
           onChange={(event) => setContent(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              sendMessage();
+            }
+          }}
         />
         {data.assets.length ? (
           <fieldset><legend>引用已有资源（创建提交后不可追加上传）</legend><div>{data.assets.map((asset) => <label key={asset.asset_id}><input type="checkbox" checked={selectedAssets.has(asset.asset_id)} onChange={(event) => { const checked = event.currentTarget.checked; setSelectedAssets((current) => { const next = new Set(current); if (checked) next.add(asset.asset_id); else next.delete(asset.asset_id); return next; }); }} /><Icon name="file-check" /><span><strong>{asset.filename}</strong>{asset.description ? <small>{asset.description}</small> : null}</span></label>)}</div></fieldset>
         ) : null}
-        <footer><span>{content.length.toLocaleString("zh-CN")} / 20,000</span><button type="submit" className="workbench-primary-button" aria-label="发送 Master 消息" disabled={!content.trim() || busy || append.isPending}>{append.isPending ? "正在保存…" : busy ? "等待 Master 完成" : "发送消息"}</button></footer>
+        <footer><span>{content.length.toLocaleString("zh-CN")} / 20,000 · Enter 发送，Shift + Enter 换行</span><button type="submit" className="workbench-primary-button" aria-label="发送 Master 消息" disabled={!content.trim() || busy || append.isPending}>{append.isPending ? "正在保存…" : busy ? "等待 Master 完成" : "发送消息"}</button></footer>
         {notice ? <p className="master-composer__notice" role="status">{notice}</p> : null}
         {append.isError ? <p className="workbench-inline-error" role="alert">{append.error.message}</p> : null}
       </form>

@@ -17,14 +17,42 @@ const inboxKindLabel: Record<InboxItem["kind"], string> = {
   BUDGET_APPROVAL_REQUIRED: "预算审批",
   CONFIG_RESTART_REQUIRED: "需要重启",
   DELIVERY_REVIEW_REQUIRED: "交付复核",
-  INSTANCE_CRASHED: "实例中断",
+  INSTANCE_CRASHED: "子任务中断",
   INSTANCE_DELIVERY_REJECTED: "交付被拒",
-  INSTANCE_FAILED: "实例失败",
-  INSTANCE_SUCCEEDED: "实例完成",
+  INSTANCE_FAILED: "子任务失败",
+  INSTANCE_SUCCEEDED: "子任务完成",
   STAGE_READY: "阶段就绪",
   TASK_FAILED: "任务失败",
   TASK_SUCCEEDED: "任务完成",
 };
+
+const payloadFreeActions = new Set([
+  "approve_category_constraint",
+  "approve_final",
+  "approve_once",
+  "approve_skill_invocations",
+  "approve_taskbook",
+  "apply_clarification_safe_defaults",
+  "apply_taskbook_scope_boundaries",
+  "build_taskbook",
+  "choose_master",
+  "continue_clarification_after_budget_change",
+  "open_final_approval",
+  "prepare_style_direction",
+  "publish_bundle",
+  "regenerate_taskbook",
+  "render_candidates",
+  "resume_quality_inspection",
+  "retry_category_constraint",
+  "retry_skill_invocations",
+  "start_category_match",
+  "start_clarification",
+  "start_quality_inspection",
+]);
+
+export function canResolveApprovalInInbox(action: string): boolean {
+  return payloadFreeActions.has(action);
+}
 
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -55,6 +83,23 @@ function inboxRevision(item: InboxItem): number {
   return (item as InboxItem & { store_revision?: number }).store_revision ?? item.revision;
 }
 
+export function designerFacingNotification(value: string): string {
+  return value
+    .replace(/\bImage Agent\b/gi, "图片助手")
+    .replace(/\bPPT Agent\b/gi, "演示文稿助手")
+    .replace(/\bAgent\b/gi, "专业助手")
+    .replace(/正在\s+[A-Za-z][A-Za-z0-9_-]+\s+等待处理[。.\s]*/gi, "正在等待处理。")
+    .replace(/实例\s+instance_[A-Za-z0-9_-]+/gi, "该子任务")
+    .replace(/重试\s+attempt_[A-Za-z0-9_-]+/gi, "本次重试")
+    .replace(/分支\s+[A-Za-z][A-Za-z0-9_-]{7,}/gi, "设计分支")
+    .replace(/\b(?:work|stage|instance|card|proposal|attempt|approval|task|bundle|checkpoint)_[A-Za-z0-9_-]+\b/gi, "")
+    .replace(/\b[A-Za-z]+(?:_[A-Za-z0-9]+)+\b/g, "")
+    .replace(/\s+([，。；：])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/([\u3400-\u9fff])\s+([\u3400-\u9fff])/g, "$1$2")
+    .trim();
+}
+
 function ApprovalForm({
   details,
   onResolved,
@@ -62,30 +107,17 @@ function ApprovalForm({
   details: ApprovalDetailResponse;
   onResolved: () => void;
 }): React.JSX.Element {
-  const [action, setAction] = useState(details.payload.available_actions[0] ?? "");
-  const [payloadText, setPayloadText] = useState("{}");
-  const [actorId, setActorId] = useState("human_operator");
+  const actions = details.payload.available_actions.filter(canResolveApprovalInInbox);
+  const [action, setAction] = useState(actions[0] ?? "");
   const [feedback, setFeedback] = useState<string | null>(null);
   const resolve = useMutation({
     mutationFn: (decision: "APPROVED" | "REJECTED") => {
-      let payload: Record<string, unknown>;
-      try {
-        const parsed: unknown = JSON.parse(payloadText || "{}");
-        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-          throw new Error("动作参数必须是 JSON 对象。");
-        }
-        payload = parsed as Record<string, unknown>;
-      } catch (error) {
-        throw error instanceof Error && error.message === "动作参数必须是 JSON 对象。"
-          ? error
-          : new Error("动作参数不是有效的 JSON，请检查后重试。");
-      }
       return api.resolveApproval(details.approval.approval_id, {
         decision,
         action: decision === "APPROVED" ? action : null,
-        payload,
+        payload: {},
         operation_id: operationId("approval"),
-        envelope: commandEnvelope(actorId, details.approval_revision),
+        envelope: commandEnvelope("human_operator", details.approval_revision),
       });
     },
     onSuccess: () => {
@@ -96,7 +128,6 @@ function ApprovalForm({
       setFeedback(error.message || "提交失败，请重试。");
     },
   });
-  const actions = details.payload.available_actions;
   return (
     <form
       className="inbox-approval-form"
@@ -108,31 +139,19 @@ function ApprovalForm({
         resolve.mutate(decision);
       }}
     >
-      <div className="inbox-approval-form__grid">
-        <label className="workbench-field">
-          <span>推进动作</span>
-          <select value={action} disabled={!actions.length} onChange={(event) => setAction(event.currentTarget.value)}>
-            {actions.map((item) => <option key={item} value={item}>{actionLabel(item)} · {item}</option>)}
-          </select>
-        </label>
-        <label className="workbench-field">
-          <span>操作人 ID</span>
-          <input
-            value={actorId}
-            pattern="[A-Za-z][A-Za-z0-9_\-]{0,127}"
-            required
-            onChange={(event) => setActorId(event.currentTarget.value)}
-          />
-        </label>
-        <label className="workbench-field inbox-approval-form__payload">
-          <span>动作参数（JSON）</span>
-          <textarea rows={3} spellCheck={false} value={payloadText} onChange={(event) => setPayloadText(event.currentTarget.value)} />
-          <small>只填写当前动作需要的字段；无参数时保留 {"{}"}。</small>
-        </label>
-      </div>
+      {actions.length ? (
+        <div className="inbox-approval-form__grid">
+          <label className="workbench-field">
+            <span>推进动作</span>
+            <select value={action} onChange={(event) => setAction(event.currentTarget.value)}>
+              {actions.map((item) => <option key={item} value={item}>{actionLabel(item)}</option>)}
+            </select>
+          </label>
+        </div>
+      ) : <p>此项需要在专业工作台中查看设计内容并完成选择。</p>}
       <div className="workbench-dialog-actions">
         <button className="workbench-secondary-button" type="submit" data-decision="REJECTED" disabled={resolve.isPending}>拒绝</button>
-        <button className="workbench-primary-button" type="submit" data-decision="APPROVED" disabled={resolve.isPending}>{resolve.isPending ? "正在提交…" : "批准并推进"}</button>
+        <button className="workbench-primary-button" type="submit" data-decision="APPROVED" disabled={resolve.isPending || !actions.length}>{resolve.isPending ? "正在提交…" : "批准并推进"}</button>
       </div>
       {feedback ? <p className={resolve.isError ? "workbench-inline-error" : "master-composer__notice"} role={resolve.isError ? "alert" : "status"}>{feedback}</p> : null}
     </form>
@@ -152,6 +171,7 @@ function InboxCard({
   const queryClient = useQueryClient();
   const [detailsOpen, setDetailsOpen] = useState(selected);
   const approvalId = item.approval_id ?? "";
+  const instanceId = item.instance_id ?? "";
   const approval = useQuery({
     ...approvalDetailQuery(approvalId),
     enabled: Boolean(approvalId && (selected || detailsOpen)),
@@ -181,21 +201,16 @@ function InboxCard({
         </div>
         <time dateTime={item.created_at}>{formatTime(item.created_at)}</time>
       </header>
-      <h3>{item.title}</h3>
-      <p className="inbox-card__message">{item.message}</p>
-      <dl className="inbox-card__meta">
-        <div><dt>任务</dt><dd>{item.task_id}</dd></div>
-        <div><dt>实例</dt><dd>{item.instance_id ?? "—"}</dd></div>
-        <div><dt>队列序号</dt><dd>{item.sequence}</dd></div>
-      </dl>
+      <h3>{designerFacingNotification(item.title)}</h3>
+      <p className="inbox-card__message">{designerFacingNotification(item.message)}</p>
       <div className="inbox-card__actions">
         {item.status === "UNREAD" ? (
           <button className="workbench-secondary-button" type="button" disabled={markRead.isPending} onClick={() => markRead.mutate()}>
             <Icon name="file-check" />{markRead.isPending ? "正在保存…" : markRead.isError ? "重试标为已读" : "标为已读"}
           </button>
         ) : null}
-        {item.instance_id ? (
-          <Link className="workbench-secondary-button" to={`/instances/${encodeURIComponent(item.instance_id)}`}>查看实例</Link>
+        {instanceId ? (
+          <Link className="workbench-secondary-button" to={`/instances/${encodeURIComponent(instanceId)}`}>打开专业工作台</Link>
         ) : null}
       </div>
       {item.approval_id ? (
@@ -218,7 +233,6 @@ function InboxCard({
           ) : null}
           {details ? (
             <>
-              <pre>{JSON.stringify(details.payload.context, null, 2)}</pre>
               {pending ? (
                 <ApprovalForm
                   details={details}
@@ -248,13 +262,7 @@ export function InboxPage(): React.JSX.Element {
   };
   return (
     <section className="workbench-page inbox-page" aria-labelledby="inbox-title">
-      <header className="workbench-page__header">
-        <div>
-          <p className="workbench-eyebrow">FIFO 队列</p>
-          <h1 id="inbox-title">收件箱</h1>
-          <p>按事件顺序处理人工审批与运行通知，已读和已处理分别记录。</p>
-        </div>
-      </header>
+      <h1 id="inbox-title" className="sr-only">收件箱</h1>
       {inbox.isPending ? <div className="task-projection__loading" role="status">正在读取收件箱…</div> : null}
       {inbox.isError ? (
         <div className="task-projection__error" role="alert">
@@ -267,7 +275,7 @@ export function InboxPage(): React.JSX.Element {
         items.length ? (
           <>
             <div className="inbox-page__heading">
-              <h2>按到达顺序处理</h2>
+              <h2>待处理通知</h2>
               <span className="delivery-count">{pendingCount} 待处理</span>
             </div>
             <div className="inbox-page__list">

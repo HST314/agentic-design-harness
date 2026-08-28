@@ -147,7 +147,7 @@ test("global settings previews and publishes secret-free Harness and Image defau
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole("heading", { name: "全局设置" })).toBeVisible();
   await expect(page.getByRole("link", { name: "全局设置" })).toBeVisible();
-  await page.getByRole("tab", { name: /子 Agent 设置/ }).click();
+  await page.getByRole("tab", { name: /专业助手设置/ }).click();
   await expect(page.getByLabel("品类约束库")).toHaveValue("off");
   await expect(page.getByLabel("风格方向库")).toHaveValue("off");
   await page.getByLabel("候选并发数").fill("4");

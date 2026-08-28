@@ -6,6 +6,7 @@ import type {
 } from "../../api/generated-contracts";
 import {
   buildMasterTimeline,
+  designerFacingMessage,
   isPptLaunchBlocked,
   startStageLabel,
 } from "./MasterThreadPage";
@@ -80,6 +81,28 @@ describe("buildMasterTimeline", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "proposal" });
+  });
+});
+
+describe("designerFacingMessage", () => {
+  test("removes revisions and internal identifiers from system copy", () => {
+    const input = message("m4", 4);
+    input.role = "system";
+    input.content = "PlanProposal · r2：任务卡 card_direction_a 已保存为 r3，计划已更新为 r2，实例 instance_abc123 正在运行。";
+
+    const value = designerFacingMessage(input);
+
+    expect(value).toContain("执行计划");
+    expect(value).toContain("该子任务");
+    expect(value).not.toMatch(/PlanProposal|card_|instance_|\br\d+\b/);
+  });
+
+  test("keeps the designer's own message unchanged", () => {
+    const input = message("m5", 5);
+    input.role = "user";
+    input.kind = "text";
+    input.content = "请保留画面里的 r2 标记。";
+    expect(designerFacingMessage(input)).toBe(input.content);
   });
 });
 

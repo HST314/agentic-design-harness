@@ -250,7 +250,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page.route("**/api/v1/tasks/task_master_e2e/master/messages", async (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON() as { content: string; asset_refs: unknown[]; envelope: { expected_revision: number } };
-      expect(body.content).toContain("调整计划 r1");
+      expect(body.content).toContain("调整当前计划");
       expect(body.asset_refs).toHaveLength(1);
       expect(body.envelope.expected_revision).toBe(threadRevision);
       messages.push({ schema_version: "1.0", message_id: "message_adjust", task_id: "task_master_e2e", sequence: 3, role: "user", kind: "text", content: body.content, asset_refs: [{ asset_id: "asset_brief", manifest_relpath: "inputs/manifests/asset_brief.json" }], created_at: "2026-08-22T10:03:00Z" });
@@ -325,22 +325,28 @@ test("shows plan cards inside the message flow and sends revision feedback with 
   await expect(page.locator(".workbench-topbar")).toContainText("秋季发布会主视觉");
   await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("已生成两条视觉探索路径");
 
-  const group = page.getByRole("region", { name: "计划 r1 任务卡" });
+  const group = page.getByRole("region", { name: "当前执行计划任务卡" });
   await expect(group).toBeVisible();
   await expect(group.getByText("图片", { exact: true }).first()).toBeVisible();
   await expect(group.getByRole("heading", { name: "自然光主视觉方向" })).toBeVisible();
   await expect(group.getByRole("button", { name: "启动 自然光主视觉方向" })).toBeVisible();
   await expect(group.getByRole("button", { name: "查看详情 自然光主视觉方向" })).toBeVisible();
   await expect(group).not.toContainText("work_");
+  await expect(group).not.toContainText("PlanProposal");
+  await expect(group).not.toContainText(/r\d+/);
   await expect(group).not.toContainText("必需");
   await expect(page.getByRole("heading", { name: "执行计划预览" })).toHaveCount(0);
 
   await group.getByRole("button", { name: "要求调整" }).click();
-  await expect(page.getByLabel("发送给 Master")).toHaveValue("请调整计划 r1：");
-  await page.getByLabel("发送给 Master").fill("请调整计划 r1：降低整体饱和度。");
+  await expect(page.getByLabel("发送给 Master")).toHaveValue("请调整当前计划：");
+  await page.getByLabel("发送给 Master").press("Shift+Enter");
+  await page.getByLabel("发送给 Master").pressSequentially("降低整体饱和度。");
+  await expect(page.getByLabel("发送给 Master")).toHaveValue("请调整当前计划：\n降低整体饱和度。");
   await page.getByRole("checkbox", { name: /brief\.md/ }).check();
-  await page.locator(".master-composer button[type='submit']").click();
+  const firstMessage = await page.getByText("为秋季发布会生成主视觉。").elementHandle();
+  await page.getByLabel("发送给 Master").press("Enter");
   await expect(page.getByLabel("用户消息，正在发送")).toContainText("降低整体饱和度");
+  expect(await firstMessage?.evaluate((element) => element.isConnected)).toBe(true);
   await expect(page.getByText("Master 正在分析与思考")).toBeVisible();
   await expect(page.getByText("消息已保存，Master 正在处理。")).toBeVisible();
   await expect(page.getByText("等待 Master 完成")).toBeVisible();
@@ -348,10 +354,10 @@ test("shows plan cards inside the message flow and sends revision feedback with 
 
 test("launches one card from the chat flow and streams its live start status", async ({ page }) => {
   await page.goto("/tasks/task_master_e2e/master");
-  const group = page.getByRole("region", { name: "计划 r1 任务卡" });
+  const group = page.getByRole("region", { name: "当前执行计划任务卡" });
   await group.getByRole("button", { name: "启动 自然光主视觉方向" }).click();
 
-  await expect(page.getByText("计划已确认，该子任务实例正在启动；其余子任务可继续单独启动。")).toBeVisible();
+  await expect(page.getByText("计划已确认，该子任务正在启动；其余子任务可继续单独启动。")).toBeVisible();
   await expect(group.getByRole("status")).toContainText("准备运行环境");
   await expect(group.getByText("已就绪")).toBeVisible();
   await expect(group.getByRole("button", { name: "启动 自然光主视觉方向" })).toHaveCount(0);
@@ -360,7 +366,7 @@ test("launches one card from the chat flow and streams its live start status", a
 
 test("locks the started card while its unstarted peer remains editable", async ({ page }) => {
   await page.goto("/tasks/task_master_e2e/master");
-  const firstPlan = page.getByRole("region", { name: "计划 r1 任务卡" });
+  const firstPlan = page.getByRole("region", { name: "当前执行计划任务卡" });
   await firstPlan.getByRole("button", { name: "启动 自然光主视觉方向" }).click();
   await expect(firstPlan.getByText("已就绪")).toBeVisible();
 
@@ -376,8 +382,8 @@ test("locks the started card while its unstarted peer remains editable", async (
   await editor.getByLabel("目标").fill("生成克制、低饱和的棚拍光主视觉方向。");
   await editor.getByRole("button", { name: "保存为新修订" }).click();
 
-  await expect(page.getByRole("status").filter({ hasText: "任务卡已保存；计划已更新为 r2" })).toBeVisible();
-  const revisedPlan = page.getByRole("region", { name: "计划 r2 任务卡" });
+  await expect(page.getByRole("status").filter({ hasText: "任务卡已保存；计划已更新" })).toBeVisible();
+  const revisedPlan = page.getByRole("region", { name: "当前执行计划任务卡" });
   await revisedPlan.getByRole("button", { name: "查看详情 自然光主视觉方向" }).click();
   detail = page.getByRole("dialog", { name: "任务卡详情" });
   await expect(detail.getByRole("button", { name: "编辑任务卡 自然光主视觉方向" })).toHaveCount(0);
@@ -421,7 +427,7 @@ test("auto mode still waits for an explicit per-card launch click", async ({ pag
   });
 
   await page.goto("/tasks/task_master_e2e/master");
-  const group = page.getByRole("region", { name: "计划 r1 任务卡" });
+  const group = page.getByRole("region", { name: "当前执行计划任务卡" });
   await expect(group.getByRole("button", { name: "启动 自然光主视觉方向" })).toBeVisible();
   expect(confirmationRequests).toBe(0);
 
@@ -435,7 +441,8 @@ test("edits a task card from the detail dialog and keeps every plan version in t
   await page.getByRole("button", { name: "查看详情 自然光主视觉方向" }).click();
   const detail = page.getByRole("dialog", { name: "任务卡详情" });
   await expect(detail).toBeVisible();
-  await expect(detail).toContainText("TaskCard · r1");
+  await expect(detail).not.toContainText("TaskCard");
+  await expect(detail).not.toContainText(/r\d+/);
   await expect(detail).toContainText("发布会主屏");
 
   await detail.getByRole("button", { name: "编辑任务卡 自然光主视觉方向" }).click();
@@ -446,16 +453,16 @@ test("edits a task card from the detail dialog and keeps every plan version in t
   await editor.getByLabel("候选数量").fill("2");
   await editor.getByRole("button", { name: "保存为新修订" }).click();
 
-  await expect(page.getByRole("status").filter({ hasText: "任务卡已保存；计划已更新为 r2" })).toBeVisible();
-  const oldGroup = page.getByRole("region", { name: "计划 r1 任务卡" });
-  const newGroup = page.getByRole("region", { name: "计划 r2 任务卡" });
+  await expect(page.getByRole("status").filter({ hasText: "任务卡已保存；计划已更新" })).toBeVisible();
+  const oldGroup = page.getByRole("region", { name: "历史执行计划任务卡" });
+  const newGroup = page.getByRole("region", { name: "当前执行计划任务卡" });
   await expect(oldGroup).toBeVisible();
   await expect(oldGroup).toContainText("已被替换");
   await expect(oldGroup.getByRole("button", { name: "启动 自然光主视觉方向" })).toHaveCount(0);
   await expect(newGroup).toBeVisible();
   await newGroup.getByRole("button", { name: "查看详情 自然光主视觉方向" }).click();
   await expect(page.getByRole("dialog", { name: "任务卡详情" })).toContainText("生成低饱和、克制的自然光主视觉。");
-  await expect(page.getByRole("dialog", { name: "任务卡详情" })).toContainText("TaskCard · r2");
+  await expect(page.getByRole("dialog", { name: "任务卡详情" })).not.toContainText("TaskCard");
 });
 
 test("keeps the permanent thread usable at supported desktop widths", async ({ page }) => {

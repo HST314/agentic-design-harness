@@ -61,12 +61,8 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
-function shortId(value: string): string {
-  return value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-5)}` : value;
-}
-
 function agentLabel(agentType: "image" | "ppt"): string {
-  return agentType === "image" ? "Image" : "PPT";
+  return agentType === "image" ? "图片" : "PPT";
 }
 
 function detailsSearch(item: ContractWorkItemProjection): string {
@@ -114,12 +110,11 @@ function WorkItemCard({
     <>
       <div>
         <h3>{item.title}</h3>
-        <code title={item.work_item_id}>{shortId(item.work_item_id)}</code>
       </div>
       <dl className="task-card__facts">
-        <div><dt>阶段</dt><dd>S{item.stage.position}</dd></div>
+        <div><dt>阶段</dt><dd>第 {item.stage.position} 阶段</dd></div>
         <div><dt>依赖</dt><dd>{dependencyText}</dd></div>
-        <div><dt>实例</dt><dd>{item.instance_ids.length}</dd></div>
+        <div><dt>执行</dt><dd>{item.instance_ids.length}</dd></div>
         <div><dt>重试</dt><dd>{item.attempts.length}</dd></div>
       </dl>
       {attention ? <p className="task-card__attention"><Icon name="status" />{attention}</p> : null}
@@ -153,7 +148,7 @@ function WorkItemCard({
         <Link
           className="task-card__entry"
           to={workbenchPath(item)}
-          aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，进入 ${item.agent_type === "image" ? "Image" : "PPT"} 工作台`}
+          aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，进入 ${item.agent_type === "image" ? "图片" : "PPT"}工作台`}
         >
           {cardBody}
         </Link>
@@ -232,7 +227,7 @@ function StageDependency({ stage, stages }: {
     <span>
       依赖 {stage.depends_on.map((stageId) => {
         const dependency = stageById.get(stageId);
-        return dependency ? `S${dependency.position} ${agentLabel(dependency.type)}` : stageId;
+        return dependency ? `第 ${dependency.position} 阶段 · ${agentLabel(dependency.type)}` : "前置阶段";
       }).join("、")}
     </span>
   );
@@ -256,7 +251,7 @@ function PlanView({ stages, items, ...cardActions }: {
             <header>
               <div className="task-plan-stage__marker" aria-hidden="true">{stage.position}</div>
               <div>
-                <p className="workbench-eyebrow">Stage {stage.position}</p>
+                <p className="workbench-eyebrow">第 {stage.position} 阶段</p>
                 <h2 id={`plan-stage-${stage.stage_id}`}>{agentLabel(stage.type)} 设计阶段</h2>
               </div>
               <span className={`task-stage-status${stage.available ? "" : " task-stage-status--unavailable"}`}>
@@ -339,7 +334,7 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
   return (
     <section className={`workbench-page task-projection task-projection--${view}`} aria-label={title}>
       <TaskTabs taskId={taskId} />
-      {projection.isPending ? <div className="task-projection__loading" role="status">正在构建 WorkItem 投影…</div> : null}
+      {projection.isPending ? <div className="task-projection__loading" role="status">正在读取子任务…</div> : null}
       {projection.isError ? <div className="task-projection__error" role="alert"><strong>无法读取子任务投影</strong><span>{projection.error.message}</span><button type="button" className="workbench-secondary-button" onClick={() => void projection.refetch()}>重新读取</button></div> : null}
       {projection.data ? (
         <>
@@ -350,8 +345,8 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
               ))}
             </div>
             <div className="task-projection__filters">
-              <label><span>Agent</span><select value={agent} onChange={(event) => setAgent(event.currentTarget.value as typeof agent)}><option value="all">全部</option><option value="image">Image</option><option value="ppt">PPT</option></select></label>
-              <label><span>Stage</span><select value={stageId} onChange={(event) => setStageId(event.currentTarget.value)}><option value="all">全部</option>{projection.data.stages.map((stage) => <option value={stage.stage_id} key={stage.stage_id}>S{stage.position} · {agentLabel(stage.type)}</option>)}</select></label>
+              <label><span>创作类型</span><select value={agent} onChange={(event) => setAgent(event.currentTarget.value as typeof agent)}><option value="all">全部</option><option value="image">图片</option><option value="ppt">PPT</option></select></label>
+              <label><span>执行阶段</span><select value={stageId} onChange={(event) => setStageId(event.currentTarget.value)}><option value="all">全部</option>{projection.data.stages.map((stage) => <option value={stage.stage_id} key={stage.stage_id}>第 {stage.position} 阶段 · {agentLabel(stage.type)}</option>)}</select></label>
             </div>
           </div>
           {projection.data.items.length === 0 ? (
@@ -381,28 +376,27 @@ function WorkItemDetailsBody({ taskId, workItemId, standalone = false }: {
       <div className="work-item-detail__identity">
         <div><span className="task-card__agent">{agentLabel(item.agent_type)}</span><span>{item.required ? "必需" : "可选"}</span></div>
         <h2>{item.title}</h2>
-        <code>{item.work_item_id}</code>
         <span className={`task-status task-status--${item.business_status.toLowerCase()}`}><span aria-hidden="true" />{businessStatusLabel[item.business_status]}</span>
       </div>
       <dl className="workbench-definition-list">
-        <div><dt>原始状态</dt><dd><code>{item.raw_status}</code> · {rawStatusLabel[item.raw_status] ?? item.raw_status}</dd></div>
-        <div><dt>Stage</dt><dd>S{item.stage.position} · {item.stage.stage_id}</dd></div>
-        <div><dt>阶段依赖</dt><dd>{item.stage.depends_on.length ? item.stage.depends_on.join("、") : "无"}</dd></div>
-        <div><dt>子任务依赖</dt><dd>{item.depends_on.length ? item.depends_on.join("、") : "无"}</dd></div>
-        <div><dt>当前实例</dt><dd>{item.current_instance?.instance_id ?? "未创建"}</dd></div>
-        <div><dt>实例状态</dt><dd>{item.current_instance ? `${rawStatusLabel[item.current_instance.status] ?? item.current_instance.status} · ${item.current_instance.approval_mode === "human" ? "人工审批" : "Master 审批"}` : "无"}</dd></div>
-        <div><dt>实例历史</dt><dd>{item.instance_ids.length} 个实例 · {item.attempts.length} 次自动重试</dd></div>
+        <div><dt>当前进度</dt><dd>{rawStatusLabel[item.raw_status] ?? "处理中"}</dd></div>
+        <div><dt>执行阶段</dt><dd>第 {item.stage.position} 阶段 · {agentLabel(item.stage.type)}</dd></div>
+        <div><dt>阶段依赖</dt><dd>{item.stage.depends_on.length ? `${item.stage.depends_on.length} 个前置阶段` : "无"}</dd></div>
+        <div><dt>子任务依赖</dt><dd>{item.depends_on.length ? `${item.depends_on.length} 项前置任务` : "无"}</dd></div>
+        <div><dt>专业工作台</dt><dd>{item.current_instance ? "已创建" : "未创建"}</dd></div>
+        <div><dt>工作台状态</dt><dd>{item.current_instance ? `${rawStatusLabel[item.current_instance.status] ?? "处理中"} · ${item.current_instance.approval_mode === "human" ? "人工审批" : "统筹助手审批"}` : "无"}</dd></div>
+        <div><dt>执行记录</dt><dd>{item.instance_ids.length} 次执行 · {item.attempts.length} 次自动重试</dd></div>
         <div><dt>已验证交付</dt><dd>{item.delivery_count} 个</dd></div>
         <div><dt>最近变化</dt><dd><time dateTime={item.updated_at}>{formatTime(item.updated_at)}</time></dd></div>
       </dl>
       {item.pending_approvals.length ? (
-        <section className="work-item-detail__section" aria-labelledby="work-item-approvals"><h3 id="work-item-approvals">待处理审批</h3><ul>{item.pending_approvals.map((approval) => <li key={approval.approval_id}><Icon name="status" /><span><strong>{approvalLabel[approval.kind] ?? approval.kind}</strong><small>{approval.owner === "human" ? "人工处理" : "Master 处理"} · {shortId(approval.approval_id)}</small></span></li>)}</ul></section>
+        <section className="work-item-detail__section" aria-labelledby="work-item-approvals"><h3 id="work-item-approvals">待处理审批</h3><ul>{item.pending_approvals.map((approval) => <li key={approval.approval_id}><Icon name="status" /><span><strong>{approvalLabel[approval.kind] ?? "任务审批"}</strong><small>{approval.owner === "human" ? "等待人工处理" : "等待统筹助手处理"}</small></span></li>)}</ul></section>
       ) : null}
       {item.attempts.length ? (
-        <section className="work-item-detail__section" aria-labelledby="work-item-attempts"><h3 id="work-item-attempts">重试记录</h3><ol>{item.attempts.map((attempt) => <li key={attempt.attempt_id}><code>{shortId(attempt.attempt_id)}</code><span>{attempt.status}</span></li>)}</ol></section>
+        <section className="work-item-detail__section" aria-labelledby="work-item-attempts"><h3 id="work-item-attempts">重试记录</h3><ol>{item.attempts.map((attempt, index) => <li key={attempt.attempt_id}><span>第 {index + 1} 次重试</span><span>{rawStatusLabel[attempt.status] ?? "处理中"}</span></li>)}</ol></section>
       ) : null}
       {item.alerts.length ? (
-        <section className="work-item-detail__alerts" aria-label="子任务提醒">{item.alerts.map((alert) => <div className={`work-item-alert work-item-alert--${alert.severity}`} key={`${alert.code}-${alert.message}`}><Icon name="status" /><span><strong>{alert.code}</strong>{alert.message}</span></div>)}</section>
+        <section className="work-item-detail__alerts" aria-label="子任务提醒">{item.alerts.map((alert) => <div className={`work-item-alert work-item-alert--${alert.severity}`} key={`${alert.code}-${alert.message}`}><Icon name="status" /><span>{alert.message}</span></div>)}</section>
       ) : null}
       {standalone ? <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}>返回看板</Link> : <Link className="work-item-detail__deep-link" to={`/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}`}>打开完整详情</Link>}
     </div>
