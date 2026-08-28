@@ -162,6 +162,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                             continue
                         result = self._resume_start(path, None)
                     elif intent["kind"] in {"START_INSTANCE", "RESTART_INSTANCE"}:
+                        if defer_start_operations:
+                            results.append(
+                                {
+                                    "operation_id": operation_id,
+                                    "status": "PENDING",
+                                    "result": None,
+                                }
+                            )
+                            continue
                         result = self._resume_instance_operation(path)
                     elif intent["kind"] == "CANCEL_TASK":
                         result = self._resume_cancel_task(path, None)
@@ -386,10 +395,19 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
     def _run_pending_starts(self) -> None:
         for path in sorted(self.intent_root.glob("*.json")):
             intent = read_json(path)
-            if intent.get("kind") != "START_READY_INSTANCES":
+            kind = intent.get("kind")
+            if kind not in {
+                "START_READY_INSTANCES",
+                "START_INSTANCE",
+                "RESTART_INSTANCE",
+            }:
                 continue
-            intent = self._migrate_start_intent(path, intent)
-            if intent["state"] not in {"QUEUED", "RUNNING"}:
+            if kind == "START_READY_INSTANCES":
+                intent = self._migrate_start_intent(path, intent)
+                resumable_states = {"QUEUED", "RUNNING"}
+            else:
+                resumable_states = {"PREPARED"}
+            if intent["state"] not in resumable_states:
                 continue
             task_id = intent["request"]["task_id"]
             with (
@@ -400,8 +418,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 ),
             ):
                 latest = read_json(path)
-                if latest["state"] in {"QUEUED", "RUNNING"}:
+                if kind == "START_READY_INSTANCES" and latest["state"] in {
+                    "QUEUED",
+                    "RUNNING",
+                }:
                     self._resume_start(path, None)
+                elif kind in {"START_INSTANCE", "RESTART_INSTANCE"} and latest[
+                    "state"
+                ] == "PREPARED":
+                    self._resume_instance_operation(path)
 
     def cancel_instance(
         self,

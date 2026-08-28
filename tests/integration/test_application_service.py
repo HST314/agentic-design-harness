@@ -9,6 +9,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.adapters import (
     AdapterCommandResult,
@@ -28,7 +29,7 @@ from harness.services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from harness.services.runtime_config_observability import RuntimeConfigObservability
 from harness.services.supervisor import ProcessSupervisor
 from harness.services.task_config import TaskConfigService
-from harness.storage.atomic import read_json
+from harness.storage.atomic import atomic_write_json, read_json
 from runtime_helpers import (
     build_config_snapshot,
     build_service,
@@ -245,6 +246,45 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         recovered = self.application.recover()
         self.assertEqual(recovered[0]["status"], "RECOVERED")
         self.assertIsNotNone(self.store.plan.get("t_recover_application", "t_recover_application"))
+
+    def test_startup_defers_prepared_instance_start_to_background_runner(self) -> None:
+        intent_path = self.application._intent_path("recover_deferred_instance_start")
+        atomic_write_json(
+            intent_path,
+            {
+                "schema_version": "1.0",
+                "kind": "START_INSTANCE",
+                "operation_id": "recover_deferred_instance_start",
+                "request_sha256": "0" * 64,
+                "request": {
+                    "task_id": "t_deferred_instance_start",
+                    "instance_id": "i_image_1",
+                    "envelope": {},
+                },
+                "state": "PREPARED",
+                "prepared_at": "2026-08-28T03:00:00Z",
+                "result": None,
+            },
+        )
+
+        with patch.object(self.application, "_resume_instance_operation") as resume:
+            recovered = self.application.recover(defer_start_operations=True)
+
+            resume.assert_not_called()
+            self.assertEqual(
+                recovered,
+                [
+                    {
+                        "operation_id": "recover_deferred_instance_start",
+                        "status": "PENDING",
+                        "result": None,
+                    }
+                ],
+            )
+
+            self.application._run_pending_starts()
+
+        resume.assert_called_once_with(intent_path)
 
     def test_invalid_plan_is_rejected_before_an_intent_is_written(self) -> None:
         created = create_task(self.commands, "t_invalid_application")
