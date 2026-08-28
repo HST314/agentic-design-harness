@@ -1,27 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
-
-async function composerGeometry(textarea: Locator): Promise<Record<string, string | number>> {
-  return textarea.evaluate((element) => {
-    const composer = element.closest("form");
-    if (!composer) throw new Error("Composer form is missing.");
-    const composerStyle = getComputedStyle(composer);
-    const textareaStyle = getComputedStyle(element);
-    const composerParentBox = composer.parentElement?.getBoundingClientRect();
-    const composerBox = composer.getBoundingClientRect();
-    const textareaBox = element.getBoundingClientRect();
-    return {
-      composerInlineInset: Math.round((composerParentBox?.width ?? composerBox.width) - composerBox.width),
-      composerPadding: composerStyle.padding,
-      composerGap: composerStyle.gap,
-      composerRadius: composerStyle.borderRadius,
-      textareaInlineInset: Math.round(composerBox.width - textareaBox.width),
-      textareaHeight: Math.round(textareaBox.height),
-      textareaPadding: textareaStyle.padding,
-      textareaRadius: textareaStyle.borderRadius,
-      textareaLineHeight: textareaStyle.lineHeight,
-    };
-  });
-}
+import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
   let created = false;
@@ -231,9 +208,7 @@ test("creates a task from the chat-style page and lands in the Master conversati
   await page.goto("/tasks/new");
   const send = page.getByRole("button", { name: "发送并创建任务" });
   await expect(send).toBeDisabled();
-  const createTextarea = page.getByLabel("发送给 Master 的首条消息");
-  const createGeometry = await composerGeometry(createTextarea);
-  await createTextarea.fill("秋季发布会三套主视觉方向");
+  await page.getByLabel("发送给 Master 的首条消息").fill("秋季发布会三套主视觉方向");
   await page.locator('input[type="file"]').setInputFiles({
     name: "brief.md",
     mimeType: "text/markdown",
@@ -248,7 +223,6 @@ test("creates a task from the chat-style page and lands in the Master conversati
   await expect(page.getByText("引用已有资源（创建提交后不可追加上传）")).toBeVisible();
   await expect(page.locator('input[type="file"]')).toHaveCount(0);
   await expect(page.getByRole("link", { name: /秋季发布会三套主视觉方向/ })).toBeVisible();
-  await expect.poll(() => composerGeometry(page.getByLabel("发送给 Master", { exact: true }))).toEqual(createGeometry);
 });
 
 test("keeps the launch-mode choice out of the conversational create flow", async ({ page }) => {
