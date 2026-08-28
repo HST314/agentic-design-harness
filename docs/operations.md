@@ -4,7 +4,7 @@
 
 ## 支持边界与启动
 
-支持 Windows 与 Linux 的单进程、单写者、本地文件系统部署。Linux 使用文件锁、`fsync` 和进程组；Windows 使用字节锁、刷新写入、原子替换和 Job Object。两者都校验进程创建身份、防止 PID 复用，并在取消或 Harness 退出时终止完整 Agent 进程树。
+支持 Windows 与 Linux 的单进程、单写者、本地文件系统部署。Linux 使用文件锁、`fsync`、进程组和 Landlock 写入白名单；Windows 使用字节锁、刷新写入、原子替换、Job Object 和托管 Python 子进程写路径审计。两者都校验进程创建身份、防止 PID 复用，并在取消或 Harness 退出时终止完整 Agent 进程树。
 
 ```bash
 python3 scripts/dev.py doctor
