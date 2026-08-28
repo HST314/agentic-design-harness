@@ -364,6 +364,8 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
   const [removingId, setRemovingId] = useState<string | null>(null);
   const controllers = useRef(new Map<string, AbortController>());
   const autoSubmitFired = useRef(false);
+  const expectedAutoAssets = useRef(initialState?.pendingUploads?.length ?? 0);
+  const mounted = useRef(false);
   const intake = useQuery(taskIntakeQuery(taskId));
   const revisionRef = useRef(0);
 
@@ -377,8 +379,19 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
     if (intake.data) revisionRef.current = Math.max(revisionRef.current, intake.data.intake_revision);
   }, [intake.data]);
 
-  useEffect(() => () => {
-    controllers.current.forEach((controller) => controller.abort());
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      // StrictMode immediately replays effects in development. Defer lifecycle
+      // cancellation so that preflight cannot turn an in-flight upload into an
+      // empty auto-submit while the server is still accepting the file.
+      queueMicrotask(() => {
+        if (!mounted.current) {
+          controllers.current.forEach((controller) => controller.abort());
+        }
+      });
+    };
   }, []);
 
   const mergeUploadResult = useCallback((response: TaskIntakeMutationResponse): void => {
@@ -395,6 +408,7 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
   }, [queryClient, taskId]);
 
   const uploadOne = useCallback((item: LocalUpload): void => {
+    if (controllers.current.has(item.id)) return;
     const controller = new AbortController();
     controllers.current.set(item.id, controller);
     void api.uploadTaskIntakeAsset(
@@ -477,6 +491,7 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
     if (!intake.data || intake.data.intake.status !== "DRAFT") return;
     const active = uploads.some((item) => item.status === "queued" || item.status === "uploading");
     if (active) return;
+    if (intake.data.assets.length < expectedAutoAssets.current) return;
     if (uploads.some((item) => item.status === "failed")) {
       setAutoSubmit(false);
       return;
@@ -498,7 +513,7 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
   const data = intake.data;
   const locked = data.intake.status !== "DRAFT";
   if (autoSubmit && !locked) {
-    const total = data.assets.length + uploads.length;
+    const total = Math.max(data.assets.length + uploads.length, expectedAutoAssets.current);
     return (
       <TaskIntakeFrame badge="正在创建">
         <div className="workbench-intake-card intake-chat__progress" role="status">

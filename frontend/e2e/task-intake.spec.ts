@@ -7,6 +7,8 @@ test.beforeEach(async ({ page }) => {
   let intakeRevision = 1;
   let taskRevision = 1;
   let uploaded = false;
+  let uploadRequests = 0;
+  let completedUploads = 0;
   let historyTitle = "品牌手册更新";
   let historyPinned: string | null = null;
   let historyArchived: string | null = null;
@@ -145,7 +147,10 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/task-intakes/task_e2e_intake/assets", async (route) => {
     expect(route.request().headers()["content-type"]).toContain("multipart/form-data; boundary=");
     expect(route.request().postDataBuffer()?.toString()).toContain("brief.md");
+    uploadRequests += 1;
+    await new Promise((resolve) => setTimeout(resolve, 150));
     uploaded = true;
+    completedUploads += 1;
     intakeRevision += 1;
     await route.fulfill({
       status: 200,
@@ -159,6 +164,7 @@ test.beforeEach(async ({ page }) => {
     });
   });
   await page.route("**/api/v1/task-intakes/task_e2e_intake/submit", async (route) => {
+    expect(completedUploads).toBe(uploadRequests);
     submitted = true;
     intakeRevision += 1;
     taskRevision += 1;
