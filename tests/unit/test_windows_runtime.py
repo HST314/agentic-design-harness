@@ -16,10 +16,33 @@ from harness.runtime import validate_runtime_platform
 from harness.services.process_control import process_start_identity
 from harness.storage.locks import FileLock
 from harness.storage.safe_open import open_regular_readonly
-from harness.write_sandbox import require_write_sandbox
+from harness.write_sandbox import (
+    _without_windows_extended_prefix,
+    require_write_sandbox,
+)
 
 
 class PortableSafeOpenTests(unittest.TestCase):
+    def test_extended_windows_paths_share_the_declared_root_namespace(self) -> None:
+        self.assertEqual(
+            _without_windows_extended_prefix(r"\\?\D:\workspace\projects\deck"),
+            r"D:\workspace\projects\deck",
+        )
+        self.assertEqual(
+            _without_windows_extended_prefix(
+                r"\\?\UNC\server\share\workspace\projects\deck"
+            ),
+            r"\\server\share\workspace\projects\deck",
+        )
+        self.assertEqual(
+            _without_windows_extended_prefix(r"D:\workspace\projects\deck"),
+            r"D:\workspace\projects\deck",
+        )
+        self.assertEqual(
+            _without_windows_extended_prefix(r"\\?\GLOBALROOT\Device\Harddisk0"),
+            r"\\?\GLOBALROOT\Device\Harddisk0",
+        )
+
     def test_managed_python_audit_allows_only_declared_write_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

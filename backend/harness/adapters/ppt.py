@@ -309,8 +309,16 @@ class PptAgentAdapter:
         task_id = str(instance_snapshot["task_id"])
         if not self._state_path(task_id, instance_id).exists():
             return AdapterRecoveryResult(False, "FAILED")
-        if instance_snapshot["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
-            return AdapterRecoveryResult(True, str(instance_snapshot["status"]))
+        state = self._state(task_id, instance_id)
+        status = str(instance_snapshot["status"])
+        if not state.get("project_created"):
+            return AdapterRecoveryResult(
+                False,
+                status,
+                {"mode": "idempotent_start_replay"},
+            )
+        if status not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+            return AdapterRecoveryResult(True, status)
         observation = self.get_status(instance_id)
         return AdapterRecoveryResult(True, observation.status, {"step_id": observation.step_id})
 

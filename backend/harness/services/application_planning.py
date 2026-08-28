@@ -236,6 +236,21 @@ class ApplicationPlanningMixin:
                 "started_at": current_process["started_at"],
                 "code_identity": None,
             }
+            if current["status"] == "READY":
+                self.commands.transition_instance(
+                    task_id,
+                    instance_id,
+                    "STARTING",
+                    CommandEnvelope(
+                        idempotency_key=(
+                            f"start-reused-process-starting-"
+                            f"{intent['operation_id']}-{instance_id}-{attempt}"
+                        ),
+                        actor_type="system",
+                        actor_id="start_operation_runner",
+                        expected_revision=self.store.task.revision(task_id, task_id),
+                    ),
+                )
         elif restart:
             launch = self.supervisor.restart_instance(
                 task_id,
@@ -300,6 +315,22 @@ class ApplicationPlanningMixin:
                 "operation_id": started.operation_id,
                 "details": {"mode": "started", **deepcopy(started.details)},
             }
+        current = self._instance(task_id, instance_id)
+        if reused_process and current["status"] == "STARTING":
+            self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "RUNNING",
+                CommandEnvelope(
+                    idempotency_key=(
+                        f"start-reused-process-running-"
+                        f"{intent['operation_id']}-{instance_id}-{attempt}"
+                    ),
+                    actor_type="system",
+                    actor_id="start_operation_runner",
+                    expected_revision=self.store.task.revision(task_id, task_id),
+                ),
+            )
         result = {
             "instance_id": instance_id,
             "launch": self._launch_summary(launch),

@@ -150,7 +150,33 @@ def _apply_windows_write_sandbox(writable_roots: Sequence[str | Path]) -> None:
 
 
 def _normalized_windows_path(value: str | Path) -> str:
-    return os.path.normcase(os.path.abspath(os.fspath(value))).rstrip("\\/")
+    text = _without_windows_extended_prefix(os.fspath(value))
+    return os.path.normcase(os.path.abspath(text)).rstrip("\\/")
+
+
+def _without_windows_extended_prefix(value: str) -> str:
+    """Return the Win32 spelling used by the sandbox allowlist.
+
+    Managed dependencies may use the extended-length namespace to avoid
+    ``MAX_PATH``.  Windows audit events preserve that prefix, while the
+    declared writable roots use ordinary drive or UNC paths.  Both spellings
+    identify the same filesystem object and therefore must compare in the
+    same namespace.
+    """
+
+    folded = value.casefold()
+    if folded.startswith("\\\\?\\unc\\"):
+        return "\\\\" + value[8:]
+    if folded.startswith("\\\\?\\"):
+        drive_path = value[4:]
+        if (
+            len(drive_path) >= 3
+            and drive_path[0].isalpha()
+            and drive_path[1] == ":"
+            and drive_path[2] in "\\/"
+        ):
+            return drive_path
+    return value
 
 
 def _system_error(operation: str) -> NoReturn:

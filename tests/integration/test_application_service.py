@@ -1268,6 +1268,31 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             instance_state["start_failure"]["details"],
             {"http_status": 503, "route": "api/projects/i_image_1/jobs"},
         )
+        self.fake_adapter.start_error = None
+        with patch.object(
+            self.fake_adapter,
+            "recover",
+            return_value=AdapterRecoveryResult(
+                False, "READY", {"mode": "idempotent_start_replay"}
+            ),
+        ):
+            retried = self.application.retry_start_operation(
+                "agent-start-failure-operation",
+                envelope=envelope(
+                    "retry-agent-start-failure",
+                    self.store.task.revision(
+                        "t_agent_start_failure", "t_agent_start_failure"
+                    ),
+                ),
+            )
+
+        self.assertEqual(retried["state"], "COMMITTED")
+        recovered_instance = self.store.instance.get(
+            "t_agent_start_failure", "i_image_1"
+        )
+        self.assertEqual(recovered_instance["status"], "RUNNING")
+        self.assertIsNone(recovered_instance.get("start_failure"))
+        self.assertEqual(len(self.fake_adapter.start_calls), 1)
         self.application.cancel_instance("t_agent_start_failure", "i_image_1")
 
     def test_concurrent_plan_operations_cannot_leave_losing_assignments(self) -> None:

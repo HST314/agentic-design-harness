@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from harness.adapters import PptAgentAdapter, PrepareRequest
 from harness.adapters.ppt_lock import load_ppt_agent_lock
+from harness.storage.atomic import atomic_write_json
 
 from tests.runtime_helpers import build_store
 
@@ -139,6 +140,28 @@ class PptAgentAdapterTests(unittest.TestCase):
         validate_runtime.assert_not_called()
         identity.assert_not_called()
         self.assertIs(spec.verified_runtime_identity, self.adapter.runtime_identity)
+
+    def test_recovery_replays_start_when_managed_project_was_not_created(self) -> None:
+        task_id = "task_ppt_recovery"
+        instance_id = "i_ppt_recovery"
+        atomic_write_json(
+            self.adapter._state_path(task_id, instance_id),
+            {"project_created": False},
+        )
+
+        with patch.object(self.adapter, "get_status") as get_status:
+            recovery = self.adapter.recover(
+                {
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "status": "READY",
+                }
+            )
+
+        self.assertFalse(recovery.recovered)
+        self.assertEqual(recovery.status, "READY")
+        self.assertEqual(recovery.details["mode"], "idempotent_start_replay")
+        get_status.assert_not_called()
 
     def test_prepare_empty_input_uses_an_instance_private_empty_directory(self) -> None:
         task_id = "task_empty"
