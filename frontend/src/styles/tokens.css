@@ -1,6 +1,6 @@
 :root {
   color: #0f172a;
-  background: #f8fafc;
+  background: #f4f6f9;
   color-scheme: light dark;
   font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   font-synthesis: none;
@@ -9,12 +9,14 @@
   --color-primary-strong: #1d4ed8;
   --color-primary-soft: #dbeafe;
   --color-primary-softer: #eff6ff;
+  --color-primary-muted: #93c5fd;
   --color-on-primary: #ffffff;
-  --color-background: #f8fafc;
+  --color-background: #f4f6f9;
   --color-surface: #ffffff;
-  --color-muted-surface: #f1f5f9;
+  --color-muted-surface: #eef1f5;
   --color-muted: var(--color-muted-surface);
-  --color-border: #e2e8f0;
+  --color-border: #e3e7ee;
+  --color-border-strong: #d4dae3;
   --color-foreground: #0f172a;
   --color-muted-foreground: #475569;
   --color-secondary-text: var(--color-muted-foreground);
@@ -27,9 +29,13 @@
   --color-unavailable: #64748b;
   --color-muted-dot: var(--color-unavailable);
   --color-ring: #2563eb;
-  --color-header: rgba(248, 250, 252, 0.9);
-  --color-sidebar: rgba(255, 255, 255, 0.94);
+  --color-header: rgba(251, 252, 254, 0.88);
+  --color-sidebar: #fbfcfe;
   --color-scrim: rgba(15, 23, 42, 0.46);
+  --color-preview-canvas: #0b1120;
+  --color-preview-foreground: #f8fafc;
+  --color-preview-muted: #cbd5e1;
+  --color-preview-danger: #fca5a5;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -39,9 +45,9 @@
   --space-8: 32px;
   --radius-sm: 6px;
   --radius-md: 10px;
-  --shadow-panel: 0 1px 2px rgb(15 23 42 / 6%);
-  --shadow-overlay: 0 12px 32px rgb(15 23 42 / 14%);
-  --shadow-card: var(--shadow-panel);
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 4%), 0 1px 3px rgb(15 23 42 / 5%);
+  --shadow-panel: 0 2px 8px rgb(15 23 42 / 6%), 0 1px 2px rgb(15 23 42 / 4%);
+  --shadow-overlay: 0 12px 32px rgb(15 23 42 / 14%), 0 2px 8px rgb(15 23 42 / 8%);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -52,11 +58,13 @@
     --color-primary-strong: #93c5fd;
     --color-primary-soft: #1e3a5f;
     --color-primary-softer: #172554;
+    --color-primary-muted: #1d4ed8;
     --color-on-primary: #0f172a;
     --color-background: #020617;
     --color-surface: #0f172a;
     --color-muted-surface: #1e293b;
     --color-border: #334155;
+    --color-border-strong: #475569;
     --color-foreground: #f8fafc;
     --color-muted-foreground: #cbd5e1;
     --color-success: #6ee7b7;
@@ -68,9 +76,10 @@
     --color-unavailable: #94a3b8;
     --color-ring: #93c5fd;
     --color-header: rgba(2, 6, 23, 0.9);
-    --color-sidebar: rgba(15, 23, 42, 0.96);
+    --color-sidebar: #0f172a;
     --color-scrim: rgba(2, 6, 23, 0.68);
-    --shadow-panel: 0 1px 2px rgb(0 0 0 / 28%);
-    --shadow-overlay: 0 12px 32px rgb(0 0 0 / 42%);
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 24%), 0 1px 3px rgb(0 0 0 / 28%);
+    --shadow-panel: 0 2px 8px rgb(0 0 0 / 30%), 0 1px 2px rgb(0 0 0 / 26%);
+    --shadow-overlay: 0 12px 32px rgb(0 0 0 / 42%), 0 2px 8px rgb(0 0 0 / 34%);
   }
 }
