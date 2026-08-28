@@ -13,7 +13,13 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_VALUE = re.compile(
-    r"(?:bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,})",
+    r"(?:"
+    r"bearer\s+\S+|"
+    r"sk-[A-Za-z0-9_-]{8,}|"
+    r"gh[pousr]_[A-Za-z0-9]{8,}|"
+    r"(?:api[_-]?key|access[_-]?token|password|private[_-]?key|secret)"
+    r"\s*[:=]\s*[^\s,;]+"
+    r")",
     re.IGNORECASE,
 )
 
@@ -45,6 +51,7 @@ class JsonFormatter(logging.Formatter):
             payload.update(redact(fields))
         if record.exc_info and record.exc_info[0] is not None:
             payload["exception_type"] = record.exc_info[0].__name__
+            payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(redact(payload), ensure_ascii=False, separators=(",", ":"))
 
 

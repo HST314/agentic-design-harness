@@ -7,7 +7,7 @@ from collections.abc import Callable, Collection
 from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from ..adapters import AdapterRegistry, PrepareRequest
 from ..adapters.types import AgentInstanceSnapshot, StageSnapshot, TaskCard
@@ -55,6 +55,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         self.runtime_settings = runtime_settings
         self.intent_root = store.layout.control_root / "application-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._instance_start_reconciled = False
         self.start_operation_runner = StartOperationRunner(self._run_pending_starts)
 
     @property
@@ -143,7 +144,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
             ):
                 intent = read_json(path)
-                if intent["state"] in {"COMMITTED", "ABORTED"}:
+                if intent["state"] in {"COMMITTED", "ABORTED", "SUPERSEDED"}:
                     continue
                 try:
                     if intent["kind"] == "SAVE_PLAN_AND_CREATE_INSTANCES":
@@ -162,16 +163,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                             continue
                         result = self._resume_start(path, None)
                     elif intent["kind"] in {"START_INSTANCE", "RESTART_INSTANCE"}:
-                        if defer_start_operations:
-                            results.append(
-                                {
-                                    "operation_id": operation_id,
-                                    "status": "PENDING",
-                                    "result": None,
-                                }
-                            )
-                            continue
-                        result = self._resume_instance_operation(path)
+                        intent = self._migrate_instance_start_intent(path, intent)
+                        results.append(
+                            {
+                                "operation_id": operation_id,
+                                "status": "PENDING",
+                                "result": self._start_operation_summary(intent),
+                            }
+                        )
+                        continue
                     elif intent["kind"] == "CANCEL_TASK":
                         result = self._resume_cancel_task(path, None)
                     elif intent["kind"] == "RESOLVE_APPROVAL":
@@ -318,12 +318,20 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         candidates: list[dict[str, Any]] = []
         for path in self.intent_root.glob("*.json"):
             intent = read_json(path)
+            kind = intent.get("kind")
+            target_ids = (
+                intent.get("target_instance_ids", [])
+                if kind == "START_READY_INSTANCES"
+                else [intent.get("request", {}).get("instance_id")]
+            )
             if (
-                intent.get("kind") != "START_READY_INSTANCES"
+                kind not in {"START_READY_INSTANCES", "START_INSTANCE", "RESTART_INSTANCE"}
                 or intent.get("request", {}).get("task_id") != task_id
+                or intent.get("state") == "SUPERSEDED"
+                or (instance_id is None and kind != "START_READY_INSTANCES")
                 or (
                     instance_id is not None
-                    and instance_id not in intent.get("target_instance_ids", [])
+                    and instance_id not in target_ids
                 )
             ):
                 continue
@@ -334,7 +342,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             candidates,
             key=lambda item: str(item.get("updated_at") or item.get("prepared_at") or ""),
         )
-        latest = self._migrate_start_intent(
+        latest = self._migrate_operation_intent(
             self._intent_path(latest["operation_id"]), latest, persist=False
         )
         return self._start_operation_summary(latest)
@@ -345,9 +353,13 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         if not path.is_file():
             raise HarnessError("TASK_NOT_FOUND", "The requested start operation does not exist.")
         intent = read_json(path)
-        if intent.get("kind") != "START_READY_INSTANCES":
+        if intent.get("kind") not in {
+            "START_READY_INSTANCES",
+            "START_INSTANCE",
+            "RESTART_INSTANCE",
+        }:
             raise HarnessError("TASK_NOT_FOUND", "The requested start operation does not exist.")
-        intent = self._migrate_start_intent(path, intent, persist=False)
+        intent = self._migrate_operation_intent(path, intent, persist=False)
         return self._start_operation_summary(intent)
 
     def retry_start_operation(
@@ -360,7 +372,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 raise HarnessError(
                     "TASK_NOT_FOUND", "The requested start operation does not exist."
                 )
-            intent = self._migrate_start_intent(path, read_json(path))
+            intent = self._migrate_operation_intent(path, read_json(path))
             if envelope.actor_type not in {"human", "master"}:
                 raise HarnessError(
                     "VALIDATION_ERROR", "Only a human or Master may recover a start."
@@ -378,6 +390,12 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     "INVALID_STATE_TRANSITION",
                     "Only a retryable failed start operation may be recovered.",
                     {"current": intent["state"]},
+                )
+            if not self._start_operation_summary(intent)["retry_allowed"]:
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "The start operation exhausted its retry attempts.",
+                    {"operation_id": operation_id},
                 )
             task_id = intent["request"]["task_id"]
             self.commands.validate_task_revision(task_id, envelope.expected_revision)
@@ -405,6 +423,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         if self.start_operation_runner.alive:
             self.start_operation_runner.notify()
             return self._start_operation_summary(intent)
+        if intent["kind"] in {"START_INSTANCE", "RESTART_INSTANCE"}:
+            return self._start_operation_summary(intent)
         with (
             FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
             FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
@@ -412,6 +432,9 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             return self._resume_start(path, None)
 
     def _run_pending_starts(self) -> None:
+        if not self._instance_start_reconciled:
+            self._supersede_stale_instance_operations()
+            self._instance_start_reconciled = True
         for path in sorted(self.intent_root.glob("*.json")):
             intent = read_json(path)
             kind = intent.get("kind")
@@ -425,10 +448,23 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 intent = self._migrate_start_intent(path, intent)
                 resumable_states = {"QUEUED", "RUNNING"}
             else:
-                resumable_states = {"PREPARED"}
+                intent = self._migrate_instance_start_intent(path, intent)
+                resumable_states = {"QUEUED", "RUNNING"}
             if intent["state"] not in resumable_states:
                 continue
             task_id = intent["request"]["task_id"]
+            if kind == "START_READY_INSTANCES":
+                with (
+                    FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+                    FileLock(
+                        self._intent_lock(intent["operation_id"]),
+                        self.store.lock_timeout_seconds,
+                    ),
+                ):
+                    latest = read_json(path)
+                    if latest["state"] in {"QUEUED", "RUNNING"}:
+                        self._resume_start(path, None)
+                continue
             with (
                 FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
                 FileLock(
@@ -436,16 +472,13 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     self.store.lock_timeout_seconds,
                 ),
             ):
-                latest = read_json(path)
-                if kind == "START_READY_INSTANCES" and latest["state"] in {
-                    "QUEUED",
-                    "RUNNING",
-                }:
-                    self._resume_start(path, None)
-                elif kind in {"START_INSTANCE", "RESTART_INSTANCE"} and latest[
-                    "state"
-                ] == "PREPARED":
-                    self._resume_instance_operation(path)
+                latest = self._migrate_instance_start_intent(path, read_json(path))
+                if latest["state"] not in {"QUEUED", "RUNNING"}:
+                    continue
+                if latest["state"] == "QUEUED":
+                    latest.update({"state": "RUNNING", "updated_at": utc_now()})
+                    atomic_write_json(path, latest)
+            self._resume_instance_operation(path)
 
     def cancel_instance(
         self,
@@ -676,147 +709,6 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             operation_id=operation_id,
             envelope=envelope,
         )
-
-    def _prepare_instance_operation(
-        self,
-        kind: str,
-        task_id: str,
-        instance_id: str,
-        *,
-        operation_id: str,
-        envelope: CommandEnvelope,
-    ) -> dict[str, Any]:
-        validate_identifier(operation_id, "operation_id")
-        if envelope.actor_type not in {"human", "master"}:
-            raise HarnessError(
-                "VALIDATION_ERROR", "Only a human or Master may control an instance."
-            )
-        request = {
-            "task_id": task_id,
-            "instance_id": instance_id,
-            "envelope": envelope.model_dump(mode="json"),
-        }
-        request_sha256 = digest_json(request)
-        intent_path = self._intent_path(operation_id)
-        with (
-            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
-            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
-        ):
-            if intent_path.exists():
-                intent = read_json(intent_path)
-                if intent.get("kind") != kind or intent.get("request_sha256") != request_sha256:
-                    raise HarnessError(
-                        "IDEMPOTENCY_CONFLICT",
-                        "The application operation id was reused for another request.",
-                        {"operation_id": operation_id},
-                    )
-                if intent["state"] == "COMMITTED":
-                    return deepcopy(intent["result"])
-                if intent["state"] == "ABORTED":
-                    self._raise_terminal_intent(intent)
-            else:
-                self.commands.validate_task_revision(task_id, envelope.expected_revision)
-                plan = self._plan(task_id)
-                instance = self._instance(task_id, instance_id)
-                if kind == "START_INSTANCE":
-                    if plan["task"]["status"] == "AWAITING_START_CONFIRMATION":
-                        raise HarnessError(
-                            "INVALID_STATE_TRANSITION",
-                            "Confirm the task start before starting an individual instance.",
-                        )
-                    allowed = {"READY"}
-                else:
-                    allowed = {
-                        "RUNNING",
-                        "WAITING_APPROVAL",
-                        "FAILED_TO_START",
-                        "FAILED",
-                        "CRASHED",
-                    }
-                if instance["status"] not in allowed:
-                    raise HarnessError(
-                        "INVALID_STATE_TRANSITION",
-                        "This instance state cannot execute the requested operation.",
-                        {"current": instance["status"], "operation": kind},
-                    )
-                if kind == "START_INSTANCE":
-                    self._require_ppt_start_gate(task_id, instance_id)
-                intent = {
-                    "schema_version": "1.0",
-                    "kind": kind,
-                    "operation_id": operation_id,
-                    "request_sha256": request_sha256,
-                    "request": request,
-                    "state": "PREPARED",
-                    "prepared_at": utc_now(),
-                    "result": None,
-                }
-                atomic_write_json(intent_path, intent)
-                if kind == "START_INSTANCE":
-                    self.task_config.lock_for_start(task_id)
-            return self._resume_instance_operation(intent_path)
-
-    def _resume_instance_operation(self, intent_path: Path) -> dict[str, Any]:
-        intent = read_json(intent_path)
-        request = intent["request"]
-        task_id = request["task_id"]
-        instance_id = request["instance_id"]
-        operation_id = intent["operation_id"]
-        if intent["kind"] == "START_INSTANCE":
-            self.task_config.lock_for_start(task_id)
-        adapter, spec = self._prepare_instance(task_id, instance_id)
-        launch_prefix = "launch" if intent["kind"] == "START_INSTANCE" else "restart"
-        launch_id = self._derived_id(launch_prefix, operation_id, instance_id)
-        attempt_id = self._derived_id("attempt", operation_id, instance_id)
-        if intent["kind"] == "START_INSTANCE":
-            launch = self.supervisor.start_instance(
-                task_id,
-                instance_id,
-                spec,
-                launch_id=launch_id,
-                attempt_id=attempt_id,
-            )
-            recovery = adapter.recover(
-                cast(AgentInstanceSnapshot, self._instance(task_id, instance_id))
-            )
-        else:
-            launch = self.supervisor.restart_instance(
-                task_id,
-                instance_id,
-                spec,
-                launch_id=launch_id,
-                attempt_id=attempt_id,
-            )
-            recovery = adapter.recover(
-                cast(AgentInstanceSnapshot, self._instance(task_id, instance_id))
-            )
-        adapter_result: dict[str, Any]
-        if recovery.recovered:
-            adapter_result = {
-                "accepted": True,
-                "operation_id": attempt_id,
-                "details": {"mode": "recovered", **deepcopy(recovery.details)},
-            }
-        else:
-            started = adapter.start(instance_id, attempt_id)
-            if not started.accepted:
-                raise HarnessError(
-                    "PROCESS_START_FAILED",
-                    "The Agent adapter rejected the restart operation.",
-                )
-            adapter_result = {
-                "accepted": True,
-                "operation_id": started.operation_id,
-                "details": {"mode": "started", **deepcopy(started.details)},
-            }
-        result = {
-            "instance": self._instance(task_id, instance_id),
-            "launch": self._launch_summary(launch),
-            "adapter": adapter_result,
-        }
-        intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
-        atomic_write_json(intent_path, intent)
-        return deepcopy(result)
 
     def archive_instance(self, task_id: str, instance_id: str) -> dict[str, Any]:
         return self._archive_instance(task_id, instance_id)

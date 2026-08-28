@@ -16,7 +16,12 @@ from urllib.request import Request, urlopen
 
 from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
-from ..services.process_runtime import AgentRuntimeArtifact, ProcessSpec, runtime_artifact_identity
+from ..services.process_runtime import (
+    AgentRuntimeArtifact,
+    AgentRuntimeIdentity,
+    ProcessSpec,
+    runtime_artifact_identity,
+)
 from ..storage.atomic import atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
 from ..storage.store import FileStateStore
@@ -71,6 +76,7 @@ class PptAgentAdapter:
         self.request_timeout_seconds = request_timeout_seconds
         self._validate_runtime()
         self.runtime_root = self._prepare_runtime_artifact()
+        self.runtime_identity = self._verify_runtime_identity()
 
     def validate_task_card(self, card: TaskCard) -> ValidationResult:
         try:
@@ -101,7 +107,6 @@ class PptAgentAdapter:
                 "The PPT Agent adapter rejected its task card.",
                 {"errors": list(validation.errors)},
             )
-        self._validate_runtime()
         instance_id = str(request.instance["instance_id"])
         task_id = str(request.instance["task_id"])
         instance_root = self.store.layout.initialize_instance(task_id, instance_id)
@@ -158,26 +163,13 @@ class PptAgentAdapter:
         atomic_write_json(state_path, state)
         artifact = self._runtime_artifact()
         entrypoint = self.runtime_root / "main_front.py"
-        identity = runtime_artifact_identity(
-            ProcessSpec(
-                command=(
-                    str(self.interpreter),
-                    "-c",
-                    _LAUNCHER,
-                    str(entrypoint),
-                    "{host}",
-                    "{port}",
-                ),
-                runtime_artifact=artifact,
-            )
-        )
         pythonpath = os.pathsep.join(
             (str(self.runtime_root), str(self.runtime_root / "_dependencies"))
         )
         return ProcessSpec(
             command=(str(self.interpreter), "-c", _LAUNCHER, str(entrypoint), "{host}", "{port}"),
             runtime_artifact=artifact,
-            verified_runtime_identity=identity,
+            verified_runtime_identity=self.runtime_identity,
             public_environment={
                 "PPT_AGENT_IMAGES_ROOT": str(images_root),
                 "PPT_AGENT_PROJECTS_ROOT": str(projects_root),
@@ -405,6 +397,22 @@ class PptAgentAdapter:
             "main_front.py",
             ("pyproject.toml", "_harness-ppt-requirements.lock"),
             self.interpreter.parent.parent,
+        )
+
+    def _verify_runtime_identity(self) -> AgentRuntimeIdentity:
+        entrypoint = self.runtime_root / "main_front.py"
+        return runtime_artifact_identity(
+            ProcessSpec(
+                command=(
+                    str(self.interpreter),
+                    "-c",
+                    _LAUNCHER,
+                    str(entrypoint),
+                    "{host}",
+                    "{port}",
+                ),
+                runtime_artifact=self._runtime_artifact(),
+            )
         )
 
     def _prepare_runtime_artifact(self) -> Path:

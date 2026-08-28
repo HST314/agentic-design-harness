@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.adapters import PptAgentAdapter, PrepareRequest
 from harness.adapters.ppt_lock import load_ppt_agent_lock
@@ -88,6 +89,51 @@ class PptAgentAdapterTests(unittest.TestCase):
         self.assertEqual(mapped["target_slide_count"], "12")
         self.assertEqual(mapped["objective"], card["objective"])
         self.assertEqual(mapped["constraints"], card["instructions"])
+
+    def test_prepare_reuses_startup_verified_runtime_identity(self) -> None:
+        task_id = "task_cached_identity"
+        instance_id = "i_ppt_cached_identity"
+        task_root = self.store.layout.workspace_root / "tasks" / task_id
+        card = {
+            "schema_version": "1.0",
+            "card_id": "card_ppt_cached_identity",
+            "revision": 1,
+            "task_id": task_id,
+            "stage_id": "stage_ppt",
+            "instance_id": instance_id,
+            "agent_type": "ppt",
+            "objective": "Create a cached identity deck",
+            "instructions": [],
+            "input_assets": [],
+            "expected_deliveries": [
+                {
+                    "kind": "archive",
+                    "role": "html_ppt",
+                    "required": True,
+                    "accepted_mime_types": ["application/zip"],
+                }
+            ],
+            "parameters": {"slide_count": 6, "input_source": "empty"},
+            "created_at": "2026-08-28T00:00:00Z",
+        }
+        instance = {
+            "instance_id": instance_id,
+            "task_id": task_id,
+            "stage_id": "stage_ppt",
+            "agent_type": "ppt",
+        }
+
+        with (
+            patch.object(self.adapter, "_validate_runtime") as validate_runtime,
+            patch("harness.adapters.ppt.runtime_artifact_identity") as identity,
+        ):
+            spec = self.adapter.prepare(
+                PrepareRequest(instance, card, task_root, task_root / "unused.yaml")
+            )
+
+        validate_runtime.assert_not_called()
+        identity.assert_not_called()
+        self.assertIs(spec.verified_runtime_identity, self.adapter.runtime_identity)
 
     def test_prepare_empty_input_uses_an_instance_private_empty_directory(self) -> None:
         task_id = "task_empty"

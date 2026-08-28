@@ -87,6 +87,25 @@ class FoundationTests(unittest.TestCase):
         record.fields = {"cookie": "hidden"}
         self.assertNotIn("hidden", JsonFormatter().format(record))
 
+    def test_exception_logs_include_redacted_message_and_traceback(self) -> None:
+        try:
+            raise RuntimeError("failed with api_key=hidden")
+        except RuntimeError as exc:
+            record = logging.LogRecord(
+                "test",
+                logging.ERROR,
+                __file__,
+                1,
+                "operation_failed",
+                (),
+                (type(exc), exc, exc.__traceback__),
+            )
+
+        payload = json.loads(JsonFormatter().format(record))
+        self.assertEqual(payload["exception_type"], "RuntimeError")
+        self.assertIn("RuntimeError", payload["exception"])
+        self.assertNotIn("hidden", payload["exception"])
+
     def test_settings_reject_invalid_log_level(self) -> None:
         with self.assertRaises(ValueError):
             HarnessSettings(log_level="verbose")

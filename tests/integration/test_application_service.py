@@ -4,6 +4,7 @@ import hashlib
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,7 @@ from harness.services.runtime_config_observability import RuntimeConfigObservabi
 from harness.services.supervisor import ProcessSupervisor
 from harness.services.task_config import TaskConfigService
 from harness.storage.atomic import atomic_write_json, read_json
+from harness.storage.locks import FileLock
 from runtime_helpers import (
     build_config_snapshot,
     build_service,
@@ -60,6 +62,7 @@ class FakeImageAdapter:
         self.validation_delegate = None
         self.prepare_error = None
         self.start_error = None
+        self.prepare_calls = []
 
     def validate_task_card(self, card):
         if self.validation_delegate is not None:
@@ -68,6 +71,7 @@ class FakeImageAdapter:
         return ValidationResult(valid=not errors, errors=errors)
 
     def prepare(self, request):
+        self.prepare_calls.append(request.instance["instance_id"])
         if self.prepare_error is not None:
             raise self.prepare_error
         if self.runtime_spec is None:
@@ -157,6 +161,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.read_only_artifacts: list[Path] = []
 
     def tearDown(self) -> None:
+        self.application.close_monitoring()
         self.supervisor.close()
         self.store.close()
         for root in self.read_only_artifacts:
@@ -271,20 +276,225 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             recovered = self.application.recover(defer_start_operations=True)
 
             resume.assert_not_called()
+            self.assertEqual(len(recovered), 1)
             self.assertEqual(
-                recovered,
-                [
-                    {
-                        "operation_id": "recover_deferred_instance_start",
-                        "status": "PENDING",
-                        "result": None,
-                    }
-                ],
+                recovered[0]["operation_id"], "recover_deferred_instance_start"
+            )
+            self.assertEqual(recovered[0]["status"], "PENDING")
+            self.assertEqual(recovered[0]["result"]["state"], "QUEUED")
+            self.assertEqual(
+                recovered[0]["result"]["instance_progress"]["i_image_1"]["state"],
+                "PENDING",
             )
 
             self.application._run_pending_starts()
 
         resume.assert_called_once_with(intent_path)
+
+    def test_single_instance_start_releases_task_lock_before_slow_prepare(self) -> None:
+        created = create_task(self.commands, "t_async_instance_start")
+        draft = image_plan("t_async_instance_start")
+        saved = self.application.save_plan_and_create_instances(
+            "t_async_instance_start",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_async_instance_start",
+            envelope=envelope("save-async-instance-start", created["revision"]),
+        )
+        confirmed = self.commands.confirm_start(
+            "t_async_instance_start",
+            envelope("confirm-async-instance-start", saved["task_revision"]),
+        )
+        self._configure_runtime_artifact("async-instance-start-agent")
+        prepare_started = threading.Event()
+        release_prepare = threading.Event()
+        original_prepare = self.fake_adapter.prepare
+
+        def slow_prepare(request):
+            prepare_started.set()
+            if not release_prepare.wait(3):
+                raise AssertionError("test did not release the slow prepare")
+            return original_prepare(request)
+
+        self.application.start_monitoring()
+        with patch.object(self.fake_adapter, "prepare", side_effect=slow_prepare):
+            queued = self.application.start_instance(
+                "t_async_instance_start",
+                "i_image_1",
+                operation_id="start_async_instance",
+                envelope=envelope(
+                    "start-async-instance", confirmed["task_revision"]
+                ),
+            )
+            self.assertEqual(queued["state"], "QUEUED")
+            self.assertIsNone(
+                self.application.latest_start_operation("t_async_instance_start")
+            )
+            self.assertEqual(
+                self.application.latest_start_operation(
+                    "t_async_instance_start", instance_id="i_image_1"
+                )["operation_id"],
+                "start_async_instance",
+            )
+            self.assertTrue(prepare_started.wait(1))
+            with FileLock(self.application._task_lock("t_async_instance_start"), 0.2):
+                pass
+            release_prepare.set()
+            completed = self._wait_for_start_operation("start_async_instance")
+
+        self.assertEqual(completed["state"], "COMMITTED")
+        self.application.cancel_instance("t_async_instance_start", "i_image_1")
+
+    def test_failed_single_instance_start_is_not_replayed_until_explicit_retry(self) -> None:
+        created = create_task(self.commands, "t_single_start_failure")
+        draft = image_plan("t_single_start_failure")
+        saved = self.application.save_plan_and_create_instances(
+            "t_single_start_failure",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_single_start_failure",
+            envelope=envelope("save-single-start-failure", created["revision"]),
+        )
+        confirmed = self.commands.confirm_start(
+            "t_single_start_failure",
+            envelope("confirm-single-start-failure", saved["task_revision"]),
+        )
+        self._configure_runtime_artifact("single-start-failure-agent")
+        self.fake_adapter.prepare_error = HarnessError(
+            "PROCESS_START_FAILED",
+            "The verified runtime artifact was unavailable.",
+            {"failure_type": "InjectedPrepareFailure"},
+        )
+        self.application.start_monitoring()
+
+        queued = self.application.start_instance(
+            "t_single_start_failure",
+            "i_image_1",
+            operation_id="single-start-failure-operation",
+            envelope=envelope(
+                "single-start-failure-operation", confirmed["task_revision"]
+            ),
+        )
+        self.assertEqual(queued["state"], "QUEUED")
+        failed = self._wait_for_start_operation("single-start-failure-operation")
+        self.assertEqual(failed["state"], "RETRYABLE_FAILED")
+        self.assertEqual(failed["last_error"]["phase"], "PREPARING")
+        self.assertEqual(self.fake_adapter.prepare_calls, ["i_image_1"])
+
+        time.sleep(0.6)
+        self.assertEqual(self.fake_adapter.prepare_calls, ["i_image_1"])
+
+        self.fake_adapter.prepare_error = None
+        retried = self.application.retry_start_operation(
+            "single-start-failure-operation",
+            envelope=envelope(
+                "retry-single-start-failure",
+                self.store.task.revision(
+                    "t_single_start_failure", "t_single_start_failure"
+                ),
+            ),
+        )
+        self.assertEqual(retried["state"], "QUEUED")
+        completed = self._wait_for_start_operation("single-start-failure-operation")
+        self.assertEqual(completed["state"], "COMMITTED")
+        self.assertEqual(self.fake_adapter.prepare_calls, ["i_image_1", "i_image_1"])
+        self.application.cancel_instance("t_single_start_failure", "i_image_1")
+
+    def test_failed_restart_keeps_the_existing_process_running(self) -> None:
+        created = create_task(self.commands, "t_restart_prepare_failure")
+        draft = image_plan("t_restart_prepare_failure")
+        saved = self.application.save_plan_and_create_instances(
+            "t_restart_prepare_failure",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_restart_prepare_failure",
+            envelope=envelope("save-restart-prepare-failure", created["revision"]),
+        )
+        self._configure_runtime_artifact("restart-prepare-failure-agent")
+        started = self.application.confirm_and_start_ready_instances(
+            "t_restart_prepare_failure",
+            operation_id="start_before_restart_failure",
+            envelope=envelope(
+                "start-before-restart-failure", saved["task_revision"]
+            ),
+        )
+        original_launch = started["launches"][0]["launch"]["launch_id"]
+        self.fake_adapter.prepare_error = HarnessError(
+            "PROCESS_START_FAILED",
+            "The replacement runtime could not be prepared.",
+            {"failure_type": "InjectedRestartPrepareFailure"},
+        )
+        self.application.start_monitoring()
+
+        queued = self.application.restart_instance(
+            "t_restart_prepare_failure",
+            "i_image_1",
+            operation_id="restart_prepare_failure",
+            envelope=envelope(
+                "restart-prepare-failure",
+                self.store.task.revision(
+                    "t_restart_prepare_failure", "t_restart_prepare_failure"
+                ),
+            ),
+        )
+        self.assertEqual(queued["state"], "QUEUED")
+        failed = self._wait_for_start_operation("restart_prepare_failure")
+
+        self.assertEqual(failed["state"], "RETRYABLE_FAILED")
+        instance = self.store.instance.get(
+            "t_restart_prepare_failure", "i_image_1"
+        )
+        self.assertEqual(instance["status"], "RUNNING")
+        self.assertEqual(instance["process"]["launch_id"], original_launch)
+        self.application.cancel_instance("t_restart_prepare_failure", "i_image_1")
+
+    def test_only_latest_legacy_instance_start_is_recovered(self) -> None:
+        for operation_id, prepared_at in (
+            ("start_legacy_old", "2026-08-28T03:00:00Z"),
+            ("start_legacy_new", "2026-08-28T03:01:00Z"),
+        ):
+            atomic_write_json(
+                self.application._intent_path(operation_id),
+                {
+                    "schema_version": "1.0",
+                    "kind": "START_INSTANCE",
+                    "operation_id": operation_id,
+                    "request_sha256": operation_id.ljust(64, "0"),
+                    "request": {
+                        "task_id": "t_legacy_instance_start",
+                        "instance_id": "i_image_1",
+                        "envelope": {},
+                    },
+                    "state": "PREPARED",
+                    "prepared_at": prepared_at,
+                    "result": None,
+                },
+            )
+
+        with patch.object(self.application, "_resume_instance_operation") as resume:
+            self.application._run_pending_starts()
+
+        self.assertEqual(
+            read_json(self.application._intent_path("start_legacy_old"))["state"],
+            "SUPERSEDED",
+        )
+        resume.assert_called_once_with(
+            self.application._intent_path("start_legacy_new")
+        )
+
+    def _wait_for_start_operation(
+        self, operation_id: str, *, timeout_seconds: float = 5
+    ) -> dict:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            operation = self.application.get_start_operation(operation_id)
+            if operation["state"] not in {"QUEUED", "RUNNING"}:
+                return operation
+            time.sleep(0.02)
+        self.fail(f"start operation {operation_id} did not finish")
 
     def test_invalid_plan_is_rejected_before_an_intent_is_written(self) -> None:
         created = create_task(self.commands, "t_invalid_application")

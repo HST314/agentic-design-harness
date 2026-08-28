@@ -181,10 +181,16 @@ export interface ManualFinishedResponse {
 }
 
 export interface InstanceOperationResponse {
-  schema_version: "1.0";
-  instance: ContractAgentInstance;
-  launch: Record<string, unknown>;
-  adapter: Record<string, unknown>;
+  schema_version: "1.1";
+  operation_id: string;
+  task_id: string;
+  state: StartOperation["state"];
+  instance_progress: StartOperation["instance_progress"];
+  last_error: StartOperation["last_error"];
+  retry_allowed: boolean;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 export interface InstanceRuntimeSettingsResponse {
@@ -400,7 +406,7 @@ export interface StartOperation {
   schema_version: "1.1";
   operation_id: string;
   task_id: string;
-  state: "QUEUED" | "RUNNING" | "COMMITTED" | "RETRYABLE_FAILED" | "ABORTED";
+  state: "QUEUED" | "RUNNING" | "COMMITTED" | "RETRYABLE_FAILED" | "ABORTED" | "SUPERSEDED";
   instance_progress: Record<string, {
     state: string;
     attempt: number;
