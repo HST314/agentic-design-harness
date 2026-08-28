@@ -59,6 +59,7 @@ PPT_DEPENDENCY_STAMP = ".requirements-installed.json"
 FRONTEND_STAMP_NAME = ".harness-package-lock.sha256"
 DEFAULT_BACKEND_PORT = 18080
 DEFAULT_FRONTEND_PORT = 18180
+DEFAULT_STARTUP_TIMEOUT_SECONDS = 120.0
 
 _VERSION = re.compile(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 
@@ -1071,7 +1072,7 @@ class DevelopmentLauncher:
         self,
         *,
         frontend_port: int = DEFAULT_FRONTEND_PORT,
-        timeout_seconds: float = 45.0,
+        timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
         check_only: bool = False,
     ) -> int:
         snapshot = self.config_check()
@@ -1273,7 +1274,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     start_parser = subparsers.add_parser("start", help="start backend and frontend")
     start_parser.add_argument("--frontend-port", type=int, default=DEFAULT_FRONTEND_PORT)
-    start_parser.add_argument("--timeout", type=float, default=45.0)
+    start_parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_STARTUP_TIMEOUT_SECONDS
+    )
     start_parser.add_argument(
         "--check",
         action="store_true",

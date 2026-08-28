@@ -10,7 +10,7 @@
 | `Image Agent lock ...` / `submodule ...` | submodule 未初始化、gitlink 或内容摘要漂移 | 运行 `scripts/dev.py setup`；有本地修改时先人工核对，不要覆盖 |
 | `Harness Python environment is missing or stale` | `.venv` 缺失或锁摘要变化 | 运行 `scripts/dev.py setup`；必要时使用 `setup --force` |
 | `Frontend node_modules is missing or stale` | `package-lock.json` 与安装摘要不一致 | 运行 `scripts/dev.py setup`，让启动器执行锁定 `npm ci` |
-| 长时间停在 `[prepare] Image Agent runtime artifact` | 首次构建或源码更新后正在复制、验签只读制品；Windows 文件较多时会更久 | 保持进程运行，等待 `[ok] ... prepared`；这段时间不占用 45 秒健康检查。若中断，直接重试，启动器会清理未完成目录 |
+| 长时间停在 `[prepare] Image Agent runtime artifact` | 首次构建或源码更新后正在复制、验签只读制品；Windows 文件较多时会更久 | 保持进程运行，等待 `[ok] ... prepared`；这段时间不占用 120 秒健康检查。若中断，直接重试，启动器会清理未完成目录 |
 | `No module named harness` | 使用了错误解释器或未完成 setup | 使用仓库 `.venv` 解释器，见下节 |
 | `address already in use` | 18080、18180 或 Image Agent 端口被占用 | 确认已知进程后正常停止，或给启动器传新端口 |
 | 前端“服务不可达” / `ECONNREFUSED` | 后端未 ready 或代理端口错误 | 依次检查 `/healthz`、`/readyz` 和 Vite 代理目标 |

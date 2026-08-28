@@ -318,7 +318,7 @@ class DevelopmentLauncherTests(unittest.TestCase):
             ["runtime_prepared", "children_started", "health_timer_started"],
         )
         self.assertEqual(
-            group.wait_until_healthy.call_args.kwargs["timeout_seconds"], 45.0
+            group.wait_until_healthy.call_args.kwargs["timeout_seconds"], 120.0
         )
 
     def test_busy_port_is_reported_before_process_start(self) -> None:
