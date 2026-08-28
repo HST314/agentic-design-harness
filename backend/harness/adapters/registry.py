@@ -48,3 +48,8 @@ class AdapterRegistry:
             {"agent_type": name, "available": adapter.available}
             for name, adapter in sorted(self._adapters.items())
         ]
+
+    def disabled_agent_types(self) -> list[str]:
+        return sorted(
+            name for name, adapter in self._adapters.items() if not adapter.available
+        )

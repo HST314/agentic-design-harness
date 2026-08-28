@@ -21,6 +21,7 @@ REQUIRED_DOCS = {
     "image-agent-integration.md",
     "master-api.md",
     "operations.md",
+    "ppt-agent-frontend-api.md",
     "troubleshooting.md",
     "user-guide.md",
 }

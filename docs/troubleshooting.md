@@ -10,7 +10,7 @@
 | `Image Agent lock ...` / `submodule ...` | submodule 未初始化、gitlink 或内容摘要漂移 | 运行 `scripts/dev.py setup`；有本地修改时先人工核对，不要覆盖 |
 | `Harness Python environment is missing or stale` | `.venv` 缺失或锁摘要变化 | 运行 `scripts/dev.py setup`；必要时使用 `setup --force` |
 | `Frontend node_modules is missing or stale` | `package-lock.json` 与安装摘要不一致 | 运行 `scripts/dev.py setup`，让启动器执行锁定 `npm ci` |
-| 长时间停在 `[prepare] Image Agent runtime artifact` | 首次构建或源码更新后正在复制、验签只读制品；Windows 文件较多时会更久 | 保持进程运行，等待 `[ok] ... prepared`；这段时间不占用 45 秒健康检查。若中断，直接重试，启动器会清理未完成目录 |
+| 长时间停在 `[prepare] Image Agent runtime artifact` | 首次构建或源码更新后正在复制、验签只读制品；Windows 文件较多时会更久 | 保持进程运行，等待 `[ok] ... prepared`；这段时间不占用 120 秒健康检查。若中断，直接重试，启动器会清理未完成目录 |
 | `No module named harness` | 使用了错误解释器或未完成 setup | 使用仓库 `.venv` 解释器，见下节 |
 | `address already in use` | 18080、18180 或 Image Agent 端口被占用 | 确认已知进程后正常停止，或给启动器传新端口 |
 | 前端“服务不可达” / `ECONNREFUSED` | 后端未 ready 或代理端口错误 | 依次检查 `/healthz`、`/readyz` 和 Vite 代理目标 |
@@ -20,6 +20,7 @@
 | `CONFIG_ERROR` | 根配置缺失、环境引用未解析或模型能力不匹配 | 运行 `scripts/dev.py config-check`，修正第一条错误后重启 |
 | `MANAGED_BY_HARNESS` | 直接向受管 Image Agent 创建工程 | 回到 Master/计划页创建并确认 TaskCard |
 | `IMAGE_RUNTIME_ATTESTATION_FAILED` | Image 源码/lock 不匹配，或实际解释器、包版本、导入路径不可用 | 控制面会保持 `degraded`；运行 `scripts/dev.py setup --force` 后再运行 `doctor`，禁止手改摘要或绕过校验 |
+| `PPT_RUNTIME_ATTESTATION_FAILED` / PPT 能力不可用 | PPT 源码/lock 不匹配，或锁定依赖、解释器、运行配置不可用 | 控制面会保持 `degraded` 且其他能力继续运行；执行 `scripts/dev.py setup-ppt-runtime --force` 后再运行 `doctor` |
 | `CONTROL_PLANE_NOT_READY` | ready 前请求了实例启动，或启动后台执行器未运行 | 等待 `/readyz`；若持续失败，检查启动验签、恢复日志和进程管理器 |
 | `REVISION_CONFLICT` | 页面或调用方持有旧 revision | 重新读取、重新审阅、使用新幂等键提交 |
 | `SETTINGS_REVISION_CONFLICT` | 设置预览基线过期，或同一不可变修订 ID 对应了不同内容 | 重新读取当前设置并生成新提案；不要覆写旧修订 |

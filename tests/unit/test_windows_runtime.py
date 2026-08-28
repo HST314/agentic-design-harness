@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import errno
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,9 +16,38 @@ from harness.runtime import validate_runtime_platform
 from harness.services.process_control import process_start_identity
 from harness.storage.locks import FileLock
 from harness.storage.safe_open import open_regular_readonly
+from harness.write_sandbox import require_write_sandbox
 
 
 class PortableSafeOpenTests(unittest.TestCase):
+    def test_managed_python_audit_allows_only_declared_write_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            allowed = root / "allowed"
+            blocked = root / "blocked"
+            allowed.mkdir()
+            blocked.mkdir()
+            code = (
+                "from pathlib import Path; "
+                "from harness.write_sandbox import _apply_windows_write_sandbox; "
+                f"allowed=Path({str(allowed)!r}); blocked=Path({str(blocked)!r}); "
+                "_apply_windows_write_sandbox([allowed]); "
+                "(allowed/'result.txt').write_text('ok'); "
+                "\ntry: (blocked/'result.txt').write_text('bad'); escaped=True\n"
+                "except PermissionError: escaped=False\n"
+                "print('escaped=' + json.dumps(escaped))"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", "import json; " + code],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.stdout.strip(), "escaped=false")
+            self.assertEqual((allowed / "result.txt").read_text(), "ok")
+            self.assertFalse((blocked / "result.txt").exists())
+
     def test_resolved_nested_asset_stays_beneath_an_equivalent_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -57,6 +88,9 @@ class PortableSafeOpenTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "requires a real Windows kernel")
 class WindowsRuntimeTests(unittest.TestCase):
+    def test_managed_write_sandbox_is_available(self) -> None:
+        require_write_sandbox()
+
     def test_executable_path_and_handle_metadata_share_one_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

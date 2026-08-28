@@ -42,6 +42,8 @@ jobs:
           -r agents/image_agent_mvp/requirements.lock
           -r requirements/image-agent-web.in
       - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Install and attest the locked PPT runtime
+        run: python scripts/dev.py setup-ppt-runtime --force
       - run: python -m unittest discover -s tests -v
       - name: Collect Windows failure diagnostics
         if: failure() && runner.os == 'Windows'
@@ -91,6 +93,7 @@ jobs:
           python scripts/secret_scan.py .
           python scripts/check_agent_import_boundary.py backend/harness
           python scripts/verify_image_agent_lock.py
+          python scripts/verify_ppt_agent_lock.py
           python scripts/generate_frontend_contracts.py --check
       - name: Check documentation and examples
         run: python scripts/check_docs.py --report build/documentation-check.json

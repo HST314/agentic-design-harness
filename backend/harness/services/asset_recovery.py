@@ -47,7 +47,8 @@ class AssetRecoveryMixin:
                     elif record.get("transaction_type") == "publication_batch":
                         results.append(self._resume_publication_batch(record_path, None))
                 workspace = self.store.layout.workspace_root / "tasks" / task_id
-                for temporary in workspace.glob("resources/shared/*/.*.tmp"):
+                shared_root = workspace / "resources" / "shared"
+                for temporary in shared_root.rglob(".*.tmp") if shared_root.exists() else ():
                     publication_id = temporary.name[1:-4]
                     owned = any(
                         read_json(path).get("publication_id") == publication_id
@@ -145,18 +146,27 @@ class AssetRecoveryMixin:
         workspace = self.store.layout.workspace_root / "tasks" / task_id
         destination_parts = normalized_relative_path(record["destination_relpath"])
         shared_root = resolve_task_path(workspace, "resources/shared")
-        destination_directory = shared_root / record["asset_id"]
+        expected_directory = workspace.joinpath(*destination_parts.parts[:-1])
+        destination_directory = expected_directory
         if destination_directory.exists() and is_link_or_reparse(destination_directory):
             self._invalid("The publication directory cannot be a symlink.")
         destination_directory.mkdir(mode=0o700, exist_ok=True)
         if is_link_or_reparse(destination_directory) or not destination_directory.is_dir():
             self._invalid("The publication directory is invalid.")
-        expected_directory = workspace.joinpath(*destination_parts.parts[:-1])
         try:
             destination_matches = destination_directory.samefile(expected_directory)
         except OSError:
             destination_matches = False
         if not destination_matches:
+            self._invalid("The publication destination does not match its asset identity.")
+        if record["request"].get("bundle_id") is not None:
+            bundle_id = record["request"]["bundle_id"]
+            if (
+                destination_directory != shared_root
+                or Path(record["destination_relpath"]).stem != bundle_id
+            ):
+                self._invalid("The bundle publication destination is invalid.")
+        elif destination_directory.name != record["asset_id"]:
             self._invalid("The publication destination does not match its asset identity.")
         destination = resolve_task_path(
             workspace,
@@ -232,6 +242,11 @@ class AssetRecoveryMixin:
                 "asset_id": record["asset_id"],
                 "task_id": task_id,
                 "producer_instance_id": record["instance_id"],
+                **(
+                    {"bundle_id": record["request"]["bundle_id"]}
+                    if record["request"].get("bundle_id") is not None
+                    else {}
+                ),
                 "kind": kind_for_mime(final_mime),
                 "role": record["request"]["role"],
                 "relative_path": record["destination_relpath"],

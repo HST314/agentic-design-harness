@@ -14,7 +14,7 @@ afterEach(() => {
 
 describe("ApiClient", () => {
   test("encodes every task and work-item path segment for the workbench link", async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ schema_version: "1.0" }));
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse({ schema_version: "1.0" }));
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("https://control.example");
 
@@ -89,6 +89,32 @@ describe("ApiClient", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "https://control.example/api/v1/instances/instance%2Fimage/runtime-setting-proposals/proposal_1/confirm",
     );
+  });
+
+  test("uses controlled instance endpoints for the reversible Image gate and PPT start", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse({ schema_version: "1.0" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://control.example");
+    const envelope = {
+      idempotency_key: "gate_once",
+      actor_type: "human" as const,
+      actor_id: "human_operator",
+      expected_revision: 11,
+    };
+
+    await client.setManualFinished("image/1", true, envelope);
+    await client.setManualFinished("image/1", false, envelope);
+    await client.startInstance("ppt/1", "start_ppt_once", envelope);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://control.example/api/v1/instances/image%2F1/manual-finished",
+      "https://control.example/api/v1/instances/image%2F1/manual-in-progress",
+      "https://control.example/api/v1/instances/ppt%2F1/start",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
+      operation_id: "start_ppt_once",
+      envelope,
+    });
   });
 
   test("exposes stable API error codes and conflict details to recovery UI", async () => {

@@ -1,4 +1,4 @@
-"""Trusted Image Agent workbench links and frame-policy inspection."""
+"""Trusted Agent workbench links and frame-policy inspection."""
 
 from __future__ import annotations
 
@@ -100,14 +100,14 @@ def inspect_frame_policy(
                 return FramePolicyResult(
                     False,
                     "REDIRECT_REJECTED",
-                    "Image Agent redirected outside its approved workbench URL.",
+                    "The Agent redirected outside its approved workbench URL.",
                 )
             content_type = headers.get_content_type().lower()
             if content_type not in {"text/html", "application/xhtml+xml"}:
                 return FramePolicyResult(
                     False,
                     "CONTENT_TYPE_REJECTED",
-                    "Image Agent workbench did not return an HTML document.",
+                    "The Agent workbench did not return an HTML document.",
                 )
             x_frame_options = (headers.get("X-Frame-Options") or "").strip().upper()
             x_frame_tokens = {
@@ -119,7 +119,7 @@ def inspect_frame_policy(
                 return FramePolicyResult(
                     False,
                     "X_FRAME_OPTIONS_BLOCKED",
-                    "Image Agent returned X-Frame-Options: DENY.",
+                    "The Agent returned X-Frame-Options: DENY.",
                 )
             if "SAMEORIGIN" in x_frame_tokens and _origin(harness_origin) != _origin(
                 ui_url
@@ -127,40 +127,40 @@ def inspect_frame_policy(
                 return FramePolicyResult(
                     False,
                     "X_FRAME_OPTIONS_BLOCKED",
-                    "Image Agent only permits same-origin framing.",
+                    "The Agent only permits same-origin framing.",
                 )
             policies = headers.get_all("Content-Security-Policy", [])
             if policies and not _csp_allows_embedding(policies, harness_origin, ui_url):
                 return FramePolicyResult(
                     False,
                     "FRAME_ANCESTORS_BLOCKED",
-                    "Image Agent frame-ancestors does not permit this Harness origin.",
+                    "The Agent frame-ancestors policy does not permit this Harness origin.",
                 )
             return FramePolicyResult(
                 True,
                 "FRAME_ANCESTORS_ALLOWED" if policies else "FRAME_ANCESTORS_NOT_DECLARED",
                 (
-                    "Image Agent explicitly permits this Harness origin."
+                    "The Agent explicitly permits this Harness origin."
                     if policies
-                    else "Image Agent does not declare a frame-ancestors restriction."
+                    else "The Agent does not declare a frame-ancestors restriction."
                 ),
             )
     except HTTPError as exc:
         return FramePolicyResult(
             False,
             "WORKBENCH_UNREACHABLE",
-            f"Image Agent workbench probe returned HTTP {exc.code}.",
+            f"The Agent workbench probe returned HTTP {exc.code}.",
         )
     except (OSError, TimeoutError, URLError, ValueError):
         return FramePolicyResult(
             False,
             "WORKBENCH_UNREACHABLE",
-            "Image Agent workbench did not respond to the frame-policy probe.",
+            "The Agent workbench did not respond to the frame-policy probe.",
         )
 
 
 class AgentWorkbenchService:
-    """Resolve a WorkItem's current Image instance without trusting browser URLs."""
+    """Resolve a WorkItem's current Agent instance without trusting browser URLs."""
 
     def __init__(
         self,
@@ -212,7 +212,7 @@ class AgentWorkbenchService:
         start_failure = instance.get("start_failure")
         if operation is not None and operation["state"] in {"QUEUED", "RUNNING"}:
             initial_status = "STARTING"
-            diagnostic = "The Image Agent start operation is still running."
+            diagnostic = "The Agent start operation is still running."
         elif isinstance(start_failure, dict):
             initial_status = "START_FAILED"
             diagnostic = str(start_failure["message"])
@@ -233,7 +233,8 @@ class AgentWorkbenchService:
             "embeddable": False,
             "frame_policy": "NOT_CHECKED",
             "diagnostic": (
-                f"{instance['agent_type'].upper()} capability is not available."
+                f"{instance['agent_type'].upper()} 能力当前不可用。"
+                "请检查锁定依赖和运行配置。"
                 if not adapter.available
                 else diagnostic
             ),

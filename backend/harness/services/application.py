@@ -162,6 +162,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                             continue
                         result = self._resume_start(path, None)
                     elif intent["kind"] in {"START_INSTANCE", "RESTART_INSTANCE"}:
+                        if defer_start_operations:
+                            results.append(
+                                {
+                                    "operation_id": operation_id,
+                                    "status": "PENDING",
+                                    "result": None,
+                                }
+                            )
+                            continue
                         result = self._resume_instance_operation(path)
                     elif intent["kind"] == "CANCEL_TASK":
                         result = self._resume_cancel_task(path, None)
@@ -235,8 +244,16 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                         "Only a planned task may start ready Agent instances.",
                         {"current": plan["task"]["status"]},
                     )
+                startable_stage_ids = {
+                    item["stage_id"]
+                    for item in plan["stages"]
+                    if item["status"] in {"READY", "RUNNING"}
+                }
                 targets = [
-                    item["instance_id"] for item in plan["instances"] if item["status"] == "READY"
+                    item["instance_id"]
+                    for item in plan["instances"]
+                    if item["status"] == "READY"
+                    and item["stage_id"] in startable_stage_ids
                 ]
                 unavailable = [
                     item["instance_id"]
@@ -397,10 +414,19 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
     def _run_pending_starts(self) -> None:
         for path in sorted(self.intent_root.glob("*.json")):
             intent = read_json(path)
-            if intent.get("kind") != "START_READY_INSTANCES":
+            kind = intent.get("kind")
+            if kind not in {
+                "START_READY_INSTANCES",
+                "START_INSTANCE",
+                "RESTART_INSTANCE",
+            }:
                 continue
-            intent = self._migrate_start_intent(path, intent)
-            if intent["state"] not in {"QUEUED", "RUNNING"}:
+            if kind == "START_READY_INSTANCES":
+                intent = self._migrate_start_intent(path, intent)
+                resumable_states = {"QUEUED", "RUNNING"}
+            else:
+                resumable_states = {"PREPARED"}
+            if intent["state"] not in resumable_states:
                 continue
             task_id = intent["request"]["task_id"]
             with (
@@ -411,8 +437,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 ),
             ):
                 latest = read_json(path)
-                if latest["state"] in {"QUEUED", "RUNNING"}:
+                if kind == "START_READY_INSTANCES" and latest["state"] in {
+                    "QUEUED",
+                    "RUNNING",
+                }:
                     self._resume_start(path, None)
+                elif kind in {"START_INSTANCE", "RESTART_INSTANCE"} and latest[
+                    "state"
+                ] == "PREPARED":
+                    self._resume_instance_operation(path)
 
     def cancel_instance(
         self,
@@ -706,6 +739,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                         "This instance state cannot execute the requested operation.",
                         {"current": instance["status"], "operation": kind},
                     )
+                if kind == "START_INSTANCE":
+                    self._require_ppt_start_gate(task_id, instance_id)
                 intent = {
                     "schema_version": "1.0",
                     "kind": kind,
@@ -958,6 +993,33 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 config_ref=task_root / "instances" / instance_id / "runtime" / "runtime.yaml",
             )
         )
+
+    def _require_ppt_start_gate(self, task_id: str, instance_id: str) -> None:
+        """Require every Image branch to be manually finished before PPT starts."""
+
+        plan = self._plan(task_id)
+        target = next(
+            (item for item in plan["instances"] if item["instance_id"] == instance_id),
+            None,
+        )
+        if target is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        if target["agent_type"] != "ppt":
+            return
+        unfinished = [
+            item["instance_id"]
+            for item in plan["instances"]
+            if item["agent_type"] == "image" and not item.get("manual_finished", False)
+        ]
+        if unfinished:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "All Image instances must be manually marked finished before PPT can start.",
+                {
+                    "instance_id": instance_id,
+                    "unfinished_instance_ids": unfinished,
+                },
+            )
 
 
 

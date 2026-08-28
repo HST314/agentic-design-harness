@@ -129,9 +129,7 @@ class TaskCommandService:
             lambda: self._rename_task(request, envelope),
         )
 
-    def _rename_task(
-        self, request: dict[str, Any], envelope: CommandEnvelope
-    ) -> dict[str, Any]:
+    def _rename_task(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
         task_id = request["task_id"]
         task = self._task(task_id)
         actual = self.store.task.revision(task_id, task_id)
@@ -390,6 +388,63 @@ class TaskCommandService:
         task["status"] = target
         task["updated_at"] = utc_now()
         return self._persist_aggregate(plan, envelope, "confirm_start", request, actual)
+
+    def set_manual_finished(
+        self,
+        task_id: str,
+        instance_id: str,
+        manual_finished: bool,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Set the reversible human completion gate for one Image instance."""
+
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "manual_finished": manual_finished,
+        }
+        return self._idempotent(
+            task_id,
+            "set_manual_finished",
+            request,
+            envelope,
+            lambda: self._set_manual_finished(request, envelope),
+        )
+
+    def _set_manual_finished(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        if envelope.actor_type != "human":
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Only a human may change the manual completion gate.",
+            )
+        task_id = request["task_id"]
+        plan = self._plan(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        instance = next(
+            (
+                item
+                for item in plan["instances"]
+                if item["instance_id"] == request["instance_id"]
+            ),
+            None,
+        )
+        if instance is None:
+            raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
+        if instance["agent_type"] != "image":
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "The manual completion gate only applies to Image instances.",
+                {"instance_id": request["instance_id"]},
+            )
+        instance["manual_finished"] = request["manual_finished"]
+        plan["task"]["updated_at"] = utc_now()
+        return self._persist_aggregate(
+            plan, envelope, "set_manual_finished", request, actual
+        )
 
     def transition_instance(
         self,
@@ -709,7 +764,8 @@ class TaskCommandService:
                         "first_activated_at": None,
                         "authorized_downgrade": None,
                     },
-                    "status": "READY" if raw["agent_type"] == "image" else "UNAVAILABLE",
+                    "status": "READY" if raw["agent_type"] in {"image", "ppt"} else "UNAVAILABLE",
+                    "manual_finished": False,
                     "process": None,
                     "ui_url": None,
                     "created_at": now,
@@ -815,7 +871,8 @@ class TaskCommandService:
                         "first_activated_at": None,
                         "authorized_downgrade": None,
                     },
-                    "status": "READY" if raw["agent_type"] == "image" else "UNAVAILABLE",
+                    "status": "READY" if raw["agent_type"] in {"image", "ppt"} else "UNAVAILABLE",
+                    "manual_finished": False,
                     "process": None,
                     "ui_url": None,
                     "created_at": now,
@@ -964,13 +1021,9 @@ class TaskCommandService:
                 stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]
             )
             if activate_new and dependencies_ready and stage["type"] == "ppt":
-                if stage["required"]:
-                    self._activate_lifecycle(stage, now)
-                    for instance_id in stage["instance_ids"]:
-                        self._activate_lifecycle(instance_by_id[instance_id], now)
-                    target = "UNAVAILABLE"
-                else:
-                    target = "SKIPPED"
+                self._activate_lifecycle(stage, now)
+                for instance_id in stage["instance_ids"]:
+                    self._activate_lifecycle(instance_by_id[instance_id], now)
             if target != before and before not in {"SKIPPED", "CANCELLED"}:
                 self._validate_stage_reaggregation(before, target)
             stage["status"] = target
@@ -993,11 +1046,6 @@ class TaskCommandService:
         instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
         for stage in sorted(plan["stages"], key=lambda item: item["position"]):
             if not all(stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]):
-                continue
-            if stage["type"] == "ppt" and not stage["required"]:
-                if stage["status"] != "SKIPPED":
-                    self.machine.transition("stage", stage["status"], "SKIPPED")
-                stage["status"] = "SKIPPED"
                 continue
             self._activate_lifecycle(stage, now)
             for instance_id in stage["instance_ids"]:

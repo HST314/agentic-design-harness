@@ -8,6 +8,7 @@
 
 - Master 是正式任务和 TaskCard 的唯一创建入口；人工可审阅、修订并确认准确版本后启动。
 - Image Agent 由固定 Git submodule 与 release lock 锁定，运行在隔离依赖、独立进程和 loopback HTTP 边界内。
+- PPT Agent 同样由固定 submodule 与 release lock 锁定；Harness 可按实例启动独立工作台，并支持共享图片或空输入。
 - 同一 WorkItem 的多个分支可分别形成“最终图片 + Markdown 设计说明”候选。
 - 只有人工确认后的图片、说明和 BundleManifest 才会以同一 publication batch 原子发布。
 - React 工作台覆盖创建任务、Master 会话、任务卡、计划、Image 工作台、审批和交付。
@@ -40,7 +41,7 @@ Harness 与 Image Agent 之间只通过稳定契约、受控文件和本机 HTTP
 | 当前版本 | `0.2.0` |
 | 支持环境 | Windows 10/11、Windows Server 2022、Linux；Python 3.10+、Node.js 22+ |
 | Image Agent | 已接入受管单机闭环；Ark 是首个承诺真实模型闭环的 Provider |
-| PPT Agent | 只有契约与诚实的不可用状态，尚未接入运行时 |
+| PPT Agent | 已接入受管运行时；人工在其工作台完成全部生成门并导出 ZIP |
 | 部署模型 | 单机、单写者、文件存储、本地可信用户 |
 
 当前没有多租户、RBAC、SSO、数据库、对象存储、多机调度或高可用能力。默认只监听 loopback；不要把控制面直接暴露到公网。
@@ -53,6 +54,7 @@ Harness 与 Image Agent 之间只通过稳定契约、受控文件和本机 HTTP
 | 创建和交付第一个任务 | [用户指南](docs/user-guide.md) |
 | 配置 Provider、模型与运行策略 | [配置指南](docs/configuration.md) |
 | 理解 Image Agent 受管边界与版本锁 | [Image Agent 集成](docs/image-agent-integration.md) |
+| 为前端接入 PPT 工作台与启动门禁 | [PPT 前端接入 API](docs/ppt-agent-frontend-api.md) |
 | 接入 Master 或调用控制面 API | [Master API](docs/master-api.md) |
 | 开发、测试与双仓提交 | [贡献指南](CONTRIBUTING.md) |
 | 备份恢复、容量、发布与回滚 | [运行手册](docs/operations.md) |

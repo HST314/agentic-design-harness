@@ -172,6 +172,21 @@ export interface AgentWorkbenchLinkResponse {
   diagnostic: string;
 }
 
+export interface ManualFinishedResponse {
+  schema_version: string;
+  task_revision: number;
+  plan: {
+    instances: Array<{ instance_id: string; manual_finished?: boolean }>;
+  };
+}
+
+export interface InstanceOperationResponse {
+  schema_version: "1.0";
+  instance: ContractAgentInstance;
+  launch: Record<string, unknown>;
+  adapter: Record<string, unknown>;
+}
+
 export interface InstanceRuntimeSettingsResponse {
   schema_version: "2.0";
   scope: { task_id: string; work_item_id: string; instance_id: string };
@@ -846,6 +861,31 @@ export class ApiClient {
     return this.get(
       `/api/v1/instances/${encodeURIComponent(instanceId)}/ui-link?${query.toString()}`,
       signal,
+    );
+  }
+
+  setManualFinished(
+    instanceId: string,
+    manualFinished: boolean,
+    envelope: CommandEnvelope,
+  ): Promise<ManualFinishedResponse> {
+    const action = manualFinished ? "manual-finished" : "manual-in-progress";
+    return this.send(
+      "POST",
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/${action}`,
+      { envelope },
+    );
+  }
+
+  startInstance(
+    instanceId: string,
+    operationId: string,
+    envelope: CommandEnvelope,
+  ): Promise<InstanceOperationResponse> {
+    return this.send(
+      "POST",
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/start`,
+      { operation_id: operationId, envelope },
     );
   }
 

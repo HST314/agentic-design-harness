@@ -13,6 +13,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -27,6 +28,7 @@ _COMMON_SECRET = re.compile(
 _MAX_LOG_BYTES = 10 * 1024 * 1024
 _MAX_LINE_BYTES = 1024 * 1024
 _READ_BYTES = 64 * 1024
+_MIRROR_INTERVAL_SECONDS = 0.25
 
 
 def _process_identity(pid: int) -> str | None:
@@ -245,6 +247,133 @@ def _relay(source: BinaryIO, destination: Path, redactions: list[bytes]) -> None
             output.close()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _copy_regular_file(source: Path, destination: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    source_descriptor = os.open(source, flags)
+    temporary = destination.with_name(
+        f".{destination.name}.mirror-{os.getpid()}-{threading.get_ident()}.tmp"
+    )
+    try:
+        before = os.fstat(source_descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError("read-only mirror source contains a non-regular file")
+        with os.fdopen(source_descriptor, "rb", closefd=False) as input_stream:
+            source_digest = hashlib.sha256()
+            descriptor = os.open(
+                temporary,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as output_stream:
+                while chunk := input_stream.read(1024 * 1024):
+                    source_digest.update(chunk)
+                    output_stream.write(chunk)
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+        after = os.fstat(source_descriptor)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise RuntimeError("read-only mirror source changed during synchronization")
+        if (
+            destination.is_file()
+            and not destination.is_symlink()
+            and _file_sha256(destination) == source_digest.hexdigest()
+        ):
+            temporary.unlink()
+            return
+        os.replace(temporary, destination)
+    finally:
+        os.close(source_descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _sync_read_only_mirror(
+    source: Path,
+    destination: Path,
+    previous: dict[Path, tuple[int, int, int, int]] | None = None,
+) -> dict[Path, tuple[int, int, int, int]]:
+    """Atomically mirror regular files without ever giving the child the source path."""
+
+    for root in (source, destination):
+        if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+            raise RuntimeError("read-only mirror root is unsafe or missing")
+    expected: set[Path] = set()
+    observed: dict[Path, tuple[int, int, int, int]] = {}
+    pending = [(source, destination, Path())]
+    while pending:
+        source_root, destination_root, relative_root = pending.pop()
+        destination_root.mkdir(mode=0o700, exist_ok=True)
+        for entry in sorted(os.scandir(source_root), key=lambda item: item.name):
+            relative = relative_root / entry.name
+            target = destination / relative
+            expected.add(relative)
+            if entry.is_symlink():
+                raise RuntimeError("read-only mirror source contains a symbolic link")
+            if entry.is_dir(follow_symlinks=False):
+                target.mkdir(mode=0o700, exist_ok=True)
+                pending.append((Path(entry.path), target, relative))
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                raise RuntimeError("read-only mirror source contains a special file")
+            item_stat = entry.stat(follow_symlinks=False)
+            signature = (
+                item_stat.st_dev,
+                item_stat.st_ino,
+                item_stat.st_size,
+                item_stat.st_mtime_ns,
+            )
+            observed[relative] = signature
+            if (
+                previous is not None
+                and previous.get(relative) == signature
+                and target.is_file()
+                and not target.is_symlink()
+            ):
+                continue
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _copy_regular_file(Path(entry.path), target)
+    for path in sorted(destination.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        relative = path.relative_to(destination)
+        if relative in expected or (
+            path.name.startswith(".") and ".mirror-" in path.name
+        ):
+            continue
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            path.rmdir()
+    return observed
+
+
+def _mirror_until_stopped(
+    mirrors: tuple[tuple[Path, Path], ...],
+    stop: threading.Event,
+    failed: threading.Event,
+    initial: tuple[dict[Path, tuple[int, int, int, int]], ...] | None = None,
+) -> None:
+    signatures = list(initial or ({} for _ in mirrors))
+    try:
+        while not stop.wait(_MIRROR_INTERVAL_SECONDS):
+            for index, (source, destination) in enumerate(mirrors):
+                signatures[index] = _sync_read_only_mirror(
+                    source, destination, signatures[index]
+                )
+    except BaseException:
+        failed.set()
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         return 64
@@ -264,9 +393,27 @@ def main() -> int:
         environment[name] = value
         redactions.append(value.encode("utf-8"))
     inherited_fds = tuple(spec.get("inherited_fds", ())) if os.name != "nt" else ()
+    writable_roots = tuple(spec.get("writable_roots", ()))
+    mirrors = tuple(
+        (Path(item["source"]), Path(item["destination"]))
+        for item in spec.get("read_only_mirrors", ())
+    )
+    mirror_signatures = tuple(
+        _sync_read_only_mirror(source, destination)
+        for source, destination in mirrors
+    )
+    if writable_roots or mirrors:
+        command = [
+            sys.executable,
+            str(Path(__file__).with_name("sandbox_exec.py")),
+            json.dumps(writable_roots),
+            *spec["command"],
+        ]
+    else:
+        command = spec["command"]
     if os.name == "nt":
         process = subprocess.Popen(
-            spec["command"],
+            command,
             cwd=spec["cwd"],
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -276,7 +423,7 @@ def main() -> int:
         )
     else:
         process = subprocess.Popen(
-            spec["command"],
+            command,
             cwd=spec["cwd"],
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -286,7 +433,7 @@ def main() -> int:
             pass_fds=inherited_fds,
         )
     try:
-        windows_job = _assign_kill_on_close_job(process)
+        windows_job = _assign_kill_on_close_job(cast(subprocess.Popen[bytes], process))
     except BaseException:
         process.terminate()
         process.wait()
@@ -294,6 +441,23 @@ def main() -> int:
     for descriptor in inherited_fds:
         os.close(descriptor)
     _write_handshake(Path(spec["handshake_path"]), process.pid)
+    mirror_stop = threading.Event()
+    mirror_failed = threading.Event()
+    mirror_thread: threading.Thread | None = None
+    if mirrors:
+        mirror_thread = threading.Thread(
+            target=_mirror_until_stopped,
+            args=(mirrors, mirror_stop, mirror_failed, mirror_signatures),
+            daemon=True,
+        )
+        mirror_thread.start()
+
+        def stop_on_mirror_failure() -> None:
+            mirror_failed.wait()
+            if not mirror_stop.is_set() and process.poll() is None:
+                process.terminate()
+
+        threading.Thread(target=stop_on_mirror_failure, daemon=True).start()
 
     def forward_signal(signum: int, _: object) -> None:
         if process.poll() is None:
@@ -327,8 +491,11 @@ def main() -> int:
         return_code = process.wait()
         for thread in threads:
             thread.join()
-        return return_code
+        return 70 if mirror_failed.is_set() and return_code == 0 else return_code
     finally:
+        mirror_stop.set()
+        if mirror_thread is not None:
+            mirror_thread.join(timeout=1.0)
         _close_windows_handle(windows_job)
 
 

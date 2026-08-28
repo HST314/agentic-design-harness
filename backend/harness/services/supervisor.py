@@ -1,4 +1,5 @@
 """Single-machine process groups, port ownership and crash reconciliation."""
+
 from __future__ import annotations
 
 import http.client
@@ -115,9 +116,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
             instance = self._instance(task_id, instance_id)
             preserve = instance["status"] in {"RUNNING", "WAITING_APPROVAL"}
             with pin_runtime_artifact(spec) as pinned_artifact:
-                self._enforce_code_identity(
-                    task_id, instance_id, pinned_artifact.identity.digest
-                )
+                self._enforce_code_identity(task_id, instance_id, pinned_artifact.identity.digest)
                 pinned_artifact.verify_current()
                 record_path = self._launch_path(launch_id)
                 if record_path.exists():
@@ -174,12 +173,11 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                     pinned_artifact=inspected_artifact,
                 )
         lock_path = (
-            self.store.layout.control_root
-            / "locks"
-            / f"process-{task_id}-{instance_id}.lock"
+            self.store.layout.control_root / "locks" / f"process-{task_id}-{instance_id}.lock"
         )
-        with self._instance_thread_lock(task_id, instance_id), FileLock(
-            lock_path, self.store.lock_timeout_seconds
+        with (
+            self._instance_thread_lock(task_id, instance_id),
+            FileLock(lock_path, self.store.lock_timeout_seconds),
         ):
             record_path = self._launch_path(launch_id)
             if record_path.exists():
@@ -203,17 +201,22 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 )
             instance = self._instance(task_id, instance_id)
             if instance["status"] == "ARCHIVED":
-                raise HarnessError(
-                    "INVALID_STATE_TRANSITION", "An archived instance is read-only."
-                )
+                raise HarnessError("INVALID_STATE_TRANSITION", "An archived instance is read-only.")
             if not preserve_business_state:
                 self._validate_start_eligibility(task_id, instance)
-            if instance["agent_type"] != "image":
+            if instance["agent_type"] not in {"image", "ppt"}:
                 raise HarnessError(
                     "ADAPTER_UNAVAILABLE",
-                    "Only Image Agent process materialization is available in this release.",
+                    "The requested Agent process materialization is unavailable.",
                 )
-            launch_config = self.image_config.resolve_launch(task_id, instance_id)
+            if instance["agent_type"] == "image":
+                launch_config = self.image_config.resolve_launch(task_id, instance_id)
+            else:
+                launch_config = self.image_config.resolve_ppt_launch(
+                    task_id,
+                    runtime_path=Path(spec.public_environment["PPT_AGENT_RUNTIME_POLICY"]),
+                    model_config_path=Path(spec.public_environment["PPT_AGENT_MODEL_CONFIG"]),
+                )
             runtime_identity = pinned_artifact.identity
             code_identity = runtime_identity.digest
             self._enforce_code_identity(task_id, instance_id, code_identity)
@@ -282,9 +285,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                         "command": command,
                         "cwd": str(instance_root),
                         "environment": environment,
-                        "secret_environment_names": sorted(
-                            launch_config.provider_environment
-                        ),
+                        "secret_environment_names": sorted(launch_config.provider_environment),
                         "stdout_path": str(stdout_path),
                         "stderr_path": str(stderr_path),
                         "handshake_path": str(handshake_path),
@@ -293,6 +294,11 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                             if pinned_artifact.source_descriptor is not None
                             else []
                         ),
+                        "writable_roots": [str(path) for path in spec.writable_roots],
+                        "read_only_mirrors": [
+                            {"source": str(source), "destination": str(destination)}
+                            for source, destination in spec.read_only_mirrors
+                        ],
                     },
                     mode=0o600,
                 )
@@ -363,9 +369,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 return deepcopy(prepared)
             except Exception as exc:
                 if process is not None and process_start_identity(process.pid) is not None:
-                    self._terminate_group(
-                        process.pid, float(supervisor.shutdown_grace_seconds)
-                    )
+                    self._terminate_group(process.pid, float(supervisor.shutdown_grace_seconds))
                 if launch_spec_path is not None:
                     launch_spec_path.unlink(missing_ok=True)
                 self.port_allocator.release(launch_id, port)
@@ -389,7 +393,6 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                     "The instance process did not become ready.",
                     {"failure_type": type(exc).__name__, "launch_id": launch_id},
                 ) from None
-
 
     def _write_process_projection(self, record: dict[str, Any], state: str) -> None:
         process = None
@@ -445,9 +448,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
             environment["IMAGE_AGENT_CONFIG_ROOT"] = str(launch_config.config_root)
         return environment
 
-    def _enforce_code_identity(
-        self, task_id: str, instance_id: str, code_identity: str
-    ) -> None:
+    def _enforce_code_identity(self, task_id: str, instance_id: str, code_identity: str) -> None:
         identities = {
             item["code_identity"]
             for item in self._launches_for_instance(task_id, instance_id)
@@ -460,9 +461,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 {"instance_id": instance_id},
             )
 
-    def _validate_start_eligibility(
-        self, task_id: str, instance: dict[str, Any]
-    ) -> None:
+    def _validate_start_eligibility(self, task_id: str, instance: dict[str, Any]) -> None:
         plan = self.store.plan.get(task_id, task_id)
         if plan is None:
             raise HarnessError(
@@ -470,9 +469,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 "The instance stage and task are not authorized to start.",
                 {"task_status": None, "instance_status": instance["status"]},
             )
-        planned = any(
-            item["instance_id"] == instance["instance_id"] for item in plan["instances"]
-        )
+        planned = any(item["instance_id"] == instance["instance_id"] for item in plan["instances"])
         if (
             not planned
             or plan["task"]["status"] not in {"RUNNING", "FAILED"}
@@ -606,9 +603,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
         started = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return (datetime.now(timezone.utc) - started).total_seconds()
 
-    def _active_launch_for_instance(
-        self, task_id: str, instance_id: str
-    ) -> dict[str, Any] | None:
+    def _active_launch_for_instance(self, task_id: str, instance_id: str) -> dict[str, Any] | None:
         return next(
             (
                 item
@@ -618,9 +613,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
             None,
         )
 
-    def _launches_for_instance(
-        self, task_id: str, instance_id: str
-    ) -> list[dict[str, Any]]:
+    def _launches_for_instance(self, task_id: str, instance_id: str) -> list[dict[str, Any]]:
         values = []
         for path in sorted(self.launch_root.glob("*.json")):
             record = read_json(path)
@@ -653,10 +646,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 self.store.lock_timeout_seconds,
             ):
                 record = read_json(path)
-                if (
-                    record["instance_id"] != instance_id
-                    or record["status"] != "IN_PROGRESS"
-                ):
+                if record["instance_id"] != instance_id or record["status"] != "IN_PROGRESS":
                     continue
                 record.update(
                     {
@@ -686,22 +676,14 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
         return root / f"{attempt_id}.json"
 
     def _attempt_lock(self, task_id: str, attempt_id: str) -> Path:
-        return (
-            self.store.layout.control_root
-            / "locks"
-            / f"attempt-{task_id}-{attempt_id}.lock"
-        )
+        return self.store.layout.control_root / "locks" / f"attempt-{task_id}-{attempt_id}.lock"
 
-    def _instance_thread_lock(
-        self, task_id: str, instance_id: str
-    ) -> threading.RLock:
+    def _instance_thread_lock(self, task_id: str, instance_id: str) -> threading.RLock:
         key = (task_id, instance_id)
         with self._lock_registry_guard:
             return self._instance_locks.setdefault(key, threading.RLock())
 
-    def _append_process_event(
-        self, task_id: str, event_type: str, record: dict[str, Any]
-    ) -> None:
+    def _append_process_event(self, task_id: str, event_type: str, record: dict[str, Any]) -> None:
         append_record(
             self.store.layout.control_root / "tasks" / task_id / "events.ndjson",
             {

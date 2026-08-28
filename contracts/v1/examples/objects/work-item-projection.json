@@ -20,6 +20,7 @@
     "instance_id": "instance_kv_a_01",
     "status": "RUNNING",
     "approval_mode": "human",
+    "manual_finished": false,
     "process_state": "RUNNING",
     "restart_required": false,
     "created_at": "2026-08-22T10:00:00Z"

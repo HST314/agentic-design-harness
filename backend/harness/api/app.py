@@ -17,9 +17,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from .. import __version__
-from ..adapters import AdapterRegistry, ImageAgentAdapter, PptAgentContractAdapter
+from ..adapters import (
+    AdapterRegistry,
+    ImageAgentAdapter,
+    PptAgentAdapter,
+    UnavailableAgentAdapter,
+)
 from ..adapters.image_attestation import RuntimeAttestation
 from ..adapters.image_lock import load_image_agent_lock
+from ..adapters.ppt_lock import load_ppt_agent_lock
 from ..contracts import ContractRegistry
 from ..core.config import HarnessSettings, load_settings
 from ..core.errors import ErrorCatalog, HarnessError
@@ -96,10 +102,7 @@ class Container:
             image_adapter is not None
             and (
                 not image_adapter.available
-                or (
-                    self.runtime_attestation is not None
-                    and self.runtime_artifact is not None
-                )
+                or (self.runtime_attestation is not None and self.runtime_artifact is not None)
             )
         )
         return self.operational and image_ready
@@ -108,7 +111,7 @@ class Container:
     def status(self) -> str:
         if not self.ready:
             return "not_ready"
-        return "degraded" if self.image_runtime_error is not None else "ready"
+        return "degraded" if self.adapters.disabled_agent_types() else "ready"
 
 
 class ContractValidationRequest(BaseModel):
@@ -168,7 +171,34 @@ def build_container(
         revision=image_release_lock.revision,
         host=settings.host,
     )
-    adapters = AdapterRegistry([image_adapter, PptAgentContractAdapter()])
+    try:
+        ppt_release_lock = load_ppt_agent_lock(settings.ppt_agent_lock_path)
+        ppt_adapter = PptAgentAdapter(
+            store,
+            contracts,
+            source_root=settings.ppt_agent_root,
+            interpreter=settings.ppt_agent_python,
+            dependency_root=settings.ppt_agent_dependency_root,
+            release_lock=ppt_release_lock,
+            runtime_policy=settings.ppt_agent_runtime_policy,
+            model_config=settings.ppt_agent_model_config,
+            host=settings.host,
+        )
+    except (HarnessError, OSError) as exc:
+        cause = (
+            exc
+            if isinstance(exc, HarnessError)
+            else HarnessError(
+                "ADAPTER_UNAVAILABLE",
+                "The PPT Agent runtime artifact could not be prepared.",
+            )
+        )
+        ppt_adapter = UnavailableAgentAdapter(
+            "ppt",
+            cause,
+            "Run scripts/dev.py setup-ppt-runtime --force, then scripts/dev.py doctor.",
+        )
+    adapters = AdapterRegistry([image_adapter, ppt_adapter])
     runtime_config_observability = RuntimeConfigObservability(store)
     runtime_settings = InstanceRuntimeSettingsService(
         store,
@@ -300,7 +330,9 @@ def create_app(
     model_clients: ModelClientFactory | None = None,
 ) -> FastAPI:
     project_root = Path(__file__).resolve().parents[3]
-    resolved = settings or load_settings(project_root)
+    resolved = (
+        settings.resolve_from(project_root) if settings is not None else load_settings(project_root)
+    )
     configure_logging(resolved.log_level)
     container = build_container(resolved, model_clients=model_clients)
     logger = logging.getLogger("harness.lifecycle")
@@ -315,8 +347,7 @@ def create_app(
                 "The Image Agent adapter is not configured.",
             )
         cache_root = (
-            container.settings.image_agent_dependency_root.resolve().parent
-            / "image-runtime"
+            container.settings.image_agent_dependency_root.resolve().parent / "image-runtime"
         )
         runtime_started = time.monotonic()
         logger.info(
@@ -340,9 +371,7 @@ def create_app(
                     "fields": {
                         "error_code": exc.code,
                         "message": exc.message,
-                        "duration_seconds": round(
-                            time.monotonic() - runtime_started, 3
-                        ),
+                        "duration_seconds": round(time.monotonic() - runtime_started, 3),
                     }
                 },
             )
@@ -358,9 +387,7 @@ def create_app(
                             image_adapter.runtime_builder
                             and image_adapter.runtime_builder.cache_hit
                         ),
-                        "duration_seconds": round(
-                            time.monotonic() - runtime_started, 3
-                        ),
+                        "duration_seconds": round(time.monotonic() - runtime_started, 3),
                     }
                 },
             )
@@ -369,9 +396,7 @@ def create_app(
         retry_budget_recoveries = container.retry_budgets.recover()
         asset_recoveries = container.assets.recover()
         process_recoveries = container.supervisor.reconcile()
-        application_recoveries = container.application.recover(
-            defer_start_operations=True
-        )
+        application_recoveries = container.application.recover(defer_start_operations=True)
         master_recoveries = container.master_threads.recover()
         adapter_recoveries = recover_adapters(container)
         runtime_config_recoveries = container.runtime_settings.recover()
@@ -393,9 +418,7 @@ def create_app(
                     "adapter_recovery_count": len(adapter_recoveries),
                     "runtime_config_recovery_count": len(runtime_config_recoveries),
                     "control_plane_status": container.status,
-                    "startup_duration_seconds": round(
-                        time.monotonic() - startup_started, 3
-                    ),
+                    "startup_duration_seconds": round(time.monotonic() - startup_started, 3),
                 }
             },
         )
@@ -492,7 +515,7 @@ def create_app(
         ready = container.ready
         content: dict[str, Any] = {"status": container.status}
         if container.status == "degraded":
-            content["disabled_adapters"] = ["image"]
+            content["disabled_adapters"] = container.adapters.disabled_agent_types()
         return JSONResponse(
             status_code=200 if ready else 503,
             content=content,

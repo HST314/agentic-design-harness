@@ -722,6 +722,7 @@ class ApplicationDeliveryMixin:
             description=image["description"],
             idempotency_key=f"bundle-{candidate['bundle_id']}-image",
             batch_id=batch_id,
+            bundle_id=candidate["bundle_id"],
         )
         note_manifest = self.assets.publish_delivery(
             task_id,
@@ -731,6 +732,7 @@ class ApplicationDeliveryMixin:
             description=note["description"],
             idempotency_key=f"bundle-{candidate['bundle_id']}-note",
             batch_id=batch_id,
+            bundle_id=candidate["bundle_id"],
         )
         bundle_manifest = {
             "schema_version": "1.0",

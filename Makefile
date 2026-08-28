@@ -10,7 +10,7 @@ REAL_PROVIDER_EVIDENCE_PATH ?= build/real-provider-evidence.json
 REAL_PROVIDER_LOG_FILE ?= build/real-provider-smoke.log
 REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(REAL_PROVIDER_ENV_FILE)",)
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check docs-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e p6-acceptance evidence dev-setup dev-doctor dev-smoke
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check docs-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e p4-acceptance p6-acceptance evidence dev-setup dev-doctor dev-smoke
 
 test: test-env image-agent-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
@@ -32,6 +32,7 @@ boundary-check:
 
 lock-check:
 	$(PYTHON) scripts/verify_image_agent_lock.py
+	$(PYTHON) scripts/verify_ppt_agent_lock.py
 
 dependency-audit: test-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m pip_audit \
@@ -138,6 +139,17 @@ g5-e2e:
 	G5_MAKE="$(MAKE)" G5_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
 		$(PYTHON) scripts/run_g5_gate.py
 	$(PYTHON) scripts/generate_release_evidence.py
+
+p4-acceptance: test-env image-agent-env
+	HARNESS_IMAGE_AGENT_ROOT="$(abspath $(IMAGE_AGENT_ROOT))" \
+	HARNESS_IMAGE_AGENT_PYTHON="$(shell command -v $(PYTHON))" \
+	HARNESS_IMAGE_AGENT_DEPENDENCY_ROOT="$(abspath $(IMAGE_AGENT_DEPS))" \
+	PYTHONPATH="$(PYTHONPATH_VALUE):tests" \
+	$(PYTHON) -m unittest -v \
+		tests.e2e.test_g3_real_image_agent \
+		tests.integration.test_application_service.HarnessApplicationServiceTests.test_ppt_start_gate_lists_unfinished_images_and_is_reversible \
+		tests.e2e.test_g5_real_ppt_agent \
+		tests.unit.test_ppt_adapter
 
 p6-acceptance:
 	$(PYTHON) scripts/run_p6_platform_acceptance.py

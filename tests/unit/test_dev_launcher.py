@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +25,22 @@ from scripts.dev import (
 
 
 class DevelopmentLauncherTests(unittest.TestCase):
+    def test_setup_entrypoint_imports_with_stdlib_only(self) -> None:
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONNOUSERSITE": "1",
+        }
+        completed = subprocess.run(
+            [sys.executable, "-S", "scripts/dev.py", "setup", "--help"],
+            cwd=Path(__file__).resolve().parents[2],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("usage:", completed.stdout)
+
     def test_child_output_is_safe_for_legacy_windows_console_encoding(self) -> None:
         message = "[frontend] ➜ ready"
 
@@ -220,12 +238,14 @@ class DevelopmentLauncherTests(unittest.TestCase):
             patch.object(DevelopmentLauncher, "config_check"),
             patch.object(DevelopmentLauncher, "check_tools"),
             patch.object(DevelopmentLauncher, "verify_image_lock"),
+            patch.object(DevelopmentLauncher, "verify_ppt_lock"),
             patch.object(DevelopmentLauncher, "backend_is_current", return_value=True),
             patch.object(
                 DevelopmentLauncher,
                 "require_current_image_dependencies",
                 side_effect=LauncherError("run scripts/dev.py setup --force"),
             ),
+            patch.object(DevelopmentLauncher, "ppt_runtime_is_attested", return_value=True),
             patch.object(DevelopmentLauncher, "frontend_is_current", return_value=True),
             patch.object(DevelopmentLauncher, "_check_configuration"),
             patch.object(DevelopmentLauncher, "_check_writable_runtime"),
@@ -250,6 +270,7 @@ class DevelopmentLauncherTests(unittest.TestCase):
             patch.object(DevelopmentLauncher, "config_check"),
             patch.object(DevelopmentLauncher, "check_tools"),
             patch.object(DevelopmentLauncher, "verify_image_lock"),
+            patch.object(DevelopmentLauncher, "verify_ppt_lock"),
             patch.object(DevelopmentLauncher, "backend_is_current", return_value=True),
             patch.object(
                 DevelopmentLauncher,
@@ -261,6 +282,7 @@ class DevelopmentLauncherTests(unittest.TestCase):
                 "attest_image_runtime",
                 return_value=attestation,
             ) as attest,
+            patch.object(DevelopmentLauncher, "ppt_runtime_is_attested", return_value=True),
             patch.object(DevelopmentLauncher, "frontend_is_current", return_value=True),
             patch.object(DevelopmentLauncher, "_check_configuration"),
             patch.object(DevelopmentLauncher, "_check_writable_runtime"),
@@ -268,6 +290,42 @@ class DevelopmentLauncherTests(unittest.TestCase):
             launcher.doctor(check_ports=False)
 
         attest.assert_called_once_with(prepare_artifact=True)
+
+    def test_doctor_can_continue_with_an_actionable_ppt_degradation(self) -> None:
+        launcher = DevelopmentLauncher(root=Path("workspace"))
+        runtime = PythonInterpreterIdentity(
+            "cpython", "cpython-313", "3.13.7", "/runtime/python", True
+        )
+        installer = PythonInterpreterIdentity(
+            "cpython", "cpython-313", "3.13.7", "/pip/python", True
+        )
+        with (
+            patch.object(DevelopmentLauncher, "config_check"),
+            patch.object(DevelopmentLauncher, "check_tools"),
+            patch.object(DevelopmentLauncher, "verify_image_lock"),
+            patch.object(DevelopmentLauncher, "verify_ppt_lock"),
+            patch.object(DevelopmentLauncher, "backend_is_current", return_value=True),
+            patch.object(
+                DevelopmentLauncher,
+                "require_current_image_dependencies",
+                return_value=(runtime, installer),
+            ),
+            patch.object(
+                DevelopmentLauncher,
+                "attest_image_runtime",
+                return_value={
+                    "artifact_root": "/cache/image-runtime/artifact",
+                    "artifact_cache_hit": True,
+                    "package_name": "image-agent-mvp",
+                    "package_version": "1.8.6",
+                },
+            ),
+            patch.object(DevelopmentLauncher, "ppt_runtime_is_attested", return_value=False),
+            patch.object(DevelopmentLauncher, "frontend_is_current", return_value=True),
+            patch.object(DevelopmentLauncher, "_check_configuration"),
+            patch.object(DevelopmentLauncher, "_check_writable_runtime"),
+        ):
+            launcher.doctor(check_ports=False, allow_ppt_degraded=True)
 
     def test_start_finishes_runtime_preparation_before_health_timeout_begins(self) -> None:
         launcher = DevelopmentLauncher(root=Path("workspace"))
@@ -300,7 +358,7 @@ class DevelopmentLauncherTests(unittest.TestCase):
             ["runtime_prepared", "children_started", "health_timer_started"],
         )
         self.assertEqual(
-            group.wait_until_healthy.call_args.kwargs["timeout_seconds"], 45.0
+            group.wait_until_healthy.call_args.kwargs["timeout_seconds"], 120.0
         )
 
     def test_busy_port_is_reported_before_process_start(self) -> None:
@@ -322,6 +380,15 @@ class DevelopmentLauncherTests(unittest.TestCase):
                 ]
             ),
             1,
+        )
+
+    def test_ppt_runtime_setup_uses_the_current_interpreter(self) -> None:
+        with patch.object(DevelopmentLauncher, "install_ppt_dependencies") as install:
+            self.assertEqual(main(["setup-ppt-runtime", "--force"]), 0)
+
+        install.assert_called_once_with(
+            force=True,
+            runtime_python=Path(sys.executable),
         )
 
 

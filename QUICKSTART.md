@@ -36,7 +36,7 @@ Windows：
 py -3 scripts/dev.py setup
 ```
 
-启动器会补齐固定 submodule，并分别准备 Harness、Image Agent 和前端依赖。
+启动器会补齐固定 submodule，并分别准备 Harness、Image Agent、PPT Agent 和前端依赖；PPT 依赖安装后会生成并校验运行时证明。
 
 ## 4. 配置检查
 
@@ -80,16 +80,16 @@ Windows：
 py -3 scripts/dev.py
 ```
 
-启动器先显示 `[prepare]` 并验签、预热 Image Runtime，再启动后端与前端；冷缓存构建不占用后续健康检查的 45 秒窗口。只有 `/healthz`、`/readyz` 和 Web 首页都通过后才报告就绪。打开 <http://127.0.0.1:18180/>；按 `Ctrl+C` 联动关闭服务。
+启动器先显示 `[prepare]` 并验签、预热 Image Runtime，再启动后端与前端；冷缓存构建不占用后续健康检查的 120 秒窗口。只有 `/healthz`、`/readyz` 和 Web 首页都通过后才报告就绪。打开 <http://127.0.0.1:18180/>；按 `Ctrl+C` 联动关闭服务。
 
 ## 6. 分步诊断
 
 ```bash
 python3 scripts/dev.py doctor
-python3 scripts/dev.py start --check --timeout 60
+python3 scripts/dev.py start --check --timeout 120
 ```
 
-Windows 将每行开头的 `python3` 替换为 `py -3`。`setup --force` 可重建锁定依赖；`doctor --skip-ports` 只跳过端口检查；`start --check --timeout 60` 在健康检查通过后退出，适合自动化验证。
+Windows 将每行开头的 `python3` 替换为 `py -3`。`setup --force` 可重建锁定依赖；`doctor --skip-ports` 只跳过端口检查；`start --check --timeout 120` 在健康检查通过后退出，适合自动化验证。
 
 常用地址：
 

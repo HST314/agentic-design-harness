@@ -4,7 +4,7 @@
 
 ## 支持边界与启动
 
-支持 Windows 与 Linux 的单进程、单写者、本地文件系统部署。Linux 使用文件锁、`fsync` 和进程组；Windows 使用字节锁、刷新写入、原子替换和 Job Object。两者都校验进程创建身份、防止 PID 复用，并在取消或 Harness 退出时终止完整 Agent 进程树。
+支持 Windows 与 Linux 的单进程、单写者、本地文件系统部署。Linux 使用文件锁、`fsync`、进程组和 Landlock 写入白名单；Windows 使用字节锁、刷新写入、原子替换、Job Object 和托管 Python 子进程写路径审计。两者都校验进程创建身份、防止 PID 复用，并在取消或 Harness 退出时终止完整 Agent 进程树。
 
 ```bash
 python3 scripts/dev.py doctor
@@ -18,7 +18,7 @@ python3 scripts/dev.py start
 | 探针 | 含义 | 自动化使用 |
 | --- | --- | --- |
 | `/healthz` | 后端进程存活 | 只用于判断进程是否响应 |
-| `/readyz` | 恢复已完成、持有唯一 writer lease、后台执行器存活；`ready` 表示 Image 可用，`degraded` 表示仅 Image 被禁用 | 前端、业务调用和流量切换的唯一就绪依据 |
+| `/readyz` | 恢复已完成、持有唯一 writer lease、后台执行器存活；`ready` 表示专业 Agent 均可用，`degraded` 会列出被禁用的 Agent | 前端、业务调用和流量切换的唯一就绪依据 |
 
 后端根路径 `/` 返回 404 是正常行为。进程管理器应发送正常终止信号，等待 Harness 停止监管线程、回收 Agent 进程树并释放 writer lease；不要以强制结束作为日常关闭方式。
 
@@ -32,8 +32,8 @@ python3 scripts/dev.py start
 
 - `control-data/`：事件日志、快照、索引、审批、恢复意图和 usage cursor。
 - `workspace/tasks/`：输入资产、实例私有工作目录、交付候选、共享资产与 manifests。
-- `.runtime/`：可重建的 Image Agent 隔离依赖和只读运行时制品，不属于业务备份。
-- `agents/image-agent.lock.json`：运行时代码与依赖身份；必须与备份记录的主仓提交配套。
+- `.runtime/`：可重建的 Image/PPT Agent 隔离依赖和只读运行时制品，不属于业务备份。
+- `agents/*-agent.lock.json`：运行时代码与依赖身份；必须与备份记录的主仓提交配套。
 
 禁止直接编辑上述业务状态。公开资产是否可见由 manifest 和 publication batch commit 决定，不能靠预置文件或伪造索引恢复。
 
@@ -43,8 +43,8 @@ python3 scripts/dev.py start
 
 1. 停止新写入并正常关闭 Harness，确认 `/readyz` 不再可用。
 2. 在同一备份 revision 中复制两个根目录，保留权限、符号链接语义和时间信息。
-3. 记录主仓 commit、Image Agent lock 摘要以及三份根 YAML 的摘要；秘密另按安全流程备份。
-4. 恢复到空目录，并使用匹配的代码、依赖和 Image lock 启动。
+3. 记录主仓 commit、Image/PPT Agent lock 摘要以及根 YAML 的摘要；秘密另按安全流程备份。
+4. 恢复到空目录，并使用匹配的代码、依赖和 Agent lock 启动。
 5. 启动会截断不完整 NDJSON 尾部、重建投影与索引、恢复 usage cursor、对账 publication intent、Start Operation 与运行配置 saga，并观察活动 Agent；只以原幂等键恢复已记录副作用。
 6. 检查 `recovery-warnings.ndjson`、`readyz`、任务事件、实例 job ID 和 BundleManifest 可见性。
 
@@ -86,9 +86,9 @@ GitHub Actions 在 Windows/Linux 运行后端、前端、启动器和 P6 专项�
 
 ## 升级、迁移与回滚
 
-升级前完成一致备份、`make verify`、适用的 Image E2E，并确认 submodule/lock 成对。先在恢复副本运行新版本，验证 ready、TaskCard revision、受管实例、至少两个分支候选、双资产原子发布和幂等重放，再切换正式目录。
+升级前完成一致备份、`make verify`、适用的 Image/PPT E2E，并确认两个 Agent 的 submodule/lock 成对。先在恢复副本运行新版本，验证 ready、TaskCard revision、受管实例、至少两个分支候选、双资产原子发布、PPT 工作台 ZIP 导出和幂等重放，再切换正式目录。
 
-部署只有锁定内嵌 Image Agent 与 Bundle 写入路径，没有外部目录、旧交付或双写开关。代码回滚必须匹配状态格式、契约 major、主仓 commit 和 Image lock。若目标版本无法读取现有事件，禁止在原状态目录直接降级；应恢复升级前一致备份。Git 回滚不能替代数据回滚。
+部署只有锁定内嵌 Agent 与受控写入路径，没有外部目录、旧交付或双写开关。代码回滚必须匹配状态格式、契约 major、主仓 commit 和 Agent lock。若目标版本无法读取现有事件，禁止在原状态目录直接降级；应恢复升级前一致备份。Git 回滚不能替代数据回滚。
 
 ## 日志与安全
 
@@ -99,4 +99,4 @@ GitHub Actions 在 Windows/Linux 运行后端、前端、启动器和 P6 专项�
 
 ## 已知限制
 
-当前为文件存储、单写者、前端轮询的本地控制面；无数据库、对象存储、多机调度、高可用、RBAC、SSO 或外部通知。PPT Agent 尚未接入运行时，必需 PPT 节点应保持 `BLOCKED_UNAVAILABLE`，不能强制伪造完成。
+当前为文件存储、单写者、前端轮询的本地控制面；无数据库、对象存储、多机调度、高可用、RBAC、SSO 或外部通知。PPT Agent 已接入受控工作台并支持直接导出 ZIP；当前任务完成状态仍由工作台流程管理，不包含 Harness 资产发布闭环。

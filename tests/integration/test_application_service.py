@@ -9,13 +9,13 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.adapters import (
     AdapterCommandResult,
     AdapterObservation,
     AdapterRecoveryResult,
     AdapterRegistry,
-    PptAgentContractAdapter,
     ValidationResult,
 )
 from harness.adapters.image import ImageAgentAdapter
@@ -29,17 +29,20 @@ from harness.services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from harness.services.runtime_config_observability import RuntimeConfigObservability
 from harness.services.supervisor import ProcessSupervisor
 from harness.services.task_config import TaskConfigService
-from harness.storage.atomic import read_json
+from harness.storage.atomic import atomic_write_json, read_json
 from runtime_helpers import (
     build_config_snapshot,
     build_service,
     create_task,
     envelope,
     image_plan,
+    image_to_ppt_plan,
     ppt_plan,
 )
 
 FAKE_AGENT = Path(__file__).resolve().parents[1] / "fixtures" / "fake_agent_process.py"
+
+
 class FakeImageAdapter:
     agent_type = "image"
     available = True
@@ -113,6 +116,14 @@ class FakeImageAdapter:
         return AdapterRecoveryResult(True, "RUNNING")
 
 
+class FakePptAdapter(FakeImageAdapter):
+    agent_type = "ppt"
+
+    def validate_task_card(self, card):
+        errors = () if card.get("agent_type") == "ppt" else ("wrong agent type",)
+        return ValidationResult(valid=not errors, errors=errors)
+
+
 class HarnessApplicationServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -124,7 +135,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.image_config = ImageAgentConfigMaterializer(self.store, self.task_config)
         self.supervisor = ProcessSupervisor(self.store, self.commands, self.image_config)
         self.fake_adapter = FakeImageAdapter()
-        self.adapters = AdapterRegistry([self.fake_adapter, PptAgentContractAdapter()])
+        self.fake_ppt_adapter = FakePptAdapter()
+        self.adapters = AdapterRegistry([self.fake_adapter, self.fake_ppt_adapter])
         self.runtime_settings = InstanceRuntimeSettingsService(
             self.store,
             self.task_config,
@@ -160,6 +172,10 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         entrypoint = artifact_root / "fake_agent_process.py"
         shutil.copyfile(FAKE_AGENT, entrypoint)
         (artifact_root / "requirements.lock").write_text("stdlib-only\n", encoding="utf-8")
+        runtime_policy = artifact_root / "ppt-runtime.yaml"
+        model_config = artifact_root / "ppt-model-config.yaml"
+        runtime_policy.write_text("schema_version: '1.0'\n", encoding="utf-8")
+        model_config.write_text("model_config_id: test\n", encoding="utf-8")
         for path in artifact_root.rglob("*"):
             path.chmod(0o444)
         artifact_root.chmod(0o555)
@@ -173,7 +189,12 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 entrypoint_relpath="fake_agent_process.py",
                 dependency_lock_relpaths=("requirements.lock",),
             ),
+            public_environment={
+                "PPT_AGENT_RUNTIME_POLICY": str(runtime_policy),
+                "PPT_AGENT_MODEL_CONFIG": str(model_config),
+            },
         )
+        self.fake_ppt_adapter.runtime_spec = self.fake_adapter.runtime_spec
 
     def test_plan_and_instance_creation_is_atomic_to_callers_and_idempotent(self) -> None:
         created = create_task(self.commands, "t_application")
@@ -221,12 +242,49 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 envelope=envelope("recover-application-plan", created["revision"]),
                 crash_hook=crash,
             )
-        self.assertIsNotNone(
-            self.store.plan.get("t_recover_application", "t_recover_application")
-        )
+        self.assertIsNotNone(self.store.plan.get("t_recover_application", "t_recover_application"))
         recovered = self.application.recover()
         self.assertEqual(recovered[0]["status"], "RECOVERED")
         self.assertIsNotNone(self.store.plan.get("t_recover_application", "t_recover_application"))
+
+    def test_startup_defers_prepared_instance_start_to_background_runner(self) -> None:
+        intent_path = self.application._intent_path("recover_deferred_instance_start")
+        atomic_write_json(
+            intent_path,
+            {
+                "schema_version": "1.0",
+                "kind": "START_INSTANCE",
+                "operation_id": "recover_deferred_instance_start",
+                "request_sha256": "0" * 64,
+                "request": {
+                    "task_id": "t_deferred_instance_start",
+                    "instance_id": "i_image_1",
+                    "envelope": {},
+                },
+                "state": "PREPARED",
+                "prepared_at": "2026-08-28T03:00:00Z",
+                "result": None,
+            },
+        )
+
+        with patch.object(self.application, "_resume_instance_operation") as resume:
+            recovered = self.application.recover(defer_start_operations=True)
+
+            resume.assert_not_called()
+            self.assertEqual(
+                recovered,
+                [
+                    {
+                        "operation_id": "recover_deferred_instance_start",
+                        "status": "PENDING",
+                        "result": None,
+                    }
+                ],
+            )
+
+            self.application._run_pending_starts()
+
+        resume.assert_called_once_with(intent_path)
 
     def test_invalid_plan_is_rejected_before_an_intent_is_written(self) -> None:
         created = create_task(self.commands, "t_invalid_application")
@@ -310,7 +368,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertIsNone(self.store.instance.get("t_intent_revision_advance", "i_image_2"))
         self.assertEqual(self.application.recover(), [])
 
-    def test_unavailable_ppt_plan_saves_without_deployment_configuration(self) -> None:
+    def test_ppt_plan_is_ready_for_runtime_start(self) -> None:
         created = create_task(self.commands, "t_ppt_application")
         draft = ppt_plan("t_ppt_application")
         result = self.application.save_plan_and_create_instances(
@@ -321,8 +379,126 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             operation_id="save_ppt_application_plan",
             envelope=envelope("save-ppt-application-plan", created["revision"]),
         )
-        self.assertEqual(result["plan"]["instances"][0]["status"], "UNAVAILABLE")
+        self.assertEqual(result["plan"]["instances"][0]["status"], "READY")
         self.assertNotIn("credential_pair_ref", result["plan"]["instances"][0])
+
+    def test_ppt_start_gate_lists_unfinished_images_and_is_reversible(self) -> None:
+        created = create_task(self.commands, "t_ppt_gate")
+        draft = image_to_ppt_plan("t_ppt_gate")
+        saved = self.application.save_plan_and_create_instances(
+            "t_ppt_gate",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_ppt_gate",
+            envelope=envelope("save-ppt-gate", created["revision"]),
+        )
+        confirmed = self.commands.confirm_start(
+            "t_ppt_gate",
+            envelope("confirm-ppt-gate", saved["task_revision"]),
+        )
+
+        with self.assertRaises(HarnessError) as blocked:
+            self.application.start_instance(
+                "t_ppt_gate",
+                "i_ppt_1",
+                operation_id="start_blocked_ppt",
+                envelope=envelope(
+                    "start-blocked-ppt", confirmed["task_revision"]
+                ),
+            )
+        self.assertEqual(blocked.exception.code, "INVALID_STATE_TRANSITION")
+        self.assertEqual(
+            blocked.exception.details["unfinished_instance_ids"], ["i_image_1"]
+        )
+
+        finished = self.commands.set_manual_finished(
+            "t_ppt_gate",
+            "i_image_1",
+            True,
+            envelope("finish-ppt-gate-image", confirmed["task_revision"]),
+        )
+        self.application._require_ppt_start_gate("t_ppt_gate", "i_ppt_1")
+        resumed = self.commands.set_manual_finished(
+            "t_ppt_gate",
+            "i_image_1",
+            False,
+            envelope("resume-ppt-gate-image", finished["task_revision"]),
+        )
+        with self.assertRaises(HarnessError):
+            self.application._require_ppt_start_gate("t_ppt_gate", "i_ppt_1")
+        self.assertFalse(
+            next(
+                item
+                for item in resumed["plan"]["instances"]
+                if item["instance_id"] == "i_image_1"
+            )["manual_finished"]
+        )
+
+    def test_task_start_targets_only_instances_in_ready_stages(self) -> None:
+        created = create_task(self.commands, "t_staged_start")
+        draft = image_to_ppt_plan("t_staged_start")
+        saved = self.application.save_plan_and_create_instances(
+            "t_staged_start",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_staged_start",
+            envelope=envelope("save-staged-start", created["revision"]),
+        )
+
+        def crash(checkpoint: str) -> None:
+            if checkpoint == "after_start_intent":
+                raise SimulatedCrash(checkpoint)
+
+        with self.assertRaises(SimulatedCrash):
+            self.application.confirm_and_start_ready_instances(
+                "t_staged_start",
+                operation_id="start_staged_start",
+                envelope=envelope("start-staged-start", saved["task_revision"]),
+                crash_hook=crash,
+            )
+        intent = read_json(self.application._intent_path("start_staged_start"))
+        self.assertEqual(intent["target_instance_ids"], ["i_image_1"])
+
+    def test_two_ppt_instances_start_on_distinct_ports_and_workspaces(self) -> None:
+        self._configure_runtime_artifact("parallel-ppt-fake-agent")
+        created = create_task(self.commands, "t_parallel_ppt")
+        draft = ppt_plan("t_parallel_ppt", count=2)
+        saved = self.application.save_plan_and_create_instances(
+            "t_parallel_ppt",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_parallel_ppt",
+            envelope=envelope("save-parallel-ppt", created["revision"]),
+        )
+
+        started = self.application.confirm_and_start_ready_instances(
+            "t_parallel_ppt",
+            operation_id="start_parallel_ppt",
+            envelope=envelope("start-parallel-ppt", saved["task_revision"]),
+        )
+
+        self.assertEqual(started["state"], "COMMITTED")
+        instances = [
+            self.store.instance.get("t_parallel_ppt", instance_id)
+            for instance_id in ("i_ppt_1", "i_ppt_2")
+        ]
+        self.assertEqual({item["status"] for item in instances}, {"RUNNING"})
+        self.assertEqual(len({item["process"]["port"] for item in instances}), 2)
+        roots = [
+            self.store.layout.workspace_root
+            / "tasks"
+            / "t_parallel_ppt"
+            / "instances"
+            / item["instance_id"]
+            for item in instances
+        ]
+        self.assertEqual(len(set(roots)), 2)
+        self.assertTrue(all(root.is_dir() for root in roots))
+        for item in instances:
+            self.application.cancel_instance("t_parallel_ppt", item["instance_id"])
 
     def test_start_intent_replays_adapter_start_after_process_crash_window(self) -> None:
         self._configure_runtime_artifact("application-fake-agent")
@@ -460,9 +636,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                             proposal["proposal_id"],
                             envelope=envelope(
                                 f"confirm-foreign-{suffix}",
-                                self.store.task.revision(
-                                    foreign_task_id, foreign_task_id
-                                ),
+                                self.store.task.revision(foreign_task_id, foreign_task_id),
                             ),
                         )
                     self.assertEqual(raised.exception.code, "CONTROL_PLANE_NOT_READY")
@@ -496,9 +670,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                     )
 
                 recovered = self.application.recover()
-                recovery = next(
-                    item for item in recovered if item["operation_id"] == operation_id
-                )
+                recovery = next(item for item in recovered if item["operation_id"] == operation_id)
                 self.assertEqual(recovery["status"], "RECOVERED")
                 self.assertEqual(
                     self.store.instance.get(recovery_task_id, "i_image_1")["status"],
@@ -731,9 +903,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(failed["state"], "RETRYABLE_FAILED")
-        instance_state = self.store.instance.get(
-            "t_agent_start_failure", "i_image_1"
-        )
+        instance_state = self.store.instance.get("t_agent_start_failure", "i_image_1")
         self.assertEqual(instance_state["status"], "FAILED_TO_START")
         self.assertEqual(instance_state["process"]["state"], "RUNNING")
         self.assertEqual(instance_state["start_failure"]["phase"], "AGENT_STARTING")
@@ -1238,9 +1408,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             action="publish_bundle",
             payload={},
             operation_id="publish_bundle_main_01",
-            envelope=envelope(
-                "publish-bundle-main-01", approval["approval_revision"]
-            ),
+            envelope=envelope("publish-bundle-main-01", approval["approval_revision"]),
         )
 
         self.assertEqual(resolved["instance"]["status"], "SUCCEEDED")
@@ -1249,6 +1417,17 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(
             {(item["manifest"]["role"], item["manifest"]["mime_type"]) for item in assets},
             {("final_artwork", "image/png"), ("design_note", "text/markdown")},
+        )
+        self.assertEqual(
+            {item["manifest"]["relative_path"] for item in assets},
+            {
+                f"resources/shared/{candidate['bundle_id']}.png",
+                f"resources/shared/{candidate['bundle_id']}.md",
+            },
+        )
+        self.assertEqual(
+            {item["manifest"]["bundle_id"] for item in assets},
+            {candidate["bundle_id"]},
         )
         bundles = self.assets.list_bundle_manifests(task_id)
         self.assertEqual(len(bundles), 1)
@@ -1276,9 +1455,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             action="publish_bundle",
             payload={},
             operation_id="publish_bundle_main_01",
-            envelope=envelope(
-                "publish-bundle-main-01", approval["approval_revision"]
-            ),
+            envelope=envelope("publish-bundle-main-01", approval["approval_revision"]),
         )
         self.assertEqual(replay["bundle_manifest"], resolved["bundle_manifest"])
         self.assertEqual(len(self.assets.list_assets(task_id)), 4)
@@ -1326,17 +1503,13 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.fake_adapter.observation = AdapterObservation(
             "RUNNING", step_id="completed", details={"completed": True}
         )
-        approval = self.application.observe_instance(task_id, "i_image_1")["delivery"][
-            "approval"
-        ]
+        approval = self.application.observe_instance(task_id, "i_image_1")["delivery"]["approval"]
 
         def crash(checkpoint: str) -> None:
             if checkpoint == "after_bundle_manifest_write":
                 raise SimulatedCrash(checkpoint)
 
-        resolve_envelope = envelope(
-            "publish-crash-safe-bundle", approval["approval_revision"]
-        )
+        resolve_envelope = envelope("publish-crash-safe-bundle", approval["approval_revision"])
         with self.assertRaises(SimulatedCrash):
             self.application.resolve_approval(
                 approval["approval"]["approval_id"],
@@ -1413,7 +1586,6 @@ class HarnessApplicationServiceTests(unittest.TestCase):
                 ],
             )
         self.assertEqual(unexpected.exception.code, "VALIDATION_ERROR")
-
 
     def test_publication_batch_is_invisible_until_instance_success(self) -> None:
         task_id = "t_atomic_publication_visibility"

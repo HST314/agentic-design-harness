@@ -178,6 +178,8 @@ class ApplicationPlanningMixin:
                 {"instance_id": instance_id},
             )
         self._require_valid_card(adapter, cast(TaskCard, card))
+        if instance["agent_type"] == "ppt" and progress.get("side_effect_stage") == "NONE":
+            self._require_ppt_start_gate(task_id, instance_id)
         if instance["agent_type"] == "image":
             self.runtime_settings.ensure_before_start_locked(task_id, instance_id)
         spec = adapter.prepare(

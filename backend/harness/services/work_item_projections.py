@@ -298,6 +298,7 @@ class WorkItemProjectionService:
             "instance_id": instance["instance_id"],
             "status": instance["status"],
             "approval_mode": instance["approval_mode"],
+            "manual_finished": bool(instance.get("manual_finished", False)),
             "process_state": None if process is None else process["state"],
             "restart_required": bool(instance.get("restart_required", False)),
             "created_at": instance["created_at"],
@@ -316,7 +317,10 @@ class WorkItemProjectionService:
                 {
                     "code": "ADAPTER_UNAVAILABLE",
                     "severity": "error",
-                    "message": f"{item['agent_type'].upper()} 能力尚未接入。",
+                    "message": (
+                        f"{item['agent_type'].upper()} 能力当前不可用。"
+                        "请检查对应 Agent 的锁定依赖和运行配置。"
+                    ),
                 }
             )
         if current is None:

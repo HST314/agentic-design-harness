@@ -38,6 +38,9 @@
         }
       ]
     },
+    "bundle_id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
     "kind": {
       "type": "string",
       "enum": ["image", "presentation", "document", "archive", "other"]
