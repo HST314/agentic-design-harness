@@ -74,6 +74,29 @@ class FoundationTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(json_path.stat().st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE(yaml_path.stat().st_mode), 0o600)
 
+    def test_atomic_write_retries_transient_windows_replace_denial(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "state.json"
+            real_replace = os.replace
+            attempts = 0
+
+            def transient_replace(source: Path, destination: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError("temporarily held by a reader")
+                real_replace(source, destination)
+
+            with (
+                patch("harness.storage.atomic._RETRY_REPLACE_PERMISSION_ERRORS", True),
+                patch("harness.storage.atomic.os.replace", side_effect=transient_replace),
+                patch("harness.storage.atomic.time.sleep"),
+            ):
+                atomic_write_json(path, {"revision": 3})
+
+            self.assertEqual(attempts, 3)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"revision": 3})
+
     def test_log_redaction_handles_keys_and_values(self) -> None:
         value = redact(
             {

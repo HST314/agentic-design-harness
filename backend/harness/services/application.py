@@ -385,13 +385,26 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                         "The start recovery idempotency key was reused for another request.",
                     )
                 return self._start_operation_summary(intent)
-            if intent["state"] != "RETRYABLE_FAILED":
+            recoverable_ppt_gate_failure = self._is_recoverable_ppt_gate_failure(intent)
+            if intent["state"] != "RETRYABLE_FAILED" and not recoverable_ppt_gate_failure:
                 raise HarnessError(
                     "INVALID_STATE_TRANSITION",
                     "Only a retryable failed start operation may be recovered.",
                     {"current": intent["state"]},
                 )
-            if not self._start_operation_summary(intent)["retry_allowed"]:
+            max_attempts = int(intent.get("max_attempts", 0))
+            attempts_exhausted = bool(
+                max_attempts
+                and intent["instance_progress"]
+                and all(
+                    int(progress.get("attempt", 0)) >= max_attempts
+                    for progress in intent["instance_progress"].values()
+                )
+            )
+            if (
+                not recoverable_ppt_gate_failure
+                and not self._start_operation_summary(intent)["retry_allowed"]
+            ) or (recoverable_ppt_gate_failure and attempts_exhausted):
                 raise HarnessError(
                     "INVALID_STATE_TRANSITION",
                     "The start operation exhausted its retry attempts.",
@@ -400,6 +413,17 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             task_id = intent["request"]["task_id"]
             self.commands.validate_task_revision(task_id, envelope.expected_revision)
             now = utc_now()
+            if recoverable_ppt_gate_failure:
+                for progress in intent["instance_progress"].values():
+                    if progress["state"] == "ABORTED":
+                        progress["state"] = "RETRYABLE_FAILED"
+                        if isinstance(progress.get("last_error"), dict):
+                            progress["last_error"]["retryable"] = True
+                intent["state"] = "RETRYABLE_FAILED"
+                if isinstance(intent.get("last_error"), dict):
+                    intent["last_error"]["retryable"] = True
+                intent["completed_at"] = None
+                intent.pop("error", None)
             for progress in intent["instance_progress"].values():
                 if progress["state"] == "RETRYABLE_FAILED":
                     progress.update(
@@ -913,7 +937,37 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 },
             )
 
+    def _is_recoverable_ppt_gate_failure(self, intent: dict[str, Any]) -> bool:
+        """Recognize the side-effect-free gate mismatch emitted by the prior release."""
 
+        error = intent.get("last_error")
+        if (
+            intent.get("kind") != "START_INSTANCE"
+            or intent.get("state") != "ABORTED"
+            or not isinstance(error, dict)
+            or error.get("code") != "INVALID_STATE_TRANSITION"
+            or error.get("message")
+            != "The instance stage and task are not authorized to start."
+        ):
+            return False
+        task_id = intent.get("request", {}).get("task_id")
+        instance_id = intent.get("request", {}).get("instance_id")
+        if not isinstance(task_id, str) or not isinstance(instance_id, str):
+            return False
+        progress = intent.get("instance_progress", {}).get(instance_id)
+        if not isinstance(progress, dict) or progress.get("side_effect_stage") != "NONE":
+            return False
+        try:
+            instance = self._instance(task_id, instance_id)
+            if instance["agent_type"] != "ppt" or instance["status"] not in {
+                "READY",
+                "FAILED_TO_START",
+            }:
+                return False
+            self._require_ppt_start_gate(task_id, instance_id)
+        except HarnessError:
+            return False
+        return True
 
     def _plan(self, task_id: str) -> dict[str, Any]:
         plan = self.store.plan.get(task_id, task_id)

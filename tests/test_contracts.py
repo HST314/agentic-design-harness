@@ -280,7 +280,19 @@ def expected_stage_status(
         stage_by_id[dependency]["status"] == "SUCCEEDED"
         for dependency in stage["depends_on"]
     )
-    if not dependencies_succeeded:
+    image_instances = [
+        item for item in instance_by_id.values() if item["agent_type"] == "image"
+    ]
+    manual_ppt_gate = bool(
+        stage["type"] == "ppt"
+        and stage["depends_on"]
+        and image_instances
+        and all(item.get("manual_finished", False) for item in image_instances)
+    )
+    already_activated = (
+        stage["requirement_lifecycle"]["first_activated_at"] is not None
+    )
+    if not dependencies_succeeded and not manual_ppt_gate and not already_activated:
         return "PENDING"
     if instance_statuses & EXECUTING_INSTANCE_STATUSES:
         return "RUNNING"
@@ -896,6 +908,27 @@ class TopologyTests(unittest.TestCase):
 
 
 class AggregateStateTests(unittest.TestCase):
+    def test_manual_image_gate_authorizes_pending_ppt_stage(self) -> None:
+        plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
+        image_instance, ppt_instance = plan["instances"]
+        ppt_stage = plan["stages"][1]
+        ppt_instance["status"] = "READY"
+        image_instance["manual_finished"] = True
+        stage_by_id = {item["stage_id"]: item for item in plan["stages"]}
+        instance_by_id = {
+            item["instance_id"]: item for item in plan["instances"]
+        }
+
+        self.assertEqual(
+            expected_stage_status(ppt_stage, stage_by_id, instance_by_id),
+            "READY",
+        )
+        image_instance["manual_finished"] = False
+        self.assertEqual(
+            expected_stage_status(ppt_stage, stage_by_id, instance_by_id),
+            "PENDING",
+        )
+
     def test_activated_child_requires_first_activation_fact(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-to-ppt.json")
         plan["instances"][0]["requirement_lifecycle"][

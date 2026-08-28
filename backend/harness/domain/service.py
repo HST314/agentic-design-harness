@@ -19,7 +19,7 @@ from ..storage.repository import Actor
 from ..storage.store import FileStateStore
 from .commands import CommandEnvelope
 from .plan import validate_plan
-from .state_machine import StateMachine
+from .state_machine import StateMachine, stage_dependencies_authorized
 
 
 def utc_now() -> str:
@@ -1017,8 +1017,8 @@ class TaskCommandService:
         for stage in sorted(plan["stages"], key=lambda item: item["position"]):
             before = stage["status"]
             target = self.machine.aggregate_stage(stage, stage_by_id, instance_by_id)
-            dependencies_ready = all(
-                stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]
+            dependencies_ready = stage_dependencies_authorized(
+                stage, stage_by_id, instance_by_id
             )
             if activate_new and dependencies_ready and stage["type"] == "ppt":
                 self._activate_lifecycle(stage, now)
@@ -1031,6 +1031,10 @@ class TaskCommandService:
     def _validate_stage_reaggregation(self, current: str, target: str) -> None:
         """Validate plan-revision reaggregation through catalog-listed intermediate states."""
 
+        if current == "PENDING" and target == "RUNNING":
+            self.machine.transition("stage", "PENDING", "READY")
+            self.machine.transition("stage", "READY", "RUNNING")
+            return
         if current == "FAILED" and target == "SUCCEEDED":
             self.machine.transition("stage", "FAILED", "RUNNING")
             self.machine.transition("stage", "RUNNING", "SUCCEEDED")
@@ -1045,7 +1049,7 @@ class TaskCommandService:
         stage_by_id = {item["stage_id"]: item for item in plan["stages"]}
         instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
         for stage in sorted(plan["stages"], key=lambda item: item["position"]):
-            if not all(stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]):
+            if not stage_dependencies_authorized(stage, stage_by_id, instance_by_id):
                 continue
             self._activate_lifecycle(stage, now)
             for instance_id in stage["instance_ids"]:

@@ -645,6 +645,153 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             )["manual_finished"]
         )
 
+    def test_manually_finished_images_authorize_ppt_process_start(self) -> None:
+        created = create_task(self.commands, "t_ppt_manual_gate_start")
+        draft = image_to_ppt_plan("t_ppt_manual_gate_start")
+        saved = self.application.save_plan_and_create_instances(
+            "t_ppt_manual_gate_start",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_ppt_manual_gate_start",
+            envelope=envelope(
+                "save-ppt-manual-gate-start", created["revision"]
+            ),
+        )
+        confirmed = self.commands.confirm_start(
+            "t_ppt_manual_gate_start",
+            envelope(
+                "confirm-ppt-manual-gate-start", saved["task_revision"]
+            ),
+        )
+        finished = self.commands.set_manual_finished(
+            "t_ppt_manual_gate_start",
+            "i_image_1",
+            True,
+            envelope(
+                "finish-ppt-manual-gate-image", confirmed["task_revision"]
+            ),
+        )
+        self._configure_runtime_artifact("ppt-manual-gate-runtime")
+        self.application.start_monitoring()
+
+        queued = self.application.start_instance(
+            "t_ppt_manual_gate_start",
+            "i_ppt_1",
+            operation_id="start_ppt_after_manual_gate",
+            envelope=envelope(
+                "start-ppt-after-manual-gate", finished["task_revision"]
+            ),
+        )
+        self.assertEqual(queued["state"], "QUEUED")
+        completed = self._wait_for_start_operation("start_ppt_after_manual_gate")
+
+        self.assertEqual(completed["state"], "COMMITTED")
+        plan = self.store.plan.get(
+            "t_ppt_manual_gate_start", "t_ppt_manual_gate_start"
+        )
+        assert plan is not None
+        ppt_instance = next(
+            item for item in plan["instances"] if item["instance_id"] == "i_ppt_1"
+        )
+        ppt_stage = next(
+            item for item in plan["stages"] if item["stage_id"] == "s_ppt"
+        )
+        self.assertEqual(ppt_instance["status"], "RUNNING")
+        self.assertEqual(ppt_stage["status"], "RUNNING")
+        self.assertIsNotNone(
+            ppt_instance["requirement_lifecycle"]["first_activated_at"]
+        )
+        self.application.cancel_instance("t_ppt_manual_gate_start", "i_ppt_1")
+
+    def test_prior_ppt_gate_failure_can_be_recovered_without_recreating_task(self) -> None:
+        created = create_task(self.commands, "t_recover_ppt_gate")
+        draft = image_to_ppt_plan("t_recover_ppt_gate")
+        saved = self.application.save_plan_and_create_instances(
+            "t_recover_ppt_gate",
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_recover_ppt_gate",
+            envelope=envelope("save-recover-ppt-gate", created["revision"]),
+        )
+        confirmed = self.commands.confirm_start(
+            "t_recover_ppt_gate",
+            envelope("confirm-recover-ppt-gate", saved["task_revision"]),
+        )
+        finished = self.commands.set_manual_finished(
+            "t_recover_ppt_gate",
+            "i_image_1",
+            True,
+            envelope("finish-recover-ppt-gate", confirmed["task_revision"]),
+        )
+        self._configure_runtime_artifact("recover-ppt-gate-runtime")
+        self.application.start_monitoring()
+        failed_at = "2026-08-28T07:45:03.051352Z"
+        failure = {
+            "attempt": 1,
+            "code": "INVALID_STATE_TRANSITION",
+            "details": {},
+            "failed_at": failed_at,
+            "message": "The instance stage and task are not authorized to start.",
+            "operation_id": "recoverable_prior_ppt_gate_start",
+            "phase": "PROCESS_STARTING",
+            "retryable": False,
+        }
+        atomic_write_json(
+            self.application._intent_path("recoverable_prior_ppt_gate_start"),
+            {
+                "schema_version": "1.1",
+                "kind": "START_INSTANCE",
+                "operation_id": "recoverable_prior_ppt_gate_start",
+                "request_sha256": "prior-release-gate-mismatch",
+                "request": {
+                    "task_id": "t_recover_ppt_gate",
+                    "instance_id": "i_ppt_1",
+                    "envelope": envelope(
+                        "recoverable-prior-ppt-gate-start",
+                        finished["task_revision"],
+                    ).model_dump(mode="json"),
+                },
+                "target_instance_ids": ["i_ppt_1"],
+                "unavailable": [],
+                "instance_progress": {
+                    "i_ppt_1": {
+                        "state": "ABORTED",
+                        "attempt": 1,
+                        "launch_id": "launch_prior_gate_mismatch",
+                        "side_effect_stage": "NONE",
+                        "last_error": deepcopy(failure),
+                        "updated_at": failed_at,
+                    }
+                },
+                "state": "ABORTED",
+                "last_error": deepcopy(failure),
+                "error": deepcopy(failure),
+                "created_at": failed_at,
+                "updated_at": failed_at,
+                "completed_at": failed_at,
+                "max_attempts": 3,
+                "result": None,
+            },
+        )
+
+        retried = self.application.retry_start_operation(
+            "recoverable_prior_ppt_gate_start",
+            envelope=envelope(
+                "retry-prior-ppt-gate-start",
+                self.store.task.revision(
+                    "t_recover_ppt_gate", "t_recover_ppt_gate"
+                ),
+            ),
+        )
+        self.assertEqual(retried["state"], "QUEUED")
+        completed = self._wait_for_start_operation(
+            "recoverable_prior_ppt_gate_start"
+        )
+        self.assertEqual(completed["state"], "COMMITTED")
+        self.application.cancel_instance("t_recover_ppt_gate", "i_ppt_1")
+
     def test_task_start_targets_only_instances_in_ready_stages(self) -> None:
         created = create_task(self.commands, "t_staged_start")
         draft = image_to_ppt_plan("t_staged_start")

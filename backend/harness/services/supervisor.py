@@ -17,6 +17,7 @@ from typing import Any
 
 from ..core.errors import HarnessError
 from ..domain.service import TaskCommandService
+from ..domain.state_machine import stage_dependencies_authorized
 from ..storage.atomic import atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
 from ..storage.locks import FileLock
@@ -469,12 +470,30 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 "The instance stage and task are not authorized to start.",
                 {"task_status": None, "instance_status": instance["status"]},
             )
-        planned = any(item["instance_id"] == instance["instance_id"] for item in plan["instances"])
+        planned_instance = next(
+            (
+                item
+                for item in plan["instances"]
+                if item["instance_id"] == instance["instance_id"]
+            ),
+            None,
+        )
+        stage_by_id = {item["stage_id"]: item for item in plan["stages"]}
+        instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
+        stage_authorized = False
+        if planned_instance is not None:
+            stage = stage_by_id.get(planned_instance["stage_id"])
+            if stage is not None:
+                stage_authorized = bool(
+                    planned_instance["requirement_lifecycle"]["first_activated_at"]
+                    is not None
+                    or stage_dependencies_authorized(stage, stage_by_id, instance_by_id)
+                )
         if (
-            not planned
+            planned_instance is None
             or plan["task"]["status"] not in {"RUNNING", "FAILED"}
             or instance["status"] not in {"READY", "FAILED_TO_START", "FAILED", "CRASHED"}
-            or instance["requirement_lifecycle"]["first_activated_at"] is None
+            or not stage_authorized
         ):
             raise HarnessError(
                 "INVALID_STATE_TRANSITION",

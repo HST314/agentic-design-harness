@@ -6,10 +6,14 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+_RETRY_REPLACE_PERMISSION_ERRORS = os.name == "nt"
+_REPLACE_RETRY_TIMEOUT_SECONDS = 1.0
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -56,6 +60,22 @@ def set_permissions(path: Path, mode: int, *, descriptor: int | None = None) -> 
     os.chmod(path, mode)
 
 
+def _replace_tolerating_transient_windows_reader(source: Path, destination: Path) -> None:
+    """Retry when a short-lived Windows reader temporarily denies replacement."""
+
+    deadline = time.monotonic() + _REPLACE_RETRY_TIMEOUT_SECONDS
+    delay = 0.01
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if not _RETRY_REPLACE_PERMISSION_ERRORS or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+
 def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
     """Commit bytes in the destination directory without exposing a partial file."""
 
@@ -73,7 +93,7 @@ def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
+        _replace_tolerating_transient_windows_reader(temporary_path, path)
         set_permissions(path, mode)
         fsync_directory(path.parent)
     except BaseException:

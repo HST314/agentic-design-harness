@@ -15,6 +15,25 @@ FAILED = {"FAILED_TO_START", "FAILED", "CRASHED"}
 TASK_TERMINAL = {"SUCCEEDED", "PARTIAL", "CANCELLED"}
 
 
+def stage_dependencies_authorized(
+    stage: dict[str, Any],
+    stage_by_id: dict[str, dict[str, Any]],
+    instance_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Return whether a stage may activate under delivery or the PPT human gate."""
+
+    if all(stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]):
+        return True
+    if stage["type"] != "ppt" or not stage["depends_on"]:
+        return False
+    image_instances = [
+        item for item in instance_by_id.values() if item["agent_type"] == "image"
+    ]
+    return bool(image_instances) and all(
+        item.get("manual_finished", False) for item in image_instances
+    )
+
+
 class StateMachine:
     def __init__(self, status_catalog_path: Path) -> None:
         self.catalog = json.loads(status_catalog_path.read_text(encoding="utf-8"))
@@ -36,7 +55,13 @@ class StateMachine:
     ) -> str:
         if stage["status"] in {"SKIPPED", "CANCELLED"}:
             return stage["status"]
-        if not all(stage_by_id[item]["status"] == "SUCCEEDED" for item in stage["depends_on"]):
+        dependencies_authorized = stage_dependencies_authorized(
+            stage, stage_by_id, instance_by_id
+        )
+        already_activated = (
+            stage["requirement_lifecycle"]["first_activated_at"] is not None
+        )
+        if not dependencies_authorized and not already_activated:
             return "PENDING"
         instances = [instance_by_id[item] for item in stage["instance_ids"]]
         statuses = {item["status"] for item in instances}
