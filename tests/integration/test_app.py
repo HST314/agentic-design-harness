@@ -41,6 +41,7 @@ class ApplicationTests(unittest.TestCase):
                 self.assertEqual(
                     client.get("/api/v1/adapters").json()["items"],
                     [
+                        {"agent_type": "general", "available": True},
                         {"agent_type": "image", "available": False},
                         {"agent_type": "ppt", "available": True},
                     ],
@@ -75,6 +76,7 @@ class ApplicationTests(unittest.TestCase):
                 self.assertEqual(
                     client.get("/api/v1/adapters").json()["items"],
                     [
+                        {"agent_type": "general", "available": True},
                         {"agent_type": "image", "available": True},
                         {"agent_type": "ppt", "available": False},
                     ],
@@ -240,6 +242,7 @@ class ApplicationTests(unittest.TestCase):
                 self.assertEqual(
                     adapters.json()["items"],
                     [
+                        {"agent_type": "general", "available": True},
                         {"agent_type": "image", "available": True},
                         {"agent_type": "ppt", "available": True},
                     ],

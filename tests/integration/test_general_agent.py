@@ -21,8 +21,8 @@ class GeneralAgentIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             snapshot = build_config_snapshot(
-                supervisor_port_start=19100,
-                supervisor_port_end=19120,
+                supervisor_port_start=19300,
+                supervisor_port_end=19320,
                 supervisor_startup_timeout=10,
             )
             app = create_app(
@@ -106,32 +106,44 @@ class GeneralAgentIntegrationTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(planned.status_code, 200, planned.text)
-                started = client.post(
-                    f"/api/v1/tasks/{task_id}/confirm-start",
-                    json={
-                        "operation_id": "start_general_flow",
-                        "instance_ids": [instance_id],
-                        "envelope": self._envelope("start-general-flow", 2),
-                    },
-                )
-                self.assertEqual(started.status_code, 200, started.text)
-                operation = started.json()
-                deadline = time.monotonic() + 12
-                while operation["state"] in {"QUEUED", "RUNNING"} and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                    operation = client.get("/api/v1/start-operations/start_general_flow").json()
-                self.assertEqual(operation["state"], "COMMITTED", operation)
-                instance = client.get(
-                    f"/api/v1/instances/{instance_id}?refresh=false"
-                ).json()["instance"]
-                self.assertEqual(instance["status"], "RUNNING")
-                with urlopen(f"{instance['ui_url']}api/messages", timeout=3) as response:
-                    payload = json.loads(response.read())
-                self.assertEqual(payload["messages"][0]["role"], "user")
-                self.assertIn("Summarize the files", payload["messages"][0]["content"])
-                projection = client.get(f"/api/v1/tasks/{task_id}/work-items").json()
-                self.assertEqual(projection["items"][0]["agent_type"], "general")
-                self.assertTrue(projection["items"][0]["stage"]["available"])
+                try:
+                    started = client.post(
+                        f"/api/v1/tasks/{task_id}/confirm-start",
+                        json={
+                            "operation_id": "start_general_flow",
+                            "instance_ids": [instance_id],
+                            "envelope": self._envelope("start-general-flow", 2),
+                        },
+                    )
+                    self.assertEqual(started.status_code, 200, started.text)
+                    operation = started.json()
+                    deadline = time.monotonic() + 12
+                    while (
+                        operation["state"] in {"QUEUED", "RUNNING"}
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.05)
+                        operation = client.get(
+                            "/api/v1/start-operations/start_general_flow"
+                        ).json()
+                    self.assertEqual(operation["state"], "COMMITTED", operation)
+                    instance = client.get(
+                        f"/api/v1/instances/{instance_id}?refresh=false"
+                    ).json()["instance"]
+                    self.assertEqual(instance["status"], "RUNNING")
+                    with urlopen(
+                        f"{instance['ui_url']}api/messages", timeout=3
+                    ) as response:
+                        payload = json.loads(response.read())
+                    self.assertEqual(payload["messages"][0]["role"], "user")
+                    self.assertIn(
+                        "Summarize the files", payload["messages"][0]["content"]
+                    )
+                    projection = client.get(f"/api/v1/tasks/{task_id}/work-items").json()
+                    self.assertEqual(projection["items"][0]["agent_type"], "general")
+                    self.assertTrue(projection["items"][0]["stage"]["available"])
+                finally:
+                    app.state.container.application.cancel_instance(task_id, instance_id)
 
     @staticmethod
     def _envelope(key: str, revision: int) -> dict[str, object]:

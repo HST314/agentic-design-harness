@@ -204,13 +204,18 @@ class ParallelStageMaterializationTests(unittest.TestCase):
             )
         self.assertEqual(captured.exception.reason, "too_many_image_stages")
 
-    def test_eight_stages_exceed_the_schema_cap(self) -> None:
-        output = model_output(
+    def test_eight_stages_reach_and_nine_exceed_the_schema_cap(self) -> None:
+        eight_stage_output = model_output(
             [image_stage_draft(f"Deliverable {index}") for index in range(1, 9)]
+        )
+        validate_master_response(master_response_schema([]), eight_stage_output)
+
+        nine_stage_output = model_output(
+            [image_stage_draft(f"Deliverable {index}") for index in range(1, 10)]
         )
 
         with self.assertRaises(PlanDraftValidationError) as captured:
-            validate_master_response(master_response_schema([]), output)
+            validate_master_response(master_response_schema([]), nine_stage_output)
         self.assertEqual(captured.exception.schema, "master-response")
 
 
