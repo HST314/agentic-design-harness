@@ -207,10 +207,12 @@ class ApplicationTests(unittest.TestCase):
                         self.assertIsNone(starting.json()["observation"])
                     if status == "RUNNING":
                         operation = {
+                            "operation_id": "start_api_g2",
                             "state": "RUNNING",
                             "instance_progress": {
                                 "i_api_g2": {"state": "AGENT_STARTING"}
                             },
+                            "retry_allowed": False,
                         }
                         with patch.object(
                             container.application,
@@ -225,6 +227,15 @@ class ApplicationTests(unittest.TestCase):
                             agent_starting.json()["instance"]["status"], "RUNNING"
                         )
                         self.assertIsNone(agent_starting.json()["observation"])
+                        self.assertEqual(
+                            agent_starting.json()["start_operation_id"], "start_api_g2"
+                        )
+                        self.assertEqual(
+                            agent_starting.json()["start_progress"],
+                            {"state": "AGENT_STARTING"},
+                        )
+                        self.assertTrue(agent_starting.json()["start_in_progress"])
+                        self.assertFalse(agent_starting.json()["start_retry_allowed"])
                 created_approval = container.approvals.ensure_workflow_approval(
                     "t_api_g2",
                     "i_api_g2",
