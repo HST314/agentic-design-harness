@@ -887,6 +887,9 @@
 .master-mini-card__state--busy { color: var(--color-primary-strong); }
 .master-mini-card__state--ready { color: var(--color-success); }
 .master-mini-card__state--failed { color: var(--color-danger); }
+.master-mini-card__state--blocked { align-items: flex-start; flex-direction: column; gap: 2px; }
+.master-mini-card__state--blocked strong { color: var(--color-warning); }
+.master-mini-card__state--blocked small { color: var(--color-muted-foreground); font-size: 12px; font-weight: 500; }
 .master-mini-card__spinner {
   width: 14px;
   height: 14px;

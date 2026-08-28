@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -150,6 +152,27 @@ class ScriptedModelFactory:
         raise AssertionError("Markdown understanding must not call VLM")
 
 
+class BlockingTextClient(ScriptedTextClient):
+    def __init__(self, factory: BlockingModelFactory) -> None:
+        self.factory = factory
+
+    def complete_structured(self, **kwargs: Any) -> ModelResult:
+        self.factory.started.set()
+        if not self.factory.release.wait(timeout=5):
+            raise AssertionError("test did not release the blocked Master model call")
+        return super().complete_structured(**kwargs)
+
+
+class BlockingModelFactory(ScriptedModelFactory):
+    def __init__(self, responses: list[dict[str, Any] | ModelClientFailure]) -> None:
+        super().__init__(responses)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def text(self, snapshot, model_id, *, timeout_seconds):
+        return BlockingTextClient(self)
+
+
 def image_plan_response(
     *,
     input_asset_ids: list[str] | None = None,
@@ -190,6 +213,36 @@ def image_plan_response(
 
 
 class MasterOrchestratorIntegrationTests(unittest.TestCase):
+    def test_submit_returns_while_master_model_runs_without_the_task_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            factory = BlockingModelFactory([{"output": image_plan_response()}])
+            app = create_app(self._settings(root), model_clients=factory)
+            with TestClient(app) as client:
+                body = self._create_task(client, "create-nonblocking-master")
+                task_id = body["task"]["task_id"]
+                try:
+                    started_at = time.monotonic()
+                    self._submit_task(client, body, "submit-nonblocking-master")
+                    submit_elapsed = time.monotonic() - started_at
+
+                    self.assertLess(submit_elapsed, 1.0)
+                    self.assertTrue(factory.started.wait(timeout=2))
+                    lock_started_at = time.monotonic()
+                    with app.state.container.commands.task_guard(task_id):
+                        pass
+                    self.assertLess(time.monotonic() - lock_started_at, 0.5)
+                    running = client.get(
+                        f"/api/v1/tasks/{task_id}/master/messages"
+                    ).json()
+                    self.assertEqual(running["thread"]["active_run"]["status"], "RUNNING")
+                    self.assertIsNone(running["latest_proposal"])
+                finally:
+                    factory.release.set()
+
+                completed = self._wait_for_master_session(client, task_id)
+                self.assertEqual(completed["thread"]["active_run"]["status"], "PLAN_READY")
+
     def test_zero_asset_text_task_materializes_plan_without_exposing_asset_tools(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -198,9 +251,9 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
             with TestClient(app) as client:
                 body = self._create_task(client, "create-zero-asset")
                 self._submit_task(client, body, "submit-zero-asset")
-                session = client.get(
-                    f"/api/v1/tasks/{body['task']['task_id']}/master/messages"
-                ).json()
+                session = self._wait_for_master_session(
+                    client, body["task"]["task_id"]
+                )
 
             self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
             proposal = session["latest_proposal"]
@@ -254,7 +307,7 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                 body = created.json()
                 task_id = body["task"]["task_id"]
                 self._submit_task(client, body, "submit-parallel-cards")
-                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                session = self._wait_for_master_session(client, task_id)
 
             self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
             proposal = session["latest_proposal"]
@@ -289,9 +342,9 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
             with TestClient(app) as client:
                 body = self._create_task(client, "create-repaired-draft")
                 self._submit_task(client, body, "submit-repaired-draft")
-                session = client.get(
-                    f"/api/v1/tasks/{body['task']['task_id']}/master/messages"
-                ).json()
+                session = self._wait_for_master_session(
+                    client, body["task"]["task_id"]
+                )
 
             self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
             self.assertEqual(len(factory.calls), 2)
@@ -311,7 +364,7 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                 body = self._create_task(client, "create-invalid-draft")
                 task_id = body["task"]["task_id"]
                 self._submit_task(client, body, "submit-invalid-draft")
-                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                session = self._wait_for_master_session(client, task_id)
 
             self.assertEqual(session["thread"]["active_run"]["status"], "FAILED")
             self.assertEqual(session["thread"]["last_error"]["code"], "MASTER_OUTPUT_INVALID")
@@ -358,7 +411,7 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                     "submit-tool-failure",
                     intake_revision=uploaded["intake_revision"],
                 )
-                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                session = self._wait_for_master_session(client, task_id)
 
             self.assertEqual(session["thread"]["active_run"]["status"], "FAILED")
             self.assertEqual(session["thread"]["last_error"]["code"], "MASTER_ASSET_TOOL_FAILED")
@@ -380,7 +433,7 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                 body = self._create_task(client, "create-provider-failure")
                 task_id = body["task"]["task_id"]
                 self._submit_task(client, body, "submit-provider-failure")
-                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                session = self._wait_for_master_session(client, task_id)
 
             self.assertEqual(
                 session["thread"]["last_error"]["code"],
@@ -445,9 +498,8 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                         },
                     )
                     self.assertEqual(submitted.status_code, 200, submitted.text)
-                    session = client.get(f"/api/v1/tasks/{task_id}/master/messages")
-                    self.assertEqual(session.status_code, 200, session.text)
-                    self.assertEqual(session.json()["thread"]["active_run"]["status"], "FAILED")
+                    session = self._wait_for_master_session(client, task_id)
+                    self.assertEqual(session["thread"]["active_run"]["status"], "FAILED")
                     self.assertEqual(app.state.container.store.plan_proposal.list(task_id), [])
 
     def test_internal_master_uses_asset_tool_persists_plan_and_audits_usage_once(self) -> None:
@@ -505,7 +557,7 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(submitted.status_code, 200, submitted.text)
-                session = client.get(f"/api/v1/tasks/{task_id}/master/messages").json()
+                session = self._wait_for_master_session(client, task_id)
                 self.assertEqual(session["thread"]["active_run"]["status"], "PLAN_READY")
                 self.assertEqual(session["latest_proposal"]["revision"], 1)
                 self.assertEqual(session["task"]["title"], "Cited launch visual")
@@ -600,6 +652,25 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
             },
         )
         self.assertEqual(submitted.status_code, 200, submitted.text)
+
+    def _wait_for_master_session(
+        self,
+        client: TestClient,
+        task_id: str,
+        *,
+        timeout_seconds: float = 5,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            response = client.get(f"/api/v1/tasks/{task_id}/master/messages")
+            self.assertEqual(response.status_code, 200, response.text)
+            session = response.json()
+            active = session["thread"]["active_run"]
+            if active is None or active["status"] not in {"SUBMITTING", "RUNNING"}:
+                return session
+            if time.monotonic() >= deadline:
+                self.fail(f"Master run did not settle before timeout: {active}")
+            time.sleep(0.01)
 
     def _assert_strict_model_schema(self, value: Any) -> None:
         if isinstance(value, dict):

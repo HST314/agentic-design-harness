@@ -210,12 +210,40 @@ class MasterThreadService:
         tasks_root = self.store.layout.control_root / "tasks"
         for thread_path in sorted(tasks_root.glob("*/master/thread.json")):
             task_id = thread_path.parents[1].name
+            run_id: str | None = None
             with self.commands.task_guard(task_id):
                 thread = self.store.master_thread.get(task_id, task_id)
                 if thread is None:
                     continue
                 active = thread["active_run"]
                 if active is None or active["status"] not in {"SUBMITTING", "RUNNING"}:
+                    continue
+                thread = self._advance_active_run(task_id, thread)
+                active = thread["active_run"]
+                if (
+                    active is not None
+                    and active["status"] == "RUNNING"
+                    and isinstance(active.get("run_id"), str)
+                ):
+                    run_id = active["run_id"]
+            if run_id is None:
+                continue
+
+            # Model and asset-tool work may take tens of seconds. The durable run
+            # is already checkpointed, so execute it without monopolizing the
+            # task command lock, then briefly reacquire the lock to publish the
+            # terminal observation into the Master thread.
+            self.orchestrator.execute_run(task_id, run_id)
+            with self.commands.task_guard(task_id):
+                thread = self.store.master_thread.get(task_id, task_id)
+                if thread is None:
+                    continue
+                active = thread["active_run"]
+                if (
+                    active is None
+                    or active["status"] != "RUNNING"
+                    or active.get("run_id") != run_id
+                ):
                     continue
                 self._advance_active_run(task_id, thread)
 
@@ -835,7 +863,7 @@ class MasterThreadService:
             if active["status"] != "RUNNING" or active["run_id"] is None:
                 return thread
             observation = self.orchestrator.observe_run(task_id, active["run_id"])
-            if observation.status == "RUNNING":
+            if observation.status in {"QUEUED", "RUNNING"}:
                 return thread
             if observation.status == "NEEDS_INPUT":
                 content = (observation.message or "Master 需要补充信息后才能继续。").strip()
@@ -1155,10 +1183,24 @@ class MasterThreadService:
         messages.sort(key=lambda item: (item["sequence"], item["created_at"], item["message_id"]))
         proposals = self.store.plan_proposal.list(task_id)
         latest = max(proposals, key=lambda item: item["revision"], default=None)
+        instances = self.store.instance.list(task_id)
+        instance_by_id = {instance["instance_id"]: instance for instance in instances}
         instance_statuses = {
-            instance["instance_id"]: instance["status"]
-            for instance in self.store.instance.list(task_id)
+            instance_id: instance["status"] for instance_id, instance in instance_by_id.items()
         }
+        unfinished_image_instance_ids = [
+            instance["instance_id"]
+            for instance in instances
+            if instance["agent_type"] == "image"
+            and not instance.get("manual_finished", False)
+        ]
+        if latest is not None:
+            unfinished_image_instance_ids.extend(
+                card["instance_id"]
+                for card in latest["execution_cards"]
+                if card["agent_type"] == "image"
+                and card["instance_id"] not in instance_by_id
+            )
         editable_card_ids = (
             []
             if latest is None
@@ -1200,6 +1242,7 @@ class MasterThreadService:
             "proposals": proposal_entries,
             "editable_card_ids": editable_card_ids,
             "instance_statuses": instance_statuses,
+            "unfinished_image_instance_ids": unfinished_image_instance_ids,
             "task": deepcopy(task),
             "task_revision": self.store.task.revision(task_id, task_id),
             # Kept until the designer-shell cleanup stage removes the old response field.

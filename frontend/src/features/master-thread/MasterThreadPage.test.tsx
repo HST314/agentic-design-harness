@@ -4,7 +4,11 @@ import type {
   ContractMasterMessage,
   ContractPlanProposal,
 } from "../../api/generated-contracts";
-import { buildMasterTimeline, startStageLabel } from "./MasterThreadPage";
+import {
+  buildMasterTimeline,
+  isPptLaunchBlocked,
+  startStageLabel,
+} from "./MasterThreadPage";
 
 function message(messageId: string, sequence: number): ContractMasterMessage {
   return {
@@ -94,5 +98,40 @@ describe("startStageLabel", () => {
     expect(startStageLabel({ ...base, state: "PROCESS_STARTING" })).toBe("启动进程");
     expect(startStageLabel({ ...base, state: "AGENT_STARTING" })).toBe("健康检查");
     expect(startStageLabel({ ...base, state: "RUNNING" })).toBe("已就绪");
+  });
+});
+
+describe("isPptLaunchBlocked", () => {
+  const card = (agentType: "image" | "ppt"): ContractPlanProposal["execution_cards"][number] => ({
+    schema_version: "1.1",
+    card_id: `card_${agentType}`,
+    revision: 1,
+    task_id: "task_batch",
+    stage_id: `stage_${agentType}`,
+    instance_id: `instance_${agentType}`,
+    agent_type: agentType,
+    objective: "完成设计任务。",
+    instructions: ["遵循已确认要求。"],
+    input_assets: [],
+    expected_deliveries: [{
+      kind: agentType === "ppt" ? "presentation" : "image",
+      role: "primary",
+      required: true,
+      accepted_mime_types: [agentType === "ppt" ? "application/vnd.openxmlformats-officedocument.presentationml.presentation" : "image/png"],
+    }],
+    parameters: {},
+    created_at: "2026-08-28T00:00:00Z",
+  });
+
+  test("blocks PPT while any planned image instance is not manually finished", () => {
+    expect(isPptLaunchBlocked(card("ppt"), ["instance_image"])).toBe(true);
+  });
+
+  test("unblocks PPT after all image instances are manually finished", () => {
+    expect(isPptLaunchBlocked(card("ppt"), [])).toBe(false);
+  });
+
+  test("does not block image launches on the PPT gate", () => {
+    expect(isPptLaunchBlocked(card("image"), ["instance_image"])).toBe(false);
   });
 });

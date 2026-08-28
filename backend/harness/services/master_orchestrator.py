@@ -72,6 +72,8 @@ class MasterOrchestratorFailure(RuntimeError):
 class MasterPlanner(Protocol):
     def submit_message(self, task_id: str, message: dict[str, Any]) -> str: ...
 
+    def execute_run(self, task_id: str, run_id: str) -> None: ...
+
     def observe_run(self, task_id: str, run_id: str) -> MasterRunObservation: ...
 
     def load_plan(self, task_id: str, run_id: str) -> dict[str, Any]: ...
@@ -97,6 +99,8 @@ class MasterOrchestrator:
         self.plan_proposals = plan_proposals
 
     def submit_message(self, task_id: str, message: dict[str, Any]) -> str:
+        """Persist an idempotent run without performing slow model work."""
+
         message_id = message.get("message_id")
         if not isinstance(message_id, str) or message.get("task_id") != task_id:
             raise MasterOrchestratorFailure(
@@ -111,8 +115,7 @@ class MasterOrchestrator:
                 raise MasterOrchestratorFailure(
                     "MASTER_RUN_FAILED", "The durable Master run conflicts with its message."
                 )
-            if run.get("status") != "RUNNING":
-                return run_id
+            return run_id
         else:
             run = {
                 "schema_version": "1.0",
@@ -120,7 +123,7 @@ class MasterOrchestrator:
                 "task_id": task_id,
                 "message_id": message_id,
                 "message_sha256": message_sha256,
-                "status": "RUNNING",
+                "status": "QUEUED",
                 "message": None,
                 "task_title": None,
                 "proposal": None,
@@ -130,8 +133,19 @@ class MasterOrchestrator:
                 "updated_at": utc_now(),
             }
             atomic_write_json(path, run, mode=0o640)
-        self._execute(path, run)
         return run_id
+
+    def execute_run(self, task_id: str, run_id: str) -> None:
+        """Run one persisted Master operation outside the task command lock."""
+
+        path = self._path(task_id, run_id)
+        run = self._load(task_id, run_id)
+        if run["status"] not in {"QUEUED", "RUNNING"}:
+            return
+        if run["status"] == "QUEUED":
+            run.update({"status": "RUNNING", "updated_at": utc_now()})
+            atomic_write_json(path, run, mode=0o640)
+        self._execute(path, run)
 
     def observe_run(self, task_id: str, run_id: str) -> MasterRunObservation:
         run = self._load(task_id, run_id)

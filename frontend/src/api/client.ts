@@ -108,6 +108,7 @@ export interface MasterSessionResponse {
   proposals: MasterSessionProposal[];
   editable_card_ids: string[];
   instance_statuses: Partial<Record<string, ContractAgentInstance["status"]>>;
+  unfinished_image_instance_ids: string[];
   task: ContractMainTask;
   task_revision: number;
   gateway_available: boolean;

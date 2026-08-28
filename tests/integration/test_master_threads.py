@@ -300,6 +300,10 @@ class MasterThreadApiTests(unittest.TestCase):
                 self.assertEqual(first_session["latest_proposal"]["revision"], 1)
                 self.assertEqual(first_session["latest_proposal"]["status"], "PENDING_CONFIRMATION")
                 self.assertEqual(
+                    first_session["unfinished_image_instance_ids"],
+                    ["instance_master_1"],
+                )
+                self.assertEqual(
                     [item["role"] for item in first_session["messages"]],
                     ["user", "master"],
                 )

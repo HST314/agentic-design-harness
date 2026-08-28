@@ -98,6 +98,13 @@ export function startStageLabel(progress: InstanceStartProgress | null | undefin
   return startStageLabels[progress.state] ?? startStageLabels.PENDING;
 }
 
+export function isPptLaunchBlocked(
+  card: ProposalTaskCard,
+  unfinishedImageInstanceIds: readonly string[],
+): boolean {
+  return card.agent_type === "ppt" && unfinishedImageInstanceIds.length > 0;
+}
+
 export type MasterTimelineItem =
   | { kind: "message"; message: ContractMasterMessage }
   | { kind: "proposal"; proposal: MasterSessionProposal };
@@ -427,6 +434,7 @@ function MiniTaskCard({
   title,
   proposalStatus,
   instanceStatus,
+  upstreamBlockedCount,
   launchPending,
   launchBlocked,
   onLaunch,
@@ -436,6 +444,7 @@ function MiniTaskCard({
   title: string;
   proposalStatus: ContractPlanProposal["status"];
   instanceStatus: ContractAgentInstance["status"] | undefined;
+  upstreamBlockedCount: number;
   launchPending: boolean;
   launchBlocked: boolean;
   onLaunch: () => void;
@@ -487,6 +496,13 @@ function MiniTaskCard({
     );
   } else if (ready) {
     action = <span className="master-mini-card__state master-mini-card__state--ready">已就绪</span>;
+  } else if (upstreamBlockedCount > 0) {
+    action = (
+      <span className="master-mini-card__state master-mini-card__state--blocked">
+        <strong>待上游就绪</strong>
+        <small>{upstreamBlockedCount} 个图片任务标记人工结束后激活</small>
+      </span>
+    );
   } else if (failed) {
     action = (
       <span className="master-mini-card__state master-mini-card__state--failed" title={failureMessage}>
@@ -536,6 +552,7 @@ function MiniTaskCard({
 function ProposalCardGroup({
   proposal,
   instanceStatuses,
+  unfinishedImageInstanceIds,
   launchingCardId,
   onLaunchCard,
   onShowDetail,
@@ -543,6 +560,7 @@ function ProposalCardGroup({
 }: {
   proposal: MasterSessionProposal;
   instanceStatuses: MasterSessionResponse["instance_statuses"];
+  unfinishedImageInstanceIds: MasterSessionResponse["unfinished_image_instance_ids"];
   launchingCardId: string | null;
   onLaunchCard: (proposal: MasterSessionProposal, card: ProposalTaskCard) => void;
   onShowDetail: (proposal: MasterSessionProposal, card: ProposalTaskCard, trigger: HTMLButtonElement) => void;
@@ -572,6 +590,11 @@ function ProposalCardGroup({
             title={titleByCardId.get(card.card_id) ?? card.card_id}
             proposalStatus={proposal.status}
             instanceStatus={instanceStatuses[card.instance_id]}
+            upstreamBlockedCount={
+              isPptLaunchBlocked(card, unfinishedImageInstanceIds)
+                ? unfinishedImageInstanceIds.length
+                : 0
+            }
             launchPending={launchingCardId === card.card_id}
             launchBlocked={launchingCardId !== null}
             onLaunch={() => onLaunchCard(proposal, card)}
@@ -786,6 +809,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
             key={`proposal-${item.proposal.proposal_id}-r${item.proposal.revision}`}
             proposal={item.proposal}
             instanceStatuses={data.instance_statuses ?? {}}
+            unfinishedImageInstanceIds={data.unfinished_image_instance_ids}
             launchingCardId={launchingCardId}
             onLaunchCard={(proposal, card) => {
               launch.reset();
