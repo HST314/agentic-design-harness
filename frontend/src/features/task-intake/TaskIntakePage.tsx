@@ -9,6 +9,7 @@ import type {
 } from "../../api/client";
 import { ApiError } from "../../api/client";
 import { api, taskHistoryQuery, taskIntakeQuery } from "../../api/queries";
+import { ExpandableComposerTextarea } from "../../components/ExpandableComposerTextarea";
 import { Icon } from "../../components/Icon";
 import { FoundationPage } from "../workbench/FoundationPage";
 
@@ -286,25 +287,22 @@ function NewTaskIntakePage(): React.JSX.Element {
           send();
         }}
       >
-        <label htmlFor="task-prompt">
-          <span>发送给 Master</span>
-          <textarea
-            id="task-prompt"
-            aria-label="发送给 Master 的首条消息"
-            rows={4}
-            value={prompt}
-            maxLength={20_000}
-            placeholder="描述你的设计任务，例如：为秋季发布会生成三套主视觉方向…"
-            disabled={sent}
-            onChange={(event) => setPrompt(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                send();
-              }
-            }}
-          />
-        </label>
+        <ExpandableComposerTextarea
+          id="task-prompt"
+          label="发送给 Master"
+          aria-label="发送给 Master 的首条消息"
+          value={prompt}
+          maxLength={20_000}
+          placeholder="描述你的设计任务，例如：为秋季发布会生成三套主视觉方向…"
+          disabled={sent}
+          onChange={(event) => setPrompt(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              send();
+            }
+          }}
+        />
         {uploads.length ? (
           <ul className="intake-chat__files" aria-label="待随首条消息上传的附件">
             {uploads.map((item) => (

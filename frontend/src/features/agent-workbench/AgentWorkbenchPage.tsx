@@ -8,6 +8,7 @@ import {
 } from "../../api/queries";
 import { ApiError, type AgentWorkbenchLinkResponse } from "../../api/client";
 import { Icon } from "../../components/Icon";
+import { TaskTabs } from "../master-thread/MasterThreadPage";
 import {
   bridgeIdempotencyKey,
   isBridgeHello,
@@ -250,6 +251,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
           <div><p className="workbench-eyebrow">阶段 {item.stage.position}</p><h1 id="agent-workbench-title">{item.title}</h1><p>当前任务需要的 {agentLabel} 创作能力尚未开放，任务不会被误标为完成。</p></div>
           <Link className="workbench-secondary-button" to={`/tasks/${encodeURIComponent(taskId)}/board`}>返回看板</Link>
         </header>
+        {focusMode ? null : <TaskTabs taskId={taskId} />}
         <div className="agent-workbench-boundary" role="note"><Icon name="status" /><div><h2>{agentLabel} 工作台暂不可用</h2><p>请返回看板调整计划，或选择当前已开放的创作能力。</p></div></div>
       </section>
     );
@@ -274,6 +276,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
 
   return (
     <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-label={item.title}>
+      {focusMode ? null : <TaskTabs taskId={taskId} />}
       {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 {agentLabel} 工作台地址…</div> : null}
       {link.isError || (link.data && !readyLink) ? (
         <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retry} retryLabel="重新检查链接" retryPending={false} taskId={taskId} workItemId={workItemId} focusMode={focusMode} agentType={item.agent_type} />

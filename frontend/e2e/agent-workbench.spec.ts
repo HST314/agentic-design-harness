@@ -78,7 +78,8 @@ test("embeds only the server-approved current Image instance", async ({ page }) 
   await expect(iframe).toHaveAttribute("referrerpolicy", "origin");
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "Image Agent Studio" })).toBeVisible();
   await expect(page.getByRole("textbox")).toHaveCount(0);
-  await expect(page.getByRole("navigation", { name: "任务工作区" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "任务工作区" }).getByRole("link")).toHaveText(["Master", "看板", "计划", "交付"]);
   await expect(page.locator(".agent-workbench__actions")).toHaveCount(0);
   await expect(page.locator(".agent-workbench-gate")).toHaveCount(0);
 
@@ -195,7 +196,7 @@ test("embeds a server-approved READY PPT workbench", async ({ page }) => {
   await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
   await expect(page.locator("iframe[title='PPT Agent 工作台：发布会演示文稿']")).toHaveAttribute("src", "http://127.0.0.1:19094/");
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "PPT Agent Studio" })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "任务工作区" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
 });
 
 test("shows PPT STARTING without creating an iframe", async ({ page }) => {

@@ -219,7 +219,7 @@ test("creates a task from the chat-style page and lands in the Master conversati
 
   await expect(page).toHaveURL(/\/tasks\/task_e2e_intake\/master$/);
   await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("秋季发布会三套主视觉方向");
-  await expect(page.getByText("已进入 Master 分析阶段")).toBeVisible();
+  await expect(page.getByText("Master 正在分析与思考")).toBeVisible();
   await expect(page.getByText("引用已有资源（创建提交后不可追加上传）")).toBeVisible();
   await expect(page.locator('input[type="file"]')).toHaveCount(0);
   await expect(page.getByRole("link", { name: /秋季发布会三套主视觉方向/ })).toBeVisible();
@@ -227,6 +227,18 @@ test("creates a task from the chat-style page and lands in the Master conversati
 
 test("keeps the create thread flush with the shell and the Master composer at the bottom", async ({ page }) => {
   await page.goto("/tasks/new");
+
+  const expand = page.getByRole("button", { name: "展开消息输入框" });
+  await expect(expand).toBeVisible();
+  await expect(expand).toHaveText("");
+  const textarea = page.getByLabel("发送给 Master 的首条消息");
+  const normalHeight = await textarea.evaluate((element) => element.getBoundingClientRect().height);
+  await expand.click();
+  await expect(page.getByRole("button", { name: "收起消息输入框" })).toHaveAttribute("aria-expanded", "true");
+  const expandedHeight = await textarea.evaluate((element) => element.getBoundingClientRect().height);
+  expect(expandedHeight).toBeGreaterThan(normalHeight * 2);
+  await page.getByRole("button", { name: "收起消息输入框" }).click();
+  await expect(textarea).toHaveJSProperty("rows", 4);
 
   const layout = await page.evaluate(() => {
     const rect = (selector: string): DOMRect => {
@@ -259,6 +271,24 @@ test("keeps the create thread flush with the shell and the Master composer at th
   expect(layout.bottomGap).toBeLessThanOrEqual(20);
   expect(layout.widthDelta).toBeLessThanOrEqual(1);
   expect(layout.threadHeight).toBeGreaterThan(layout.composerHeight);
+
+  await textarea.fill("秋季发布会三套主视觉方向");
+  await page.getByRole("button", { name: "发送并创建任务" }).click();
+  await expect(page).toHaveURL(/\/tasks\/task_e2e_intake\/master$/);
+  const continuedLayout = await page.evaluate(() => {
+    const composer = document.querySelector(".master-composer");
+    const messageInput = document.querySelector("#master-message");
+    if (!(composer instanceof HTMLElement) || !(messageInput instanceof HTMLTextAreaElement)) {
+      throw new Error("Missing continued Master composer");
+    }
+    return {
+      bottomGap: Math.round(window.innerHeight - composer.getBoundingClientRect().bottom),
+      textareaHeight: Math.round(messageInput.getBoundingClientRect().height),
+    };
+  });
+  expect(continuedLayout.bottomGap).toBeGreaterThanOrEqual(12);
+  expect(continuedLayout.bottomGap).toBeLessThanOrEqual(20);
+  expect(Math.abs(continuedLayout.textareaHeight - normalHeight)).toBeLessThanOrEqual(2);
 });
 
 test("keeps the launch-mode choice out of the conversational create flow", async ({ page }) => {
@@ -277,7 +307,7 @@ test("recovers a server-side draft and submits it manually", async ({ page }) =>
   await expect(page.getByText("服务端草稿已恢复")).toBeVisible();
   await expect(page.getByText("尚未添加附件；Prompt 可单独提交。")).toBeVisible();
   await page.getByRole("button", { name: "提交任务材料" }).click();
-  await expect(page.getByText("已进入 Master 分析阶段")).toBeVisible();
+  await expect(page.getByText("Master 正在分析与思考")).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("秋季发布会三套主视觉方向");

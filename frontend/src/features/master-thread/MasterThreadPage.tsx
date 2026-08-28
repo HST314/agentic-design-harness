@@ -24,6 +24,7 @@ import type {
   ContractMasterMessage,
   ContractPlanProposal,
 } from "../../api/generated-contracts";
+import { ExpandableComposerTextarea } from "../../components/ExpandableComposerTextarea";
 import { Icon } from "../../components/Icon";
 import { TaskIntakePage } from "../task-intake/TaskIntakePage";
 
@@ -881,7 +882,15 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
           append.mutate({ text, refs });
         }}
       >
-        <label htmlFor="master-message"><span>发送给 Master</span><textarea ref={composerRef} id="master-message" rows={4} maxLength={20_000} value={content} placeholder="补充目标、回答澄清，或说明需要调整的计划内容…" onChange={(event) => setContent(event.currentTarget.value)} /></label>
+        <ExpandableComposerTextarea
+          id="master-message"
+          label="发送给 Master"
+          textareaRef={composerRef}
+          maxLength={20_000}
+          value={content}
+          placeholder="补充目标、回答澄清，或说明需要调整的计划内容…"
+          onChange={(event) => setContent(event.currentTarget.value)}
+        />
         {data.assets.length ? (
           <fieldset><legend>引用已有资源（创建提交后不可追加上传）</legend><div>{data.assets.map((asset) => <label key={asset.asset_id}><input type="checkbox" checked={selectedAssets.has(asset.asset_id)} onChange={(event) => { const checked = event.currentTarget.checked; setSelectedAssets((current) => { const next = new Set(current); if (checked) next.add(asset.asset_id); else next.delete(asset.asset_id); return next; }); }} /><Icon name="file-check" /><span><strong>{asset.filename}</strong>{asset.description ? <small>{asset.description}</small> : null}</span></label>)}</div></fieldset>
         ) : null}
