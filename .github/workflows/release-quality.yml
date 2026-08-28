@@ -41,6 +41,11 @@ jobs:
           --target .runtime/image-agent-deps
           -r agents/image_agent_mvp/requirements.lock
           -r requirements/image-agent-web.in
+      - name: Verify the locked PPT runtime installs on this platform
+        run: >-
+          python -m pip install --disable-pip-version-check --upgrade --require-hashes
+          --target .runtime/ppt-agent-deps
+          -r requirements/ppt-agent.lock
       - run: python -m pip install --require-hashes -r requirements-dev.txt
       - run: python -m unittest discover -s tests -v
       - name: Collect Windows failure diagnostics
