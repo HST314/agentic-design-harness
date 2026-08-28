@@ -225,6 +225,42 @@ test("creates a task from the chat-style page and lands in the Master conversati
   await expect(page.getByRole("link", { name: /秋季发布会三套主视觉方向/ })).toBeVisible();
 });
 
+test("keeps the create thread flush with the shell and the Master composer at the bottom", async ({ page }) => {
+  await page.goto("/tasks/new");
+
+  const layout = await page.evaluate(() => {
+    const rect = (selector: string): DOMRect => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) throw new Error(`Missing ${selector}`);
+      return element.getBoundingClientRect();
+    };
+    const sidebar = rect(".workbench-sidebar");
+    const topbar = rect(".workbench-topbar");
+    const thread = rect(".intake-chat__thread");
+    const composer = rect(".intake-chat__composer");
+    return {
+      topGap: Math.round(thread.top - topbar.bottom),
+      sideGap: Math.round(thread.left - sidebar.right),
+      threadComposerGap: Math.round(composer.top - thread.bottom),
+      bottomGap: Math.round(window.innerHeight - composer.bottom),
+      widthDelta: Math.round(Math.abs(thread.width - composer.width)),
+      threadHeight: Math.round(thread.height),
+      composerHeight: Math.round(composer.height),
+    };
+  });
+
+  expect(layout.topGap).toBeGreaterThanOrEqual(0);
+  expect(layout.topGap).toBeLessThanOrEqual(3);
+  expect(layout.sideGap).toBeGreaterThanOrEqual(0);
+  expect(layout.sideGap).toBeLessThanOrEqual(3);
+  expect(layout.threadComposerGap).toBeGreaterThanOrEqual(0);
+  expect(layout.threadComposerGap).toBeLessThanOrEqual(3);
+  expect(layout.bottomGap).toBeGreaterThanOrEqual(12);
+  expect(layout.bottomGap).toBeLessThanOrEqual(20);
+  expect(layout.widthDelta).toBeLessThanOrEqual(1);
+  expect(layout.threadHeight).toBeGreaterThan(layout.composerHeight);
+});
+
 test("keeps the launch-mode choice out of the conversational create flow", async ({ page }) => {
   await page.goto("/tasks/new");
   await expect(page.getByText("启动方式")).toHaveCount(0);

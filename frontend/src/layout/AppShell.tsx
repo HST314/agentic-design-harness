@@ -217,7 +217,7 @@ export function AppShell(): React.JSX.Element {
   const groups = useMemo(() => historyGroups(tasks.data?.items ?? [], search), [search, tasks.data?.items]);
   const currentTask = taskId ? tasks.data?.items.find((task) => task.task_id === taskId) : undefined;
   const sectionLabel = sectionFromPath(location.pathname);
-  const flushMain = taskId !== null;
+  const flushMain = taskId !== null || location.pathname === "/tasks/new";
   const presentation = useMutation({
     mutationFn: ({ task, patch }: { task: TaskSummary; patch: { title?: string; pinned?: boolean; archived?: boolean } }) => api.updateTaskPresentation(task.task_id, {
       ...patch,

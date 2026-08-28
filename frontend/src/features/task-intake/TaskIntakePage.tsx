@@ -274,7 +274,7 @@ function NewTaskIntakePage(): React.JSX.Element {
   };
 
   return (
-    <section className="workbench-page intake-chat" aria-labelledby="task-intake-title">
+    <section className="workbench-page master-workspace intake-chat" aria-labelledby="task-intake-title">
       <h1 id="task-intake-title" className="sr-only">创建新的设计任务</h1>
       <div className="master-thread intake-chat__thread" role="log" aria-label="新任务对话">
         <p className="master-thread__empty">描述你的设计目标与交付要求，Master 会在对话中为你生成执行计划。</p>
@@ -286,6 +286,25 @@ function NewTaskIntakePage(): React.JSX.Element {
           send();
         }}
       >
+        <label htmlFor="task-prompt">
+          <span>发送给 Master</span>
+          <textarea
+            id="task-prompt"
+            aria-label="发送给 Master 的首条消息"
+            rows={4}
+            value={prompt}
+            maxLength={20_000}
+            placeholder="描述你的设计任务，例如：为秋季发布会生成三套主视觉方向…"
+            disabled={sent}
+            onChange={(event) => setPrompt(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                send();
+              }
+            }}
+          />
+        </label>
         {uploads.length ? (
           <ul className="intake-chat__files" aria-label="待随首条消息上传的附件">
             {uploads.map((item) => (
@@ -305,45 +324,29 @@ function NewTaskIntakePage(): React.JSX.Element {
             ))}
           </ul>
         ) : null}
-        <div className="intake-chat__row">
-          {!sent ? (
-            <label className="workbench-icon-button intake-chat__attach" title="图片 20 MiB、PDF 50 MiB、文本 5 MiB；仅创建时可添加">
-              <Icon name="upload" />
-              <input
-                type="file"
-                multiple
-                className="sr-only"
-                aria-label="添加附件（图片 / PDF / TXT / MD）"
-                accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.md,.markdown,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown"
-                onChange={(event) => {
-                  addFiles(Array.from(event.currentTarget.files ?? []));
-                  event.currentTarget.value = "";
-                }}
-              />
-            </label>
-          ) : null}
-          <textarea
-            id="task-prompt"
-            aria-label="发送给 Master 的首条消息"
-            rows={3}
-            value={prompt}
-            maxLength={20_000}
-            placeholder="描述你的设计任务，例如：为秋季发布会生成三套主视觉方向…"
-            disabled={sent}
-            onChange={(event) => setPrompt(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                send();
-              }
-            }}
-          />
+        <footer>
+          <div className="intake-chat__footer-meta">
+            {!sent ? (
+              <label className="workbench-icon-button intake-chat__attach" title="图片 20 MiB、PDF 50 MiB、文本 5 MiB；仅创建时可添加">
+                <Icon name="upload" />
+                <input
+                  type="file"
+                  multiple
+                  className="sr-only"
+                  aria-label="添加附件（图片 / PDF / TXT / MD）"
+                  accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.md,.markdown,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown"
+                  onChange={(event) => {
+                    addFiles(Array.from(event.currentTarget.files ?? []));
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+            ) : null}
+            <span>{prompt.length.toLocaleString("zh-CN")} / 20,000{uploads.length ? ` · ${uploads.length} 个附件将随首条消息上传` : " · 附件仅可在创建时添加"}</span>
+          </div>
           <button type="submit" className="workbench-primary-button" aria-label="发送并创建任务" disabled={!prompt.trim() || sent}>
-            {create.isPending ? "正在创建…" : "发送"}
+            {create.isPending ? "正在创建…" : "发送消息"}
           </button>
-        </div>
-        <footer className="intake-chat__footer">
-          <span>{prompt.length.toLocaleString("zh-CN")} / 20,000{uploads.length ? ` · ${uploads.length} 个附件将随首条消息上传` : " · 附件仅可在创建时添加"}</span>
         </footer>
         {fileError ? <p className="workbench-inline-error" role="alert">{fileError}</p> : null}
         {create.isError ? <p className="workbench-inline-error" role="alert">{create.error.message}</p> : null}
