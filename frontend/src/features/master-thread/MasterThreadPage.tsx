@@ -26,6 +26,7 @@ import type {
 } from "../../api/generated-contracts";
 import { ExpandableComposerTextarea } from "../../components/ExpandableComposerTextarea";
 import { Icon } from "../../components/Icon";
+import { DisabledMasterComposer, PendingThinking, PendingUserMessage } from "./MasterChatBridge";
 import { TaskIntakePage } from "../task-intake/TaskIntakePage";
 
 const ACTOR_ID = "human_operator";
@@ -708,6 +709,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
     ...masterSessionQuery(taskId),
     enabled: !pauseMasterPolling,
   });
+  const intake = useQuery(taskIntakeQuery(taskId));
   const [content, setContent] = useState("");
   const [selectedAssets, setSelectedAssets] = useState<Set<string>>(() => new Set());
   const [detail, setDetail] = useState<{ proposal: MasterSessionProposal; card: ProposalTaskCard } | null>(null);
@@ -861,7 +863,19 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
     session.data?.thread.active_run?.status,
   ]);
 
-  if (session.isPending) return <section className="workbench-page"><div className="workbench-intake-card" role="status">正在恢复 Master 永久线程…</div></section>;
+  if (session.isPending) {
+    const firstPrompt = intake.data?.intake.prompt ?? "";
+    return (
+      <section className="workbench-page master-workspace" aria-label="正在恢复 Master 线程">
+        <TaskTabs taskId={taskId} />
+        <div className="master-thread" role="log" aria-live="polite" aria-label="Master 消息记录">
+          {firstPrompt ? <PendingUserMessage prompt={firstPrompt} attachmentCount={intake.data?.assets.length ?? 0} /> : null}
+          <PendingThinking title="正在恢复 Master 线程" detail="即将载入完整对话记录。" />
+        </div>
+        <DisabledMasterComposer placeholder="正在恢复 Master 线程…" />
+      </section>
+    );
+  }
   if (!session.data) {
     return <section className="workbench-page"><div className="workbench-intake-card"><p className="workbench-inline-error" role="alert">{session.error?.message ?? "无法读取 Master 线程。"}</p><button type="button" className="workbench-secondary-button" onClick={() => void session.refetch()}>重新读取</button></div></section>;
   }
