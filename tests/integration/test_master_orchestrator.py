@@ -325,6 +325,8 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
             system_prompt = factory.calls[0]["messages"][0]["content"]
             self.assertIn("one image stage per deliverable", system_prompt)
             self.assertIn("more than 6 image stages", system_prompt)
+            self.assertIn("copy that exact ratio", system_prompt)
+            self.assertIn("Leave aspect_ratio null only", system_prompt)
             user_messages = [
                 item["content"]
                 for item in factory.calls[0]["messages"]
