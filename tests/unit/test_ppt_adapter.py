@@ -78,7 +78,18 @@ class PptAgentAdapterTests(unittest.TestCase):
         )
         self.assertEqual(
             spec.writable_roots,
-            (task_root / "instances" / instance_id / "work" / "projects",),
+            (
+                task_root / "instances" / instance_id / "work" / "projects",
+                ROOT / "config",
+            ),
+        )
+        self.assertEqual(
+            spec.public_environment["PPT_AGENT_RUNTIME_POLICY"],
+            str(ROOT / "config" / "ppt_agent_runtime.yaml"),
+        )
+        self.assertEqual(
+            spec.public_environment["PPT_AGENT_MODEL_CONFIG"],
+            str(ROOT / "config" / "ppt_agent_model_config.yaml"),
         )
         self.assertEqual(
             spec.public_environment["PPT_AGENT_PROJECTS_ROOT"],

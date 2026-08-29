@@ -166,6 +166,15 @@ class PptAgentAdapter:
         pythonpath = os.pathsep.join(
             (str(self.runtime_root), str(self.runtime_root / "_dependencies"))
         )
+        writable_roots = tuple(
+            dict.fromkeys(
+                (
+                    projects_root,
+                    self.runtime_policy.parent.resolve(strict=True),
+                    self.model_config.parent.resolve(strict=True),
+                )
+            )
+        )
         return ProcessSpec(
             command=(str(self.interpreter), "-c", _LAUNCHER, str(entrypoint), "{host}", "{port}"),
             runtime_artifact=artifact,
@@ -180,7 +189,10 @@ class PptAgentAdapter:
                 "PPT_AGENT_RUNTIME_POLICY": str(self.runtime_policy),
                 "PYTHONPATH": pythonpath,
             },
-            writable_roots=(projects_root,),
+            # Managed settings retain PPT Agent's standalone atomic-write semantics.
+            # Landlock authorizes directories because the Agent writes a temporary
+            # sibling and publishes it with os.replace().
+            writable_roots=writable_roots,
             read_only_mirrors=read_only_mirrors,
             health_path="/api/health",
             readiness_path="/api/health",
@@ -334,7 +346,12 @@ class PptAgentAdapter:
                 "ADAPTER_UNAVAILABLE", "The PPT Agent source or interpreter is not configured."
             )
         for path in (self.runtime_policy, self.model_config):
-            if not path.is_absolute() or not path.is_file():
+            if (
+                not path.is_absolute()
+                or not path.is_file()
+                or path.is_symlink()
+                or path.resolve(strict=True) != path
+            ):
                 raise HarnessError(
                     "ADAPTER_UNAVAILABLE", "A managed PPT Agent configuration file is missing."
                 )
