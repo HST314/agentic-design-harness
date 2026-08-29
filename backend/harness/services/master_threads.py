@@ -965,6 +965,9 @@ class MasterThreadService:
                 existing_message["sequence"],
             )
         now = utc_now()
+        # Apply the generated title before publishing PLAN_READY: lock-free session
+        # readers must never observe the terminal status with a stale task title.
+        self._apply_generated_title(task_id, observation.task_title, proposal["proposal_id"])
         thread = self._put_thread(
             task_id,
             {
@@ -977,7 +980,6 @@ class MasterThreadService:
             actor,
             "publish_master_plan",
         )
-        self._apply_generated_title(task_id, observation.task_title, proposal["proposal_id"])
         return self.store.master_thread.get(task_id, task_id) or thread
 
     def _append_master_message(
