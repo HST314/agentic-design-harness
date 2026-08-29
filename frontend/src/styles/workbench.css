@@ -1334,19 +1334,40 @@
   padding-bottom: var(--space-2);
 }
 
-.workbench-page.task-projection--board {
+.workbench-page.task-projection--board,
+.workbench-page.task-projection--plan {
   min-height: calc(100vh - 48px - 2 * var(--space-3));
   min-height: calc(100dvh - 48px - 2 * var(--space-3));
   display: flex;
   flex-direction: column;
 }
 
-.workbench-main--flush .workbench-page.task-projection--board {
+.workbench-main--flush .workbench-page.task-projection--board,
+.workbench-main--flush .workbench-page.task-projection--plan {
   min-height: calc(100vh - 48px - 4px);
   min-height: calc(100dvh - 48px - 4px);
 }
 
-.task-projection--board .task-board { flex: 1; }
+.task-projection--board .task-board,
+.task-projection--plan .task-board { flex: 1; }
+
+.task-board--plan { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.task-board__column--current {
+  background: var(--color-primary-softer);
+  box-shadow: 0 0 0 1px var(--color-primary-muted);
+}
+
+.task-board__column--current > header { border-bottom-color: var(--color-primary-muted); }
+
+.task-board__current-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--color-on-primary);
+  background: var(--color-primary-strong);
+  font-size: 11px;
+  font-weight: 800;
+}
 
 .task-board__column {
   min-width: 0;
@@ -1372,8 +1393,7 @@
 .task-board__column > header > div { display: flex; align-items: center; gap: var(--space-2); }
 .task-board__column h2 { margin: 0; font-size: 14px; }
 .task-board__column > header > div > span { min-width: 24px; padding: 2px 6px; border-radius: 999px; color: var(--color-muted-foreground); background: var(--color-surface); font-size: 12px; font-weight: 800; text-align: center; }
-.task-board__cards,
-.task-plan-stage__items { display: grid; align-content: start; gap: var(--space-2); padding: var(--space-2); }
+.task-board__cards { display: grid; align-content: start; gap: var(--space-2); padding: var(--space-2); }
 .task-board__empty { margin: 0; padding: var(--space-6) var(--space-3); border: 1px dashed var(--color-border); border-radius: var(--radius-md); color: var(--color-muted-foreground); font-size: 12px; text-align: center; }
 
 .task-card {
@@ -1449,40 +1469,6 @@
 .task-card__status-feedback { margin: 0; color: var(--color-primary-strong); font-size: 11px; font-weight: 700; }
 .task-card__status-feedback--error { color: var(--color-danger); }
 .task-card--compact .task-card__facts { grid-template-columns: 1fr 1fr; }
-
-.task-plan-flow {
-  min-width: 0;
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(300px, 1fr);
-  align-items: start;
-  gap: var(--space-4);
-  padding: var(--space-2) 0 var(--space-4);
-  overflow-x: auto;
-  overscroll-behavior-inline: contain;
-}
-
-.task-plan-stage {
-  position: relative;
-  min-width: 0;
-  overflow: visible;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-muted-surface);
-}
-
-.task-plan-stage > header { min-height: 76px; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-3); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
-.task-plan-stage__marker { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%; color: var(--color-on-primary); background: var(--color-primary); font-size: 13px; font-weight: 800; }
-.task-plan-stage h2 { margin: 0; font-size: 15px; }
-.task-stage-status { padding: 3px 7px; border-radius: var(--radius-sm); color: var(--color-primary-strong); background: var(--color-primary-softer); font-size: 11px; font-weight: 800; }
-.task-stage-status--unavailable { color: var(--color-danger); background: var(--color-danger-soft); }
-.task-plan-stage__meta { min-height: 60px; display: grid; gap: var(--space-1); padding: var(--space-3); border-bottom: 1px solid var(--color-border); font-size: 12px; }
-.task-plan-stage__meta span { color: var(--color-muted-foreground); }
-.task-plan-stage__boundary { display: flex; align-items: flex-start; gap: var(--space-2); margin: var(--space-3) var(--space-3) 0; padding: var(--space-3); border: 1px solid var(--color-danger); border-radius: var(--radius-md); color: var(--color-danger); background: var(--color-danger-soft); font-size: 11px; line-height: 1.45; }
-.task-plan-stage__boundary svg { width: 17px; height: 17px; flex: 0 0 auto; }
-.task-plan-stage__boundary strong { display: block; margin-bottom: 2px; }
-.task-plan-stage__connector { position: absolute; top: 35px; left: calc(-1 * var(--space-4) - 1px); width: var(--space-4); height: 2px; background: var(--color-border); }
-.task-plan-stage__connector span { position: absolute; right: -1px; top: -4px; width: 8px; height: 8px; border-top: 2px solid var(--color-border); border-right: 2px solid var(--color-border); transform: rotate(45deg); }
 
 .workbench-drawer__body--work-item { padding-top: 0; }
 .work-item-detail { display: grid; gap: var(--space-4); }

@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, test } from "vitest";
 import type { ContractWorkItemProjection } from "../../api/generated-contracts";
-import { BoardView, canEnterWorkbench, workbenchPath } from "./TaskBoardPage";
+import { BoardView, canEnterWorkbench, PlanView, workbenchPath } from "./TaskBoardPage";
 
 function runningWorkItem(index: number, title: string): ContractWorkItemProjection {
   return {
@@ -120,5 +120,108 @@ describe("BoardView", () => {
 
     expect(canEnterWorkbench(item)).toBe(true);
     expect(markup).toContain('href="/tasks/task_board/work-items/work_2"');
+  });
+});
+
+function planWorkItem(
+  id: string,
+  agentType: "general" | "image" | "ppt",
+  businessStatus: ContractWorkItemProjection["business_status"],
+  updatedAt: string,
+): ContractWorkItemProjection {
+  return {
+    ...runningWorkItem(1, `${agentType} 任务 ${id}`),
+    work_item_id: id,
+    agent_type: agentType,
+    business_status: businessStatus,
+    updated_at: updatedAt,
+  };
+}
+
+function renderPlan(items: ContractWorkItemProjection[]): string {
+  return renderToStaticMarkup(
+    <MemoryRouter>
+      <PlanView items={items} />
+    </MemoryRouter>,
+  );
+}
+
+function currentColumnLabel(markup: string): string | null {
+  const match = markup.match(/task-board__column--current" aria-labelledby="plan-column-(\w+)"/);
+  return match?.[1] ?? null;
+}
+
+describe("PlanView", () => {
+  test("groups every work item into the Image / PPT / 方案 columns in time order", () => {
+    const markup = renderPlan([
+      planWorkItem("img_new", "image", "TODO", "2026-08-28T00:00:00Z"),
+      planWorkItem("ppt_1", "ppt", "RUNNING", "2026-08-27T00:00:00Z"),
+      planWorkItem("img_old", "image", "COMPLETED", "2026-08-26T00:00:00Z"),
+      planWorkItem("gen_1", "general", "TODO", "2026-08-29T00:00:00Z"),
+    ]);
+
+    expect(markup).toContain('id="plan-column-image">Image</h2><span>2</span>');
+    expect(markup).toContain('id="plan-column-ppt">PPT</h2><span>1</span>');
+    expect(markup).toContain('id="plan-column-general">方案</h2><span>1</span>');
+    // Image cards stay in chronological order inside their column.
+    expect(markup.indexOf("image 任务 img_old")).toBeLessThan(markup.indexOf("image 任务 img_new"));
+  });
+
+  test("highlights the Image column while any image task is incomplete", () => {
+    const markup = renderPlan([
+      planWorkItem("img_1", "image", "RUNNING", "2026-08-26T00:00:00Z"),
+      planWorkItem("ppt_1", "ppt", "TODO", "2026-08-27T00:00:00Z"),
+      planWorkItem("gen_1", "general", "TODO", "2026-08-28T00:00:00Z"),
+    ]);
+
+    expect(currentColumnLabel(markup)).toBe("image");
+    expect(markup.match(/当前阶段/g)).toHaveLength(1);
+  });
+
+  test("highlights the PPT column once every image task is completed", () => {
+    const markup = renderPlan([
+      planWorkItem("img_1", "image", "COMPLETED", "2026-08-26T00:00:00Z"),
+      planWorkItem("ppt_1", "ppt", "RUNNING", "2026-08-27T00:00:00Z"),
+      planWorkItem("gen_1", "general", "TODO", "2026-08-28T00:00:00Z"),
+    ]);
+
+    expect(currentColumnLabel(markup)).toBe("ppt");
+  });
+
+  test("highlights the 方案 column when image and PPT tasks are all completed", () => {
+    const markup = renderPlan([
+      planWorkItem("img_1", "image", "COMPLETED", "2026-08-26T00:00:00Z"),
+      planWorkItem("ppt_1", "ppt", "COMPLETED", "2026-08-27T00:00:00Z"),
+      planWorkItem("gen_1", "general", "RUNNING", "2026-08-28T00:00:00Z"),
+    ]);
+
+    expect(currentColumnLabel(markup)).toBe("general");
+  });
+
+  test("highlights the only populated column even when its tasks are completed", () => {
+    const markup = renderPlan([
+      planWorkItem("ppt_1", "ppt", "COMPLETED", "2026-08-26T00:00:00Z"),
+      planWorkItem("ppt_2", "ppt", "COMPLETED", "2026-08-27T00:00:00Z"),
+    ]);
+
+    expect(currentColumnLabel(markup)).toBe("ppt");
+    expect(markup.match(/当前没有子任务/g)).toHaveLength(2);
+  });
+
+  test("keeps the highlight on the last populated column when everything is completed", () => {
+    const markup = renderPlan([
+      planWorkItem("img_1", "image", "COMPLETED", "2026-08-26T00:00:00Z"),
+      planWorkItem("ppt_1", "ppt", "COMPLETED", "2026-08-27T00:00:00Z"),
+      planWorkItem("gen_1", "general", "COMPLETED", "2026-08-28T00:00:00Z"),
+    ]);
+
+    expect(currentColumnLabel(markup)).toBe("general");
+  });
+
+  test("highlights nothing when the plan has no work items", () => {
+    const markup = renderPlan([]);
+
+    expect(currentColumnLabel(markup)).toBeNull();
+    expect(markup.match(/当前没有子任务/g)).toHaveLength(3);
   });
 });
