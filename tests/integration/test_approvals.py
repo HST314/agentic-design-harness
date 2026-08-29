@@ -6,6 +6,7 @@ from pathlib import Path
 
 from harness.core.errors import HarnessError
 from harness.services.approvals import ApprovalInboxService
+from harness.storage.repository import Actor
 from runtime_helpers import build_service, build_store, create_task, envelope, image_plan
 
 
@@ -134,6 +135,105 @@ class ApprovalInboxServiceTests(unittest.TestCase):
                 envelope("different-decision", resolved["approval_revision"]),
             )
         self.assertEqual(duplicate.exception.code, "INVALID_STATE_TRANSITION")
+
+    def test_instance_view_is_the_only_read_trigger_and_updates_global_count(self) -> None:
+        created = self.approvals.ensure_workflow_approval(
+            "t_approvals",
+            "i_image_1",
+            step_id="waiting_human_approval",
+            capabilities=["approve_taskbook"],
+            context={},
+            operation_id="job_view",
+        )
+        self.assertEqual(self.approvals.unread_count(owner="human"), 1)
+
+        viewed = self.approvals.mark_instance_notifications_read("i_image_1")
+
+        self.assertEqual([item["status"] for item in viewed], ["READ"])
+        self.assertEqual(self.approvals.unread_count(owner="human"), 0)
+        self.assertEqual(self.approvals.mark_instance_notifications_read("i_image_1"), [])
+        approval = self.approvals.get_approval(created["approval"]["approval_id"])
+        self.assertEqual(approval["approval"]["status"], "PENDING")
+
+    def test_workbench_progress_closes_the_previous_workflow_gate(self) -> None:
+        created = self.approvals.ensure_workflow_approval(
+            "t_approvals",
+            "i_image_1",
+            step_id="waiting_human_approval",
+            capabilities=["approve_taskbook"],
+            context={},
+            operation_id="job_external",
+        )
+
+        resolved = self.approvals.acknowledge_external_workflow_approvals(
+            "t_approvals",
+            "i_image_1",
+            current_step_id="next_step",
+            current_operation_id="job_next",
+            actor_id="image_adapter",
+        )
+
+        self.assertEqual([item["status"] for item in resolved], ["APPROVED"])
+        approval = self.approvals.get_approval(created["approval"]["approval_id"])
+        self.assertEqual(approval["approval"]["status"], "APPROVED")
+        inbox = self.approvals.list_inbox(owner="human")
+        self.assertEqual([item["status"] for item in inbox], ["HANDLED"])
+
+    def test_workbench_progress_repairs_notification_after_interrupted_resolution(self) -> None:
+        created = self.approvals.ensure_workflow_approval(
+            "t_approvals",
+            "i_image_1",
+            step_id="waiting_human_approval",
+            capabilities=["approve_taskbook"],
+            context={},
+            operation_id="job_interrupted",
+        )
+        approval = created["approval"]
+        externally_resolved = {
+            **approval,
+            "status": "APPROVED",
+            "revision": approval["revision"] + 1,
+            "resolved_at": approval["created_at"],
+            "resolved_by_type": "adapter",
+            "resolved_by_id": "image_adapter",
+        }
+        self.store.approval.put(
+            "t_approvals",
+            approval["approval_id"],
+            externally_resolved,
+            expected_revision=created["approval_revision"],
+            actor=Actor("adapter", "image_adapter"),
+            command="simulate_interrupted_external_resolution",
+            idempotency_key="simulate-interrupted-external-resolution",
+        )
+
+        resolved = self.approvals.acknowledge_external_workflow_approvals(
+            "t_approvals",
+            "i_image_1",
+            current_step_id="next_step",
+            current_operation_id="job_next",
+            actor_id="image_adapter",
+        )
+
+        self.assertEqual(resolved, [])
+        inbox = self.approvals.list_inbox(owner="human")
+        self.assertEqual([item["status"] for item in inbox], ["HANDLED"])
+
+    def test_unread_count_is_not_limited_to_the_first_inbox_page(self) -> None:
+        for index in range(55):
+            self.approvals.ensure_notification(
+                "t_approvals",
+                kind="INSTANCE_SUCCEEDED",
+                owner="human",
+                title="子任务完成",
+                message=f"第 {index + 1} 个子任务通知。",
+                deep_link="instances/i_image_1",
+                dedupe_key=f"count-{index}",
+                instance_id="i_image_1",
+            )
+
+        self.assertEqual(len(self.approvals.list_inbox(owner="human", limit=50)), 50)
+        self.assertEqual(self.approvals.unread_count(owner="human"), 55)
 
 if __name__ == "__main__":
     unittest.main()

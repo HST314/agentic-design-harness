@@ -538,7 +538,6 @@ function renderInboxItem(
         : ""
     }
     <div class="inbox-actions">
-      ${item.status === "UNREAD" ? `<button class="button button--secondary" type="button" data-mark-read data-revision="${item.store_revision ?? item.revision}">${icon("check")}标为已读</button>` : ""}
       ${item.instance_id ? `<a class="button button--secondary" href="${routePath({ name: "instance", instanceId: item.instance_id })}" data-instance="${escapeHtml(item.instance_id)}">查看实例</a>` : ""}
     </div>
     ${
@@ -559,25 +558,6 @@ function renderInboxItem(
 
 function wireInboxActions(): void {
   wireNavigation();
-  root.querySelectorAll<HTMLButtonElement>("[data-mark-read]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const card = button.closest<HTMLElement>("[data-inbox-id]");
-      if (!card?.dataset.inboxId || button.disabled) return;
-      setButtonBusy(button, "正在保存");
-      try {
-        await api.updateInboxStatus(card.dataset.inboxId, {
-          status: "READ",
-          envelope: commandEnvelope("human", "human_operator", Number(button.dataset.revision)),
-        });
-        await renderInbox(renderVersion);
-      } catch (error) {
-        showInlineError(button, error);
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-        button.innerHTML = `${icon("check")}重试标为已读`;
-      }
-    });
-  });
   root.querySelectorAll<HTMLFormElement>(".approval-form").forEach((form) => {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();

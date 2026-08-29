@@ -1,9 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   agentWorkbenchLinkQuery,
   api,
+  inboxQuery,
   workItemDetailQuery,
 } from "../../api/queries";
 import { ApiError, type AgentWorkbenchLinkResponse } from "../../api/client";
@@ -168,6 +169,7 @@ function WorkbenchFailure({
 
 export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean }): React.JSX.Element {
   const { taskId = "", workItemId = "" } = useParams();
+  const queryClient = useQueryClient();
   const detail = useQuery(workItemDetailQuery(taskId, workItemId));
   const item = detail.data?.item;
   const instanceId = item?.current_instance?.instance_id ?? "";
@@ -180,6 +182,15 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
   const announceBridgeRef = useRef<() => void>(() => undefined);
   const [frameKey, setFrameKey] = useState(0);
   const [frameState, setFrameState] = useState<FrameState>("loading");
+  const viewedInstanceRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!instanceId || viewedInstanceRef.current === instanceId) return;
+    viewedInstanceRef.current = instanceId;
+    void api.viewInstance(instanceId).then(() => {
+      void queryClient.invalidateQueries({ queryKey: inboxQuery.queryKey });
+    }).catch(() => undefined);
+  }, [instanceId, queryClient]);
 
   useEffect(() => {
     if (!link.data?.embeddable || !link.data.ui_url) return undefined;

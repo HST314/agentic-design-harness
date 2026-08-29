@@ -363,12 +363,12 @@ def validate_task_aggregate(
     ]
     required_instance_statuses = {item["status"] for item in required_instances}
 
-    if instance_statuses & ACTIVE_INSTANCE_STATUSES or any(
+    if required_instance_statuses & WAITING_INSTANCE_STATUSES:
+        expected = "WAITING_APPROVAL"
+    elif instance_statuses & ACTIVE_INSTANCE_STATUSES or any(
         item["status"] in {"READY", "RUNNING"} for item in required_stages
     ):
         expected = "RUNNING"
-    elif required_instance_statuses & WAITING_INSTANCE_STATUSES:
-        expected = "WAITING_APPROVAL"
     elif required_instance_statuses & FAILED_INSTANCE_STATUSES or any(
         item["status"] == "FAILED" for item in required_stages
     ):
@@ -1061,9 +1061,9 @@ class AggregateStateTests(unittest.TestCase):
         ):
             validate_plan_semantics(after_snapshot)
 
-    def test_running_work_has_priority_over_waiting_approval(self) -> None:
+    def test_waiting_approval_has_priority_over_running_work(self) -> None:
         plan = load_json(PLAN_EXAMPLES / "image-only.json")
-        plan["task"]["status"] = "RUNNING"
+        plan["task"]["status"] = "WAITING_APPROVAL"
         plan["task"]["updated_at"] = "2026-08-19T16:01:00Z"
         plan["stages"][0]["status"] = "RUNNING"
         plan["instances"][0]["status"] = "WAITING_APPROVAL"

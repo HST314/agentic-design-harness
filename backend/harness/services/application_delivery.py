@@ -35,6 +35,7 @@ class ApplicationDeliveryMixin:
         instance = self._instance(task_id, instance_id)
         if instance["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
             return {"instance": instance, "observation": None, "transition": None}
+        observed_revision = self.store.task.revision(task_id, task_id)
         adapter = self.adapters.get(instance["agent_type"])
         observation = adapter.get_status(instance_id)
         config_application = None
@@ -53,7 +54,149 @@ class ApplicationDeliveryMixin:
                 "The Agent adapter returned a non-projectable status.",
                 {"status": observation.status},
             )
+        # Polling is intentionally outside the locks. Only persistence is serialized,
+        # then fenced by the revision captured before the poll. This avoids blocking a
+        # human decision on Agent I/O while preventing an older observation from landing.
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            self.commands.task_guard(task_id),
+        ):
+            instance = self._instance(task_id, instance_id)
+            if (
+                self.store.task.revision(task_id, task_id) != observed_revision
+                or instance["status"]
+                not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}
+            ):
+                return {
+                    "instance": deepcopy(instance),
+                    "observation": {
+                        "status": observation.status,
+                        "step_id": observation.step_id,
+                        "capabilities": list(observation.capabilities),
+                        "details": deepcopy(observation.details),
+                        "stale": True,
+                    },
+                    "transition": None,
+                    "approval": None,
+                    "config_application": config_application,
+                }
+            return self._project_observation_locked(
+                task_id,
+                instance_id,
+                instance,
+                adapter,
+                observation,
+                config_application,
+            )
+
+    def _project_observation_locked(
+        self,
+        task_id: str,
+        instance_id: str,
+        instance: dict[str, Any],
+        adapter: Any,
+        observation: Any,
+        config_application: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Persist a current observation while both task guards are held."""
+
+        adapter_actor_id = f"{instance['agent_type']}_adapter"
+        observation_operation_id = str(
+            observation.details.get("job_id")
+            or digest_json(
+                {
+                    "instance_id": instance_id,
+                    "step_id": observation.step_id,
+                    "details": observation.details,
+                }
+            )[:24]
+        )
+        if observation.status == "WAITING_APPROVAL":
+            resolved_gate = self.approvals.workflow_approval(
+                task_id,
+                instance_id,
+                step_id=str(observation.step_id),
+                operation_id=observation_operation_id,
+            )
+            if resolved_gate is not None and resolved_gate["status"] != "PENDING":
+                transition = None
+                pending = [
+                    item
+                    for item in self.approvals.list_approvals(
+                        task_id=task_id,
+                        instance_id=instance_id,
+                        status="PENDING",
+                    )
+                    if item["kind"] == "WORKFLOW"
+                ]
+                # Repair instances stranded by older versions of the observer. Do not
+                # disturb a newer, genuinely pending workflow gate for the same instance.
+                if instance["status"] == "WAITING_APPROVAL" and not pending:
+                    transition = self.commands.transition_instance(
+                        task_id,
+                        instance_id,
+                        "RUNNING",
+                        CommandEnvelope(
+                            idempotency_key=(
+                                f"discard-stale-gate-{resolved_gate['approval_id']}-"
+                                f"{self.store.task.revision(task_id, task_id)}"
+                            ),
+                            actor_type="adapter",
+                            actor_id=f"{instance['agent_type']}_adapter",
+                            expected_revision=self.store.task.revision(task_id, task_id),
+                        ),
+                    )
+                    instance = next(
+                        item
+                        for item in transition["plan"]["instances"]
+                        if item["instance_id"] == instance_id
+                    )
+                return {
+                    "instance": deepcopy(instance),
+                    "observation": {
+                        "status": observation.status,
+                        "step_id": observation.step_id,
+                        "capabilities": list(observation.capabilities),
+                        "details": deepcopy(observation.details),
+                        "stale": True,
+                    },
+                    "transition": transition,
+                    "approval": None,
+                    "config_application": config_application,
+                }
+        self.approvals.acknowledge_external_workflow_approvals(
+            task_id,
+            instance_id,
+            current_step_id=(
+                str(observation.step_id)
+                if observation.status == "WAITING_APPROVAL"
+                else None
+            ),
+            current_operation_id=(
+                observation_operation_id
+                if observation.status == "WAITING_APPROVAL"
+                else None
+            ),
+            actor_id=adapter_actor_id,
+        )
         if observation.details.get("completed") is True:
+            if instance["agent_type"] == "ppt":
+                delivery = self._collect_declared_deliveries_and_complete(
+                    task_id, instance_id, adapter, observation
+                )
+                return {
+                    "instance": deepcopy(delivery["instance"]),
+                    "observation": {
+                        "status": observation.status,
+                        "step_id": observation.step_id,
+                        "capabilities": list(observation.capabilities),
+                        "details": deepcopy(observation.details),
+                    },
+                    "transition": delivery["transition"],
+                    "approval": None,
+                    "delivery": delivery,
+                    "config_application": config_application,
+                }
             try:
                 delivery = self._collect_bundles_and_request_review(
                     task_id, instance_id, adapter, observation
@@ -111,23 +254,13 @@ class ApplicationDeliveryMixin:
             )
         approval = None
         if observation.status == "WAITING_APPROVAL":
-            operation_id = str(
-                observation.details.get("job_id")
-                or digest_json(
-                    {
-                        "instance_id": instance_id,
-                        "step_id": observation.step_id,
-                        "details": observation.details,
-                    }
-                )[:24]
-            )
             approval = self.approvals.ensure_workflow_approval(
                 task_id,
                 instance_id,
                 step_id=str(observation.step_id),
                 capabilities=list(observation.capabilities),
                 context=deepcopy(observation.details.get("approval_context") or {}),
-                operation_id=operation_id,
+                operation_id=observation_operation_id,
             )
         elif observation.status == "FAILED":
             self.approvals.ensure_notification(
@@ -151,6 +284,73 @@ class ApplicationDeliveryMixin:
             "transition": transition,
             "approval": approval,
             "config_application": config_application,
+        }
+
+    def _collect_declared_deliveries_and_complete(
+        self, task_id: str, instance_id: str, adapter, observation
+    ) -> dict[str, Any]:
+        """Publish a completed non-bundle Agent's declared delivery set."""
+
+        current = self._instance(task_id, instance_id)
+        resume_transition = None
+        if current["status"] == "WAITING_APPROVAL":
+            resume_transition = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "RUNNING",
+                CommandEnvelope(
+                    idempotency_key=(
+                        f"observe-resume-{instance_id}-"
+                        f"{digest_json(observation.details)[:24]}"
+                    ),
+                    actor_type="adapter",
+                    actor_id=f"{current['agent_type']}_adapter",
+                    expected_revision=self.store.task.revision(task_id, task_id),
+                ),
+            )
+        candidates = adapter.collect_deliveries(instance_id)
+        if not isinstance(candidates, list) or not candidates:
+            raise HarnessError(
+                "VALIDATION_ERROR", "A completed Agent did not expose its declared delivery."
+            )
+        self._validate_required_delivery_set(task_id, instance_id, candidates)
+        transition = None
+        manifests: list[dict[str, Any]] = []
+        for candidate in candidates:
+            inspected = self.assets.inspect_delivery(
+                task_id,
+                instance_id,
+                source_relative_path=candidate["source_relative_path"],
+                role=candidate["role"],
+                description=candidate["description"],
+                expected_sha256=candidate["sha256"],
+                derivation=candidate.get("derivation"),
+            )
+            result = self.publish_delivery_and_complete(
+                task_id,
+                instance_id,
+                source_relative_path=inspected["source_relative_path"],
+                role=inspected["role"],
+                description=inspected["description"],
+                operation_id=(
+                    f"publish-{instance_id}-{candidate['sha256'][:24]}"
+                ),
+                envelope=CommandEnvelope(
+                    idempotency_key=(
+                        f"complete-{instance_id}-{candidate['sha256'][:24]}"
+                    ),
+                    actor_type="adapter",
+                    actor_id=f"{current['agent_type']}_adapter",
+                    expected_revision=self.store.task.revision(task_id, task_id),
+                ),
+            )
+            manifests.append(result["manifest"])
+            transition = result["transition"] or transition
+        return {
+            "status": "PUBLISHED",
+            "instance": self._instance(task_id, instance_id),
+            "manifests": manifests,
+            "transition": transition or resume_transition,
         }
 
     def resolve_approval(
@@ -1158,6 +1358,9 @@ class ApplicationDeliveryMixin:
         instance_id: str,
         transition: dict[str, Any],
     ) -> None:
+        instance = self._instance(task_id, instance_id)
+        if instance["agent_type"] not in {"image", "ppt"}:
+            return
         self.approvals.ensure_notification(
             task_id,
             kind="INSTANCE_SUCCEEDED",
@@ -1168,16 +1371,6 @@ class ApplicationDeliveryMixin:
             dedupe_key=f"instance-succeeded:{instance_id}",
             instance_id=instance_id,
         )
-        if transition["task"]["status"] in {"SUCCEEDED", "PARTIAL"}:
-            self.approvals.ensure_notification(
-                task_id,
-                kind="TASK_SUCCEEDED",
-                owner="human",
-                title="主任务已完成",
-                message=f"任务 {task_id} 的必需阶段均已完成。",
-                deep_link=f"tasks/{task_id}",
-                dedupe_key=(f"task-complete:{task_id}:" f"{transition['task']['plan_revision']}"),
-            )
 
     def _validate_required_delivery_set(
         self,

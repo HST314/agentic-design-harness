@@ -255,13 +255,13 @@ class TaskCommandTests(unittest.TestCase):
         self.assertEqual(finished["plan"]["stages"][1]["status"], "READY")
         self.assertEqual(finished["task"]["status"], "RUNNING")
 
-    def test_running_work_has_priority_over_waiting_approval(self) -> None:
+    def test_waiting_approval_has_priority_over_running_work(self) -> None:
         create_task(self.service, "t_priority", "auto")
         self._save("t_priority", image_plan("t_priority", 2))
         self._transition("t_priority", "i_image_1", "STARTING", "one-start")
         self._transition("t_priority", "i_image_1", "RUNNING", "one-run")
         waiting = self._transition("t_priority", "i_image_1", "WAITING_APPROVAL", "one-wait")
-        self.assertEqual(waiting["task"]["status"], "RUNNING")
+        self.assertEqual(waiting["task"]["status"], "WAITING_APPROVAL")
         self._transition("t_priority", "i_image_2", "STARTING", "two-start")
         self._transition("t_priority", "i_image_2", "RUNNING", "two-run")
         finished_two = self._transition("t_priority", "i_image_2", "SUCCEEDED", "two-done")
@@ -562,7 +562,7 @@ class PlanAppendGateTests(unittest.TestCase):
             mode="append",
         )
 
-        self.assertEqual(result["task"]["status"], "RUNNING")
+        self.assertEqual(result["task"]["status"], "WAITING_APPROVAL")
         self.assertEqual(result["plan"]["stages"][1]["status"], "READY")
 
     def test_append_honors_expected_plan_revision(self) -> None:

@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
   let approvalResolved = false;
+  let notificationRead = false;
   await page.route("**/readyz", async (route) => {
     await route.fulfill({
       status: 200,
@@ -397,17 +398,26 @@ test.beforeEach(async ({ page }) => {
             approval_id: "ap_ui",
             kind: "APPROVAL_REQUIRED",
             owner: "human",
-            status: approvalResolved ? "HANDLED" : "UNREAD",
+            status: approvalResolved ? "HANDLED" : notificationRead ? "READ" : "UNREAD",
             title: "工作流等待决议",
             message: "任务书等待批准。",
             deep_link: "inbox?approval_id=ap_ui",
             created_at: "2026-08-20T12:01:00Z",
             sequence: 1,
-            revision: approvalResolved ? 2 : 1,
-            store_revision: approvalResolved ? 2 : 1,
+            revision: approvalResolved || notificationRead ? 2 : 1,
+            store_revision: approvalResolved || notificationRead ? 2 : 1,
           },
         ],
+        unread_count: approvalResolved || notificationRead ? 0 : 1,
       }),
+    });
+  });
+  await page.route("**/api/v1/instances/i_ui/view", async (route) => {
+    notificationRead = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "1.0", items: [], unread_count: 0 }),
     });
   });
   await page.route("**/api/v1/approvals/ap_ui", async (route) => {
@@ -558,9 +568,11 @@ test("legacy instance links open the corresponding professional workbench", asyn
 
 test("inbox notifications link straight to the corresponding professional workbench", async ({ page }) => {
   await page.goto("/inbox");
+  await expect(page.getByRole("link", { name: "收件箱，1 条未查看消息" })).toBeVisible();
   const workbenchLink = page.getByRole("link", { name: "打开专业工作台" });
   await workbenchLink.click();
   await expect(page).toHaveURL(/\/tasks\/t_ui\/work-items\/work_ui$/);
+  await expect(page.getByRole("link", { name: "收件箱" })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(/i_ui|t_ui|work_ui|队列序号|JSON/);
 });
 
