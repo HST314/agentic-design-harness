@@ -42,7 +42,7 @@ from .asset_files import (
     kind_for_mime,
     stream_digest,
 )
-from .asset_reader import OpenedCommittedAsset, open_committed_asset
+from .asset_reader import OpenedCommittedAsset, open_committed_asset, open_shared_file
 from .asset_recovery import AssetRecoveryMixin
 
 CrashHook = Callable[[str], None]
@@ -828,6 +828,55 @@ class AssetService(AssetRecoveryMixin):
                         ),
                     }
                 )
+        if group in {"shared", "all"}:
+            committed = {entry["relative_path"] for entry in entries}
+            for entry in self._shared_file_entries(workspace):
+                if entry["relative_path"] not in committed:
+                    entries.append(entry)
+        return entries
+
+    def _shared_file_entries(self, workspace: Path) -> list[dict[str, Any]]:
+        """List the user-visible files currently inside ``resources/shared``.
+
+        Agents may drop deliverables into the shared folder ahead of any
+        committed manifest (the general-purpose Agent writes documents
+        directly), so the shared area is enumerated from disk. Hidden entries
+        (``.name``) are internal bookkeeping and never listed, which keeps the
+        listing consistent with ``download_shared_archive``.
+        """
+
+        shared_root = workspace / "resources" / "shared"
+        if not shared_root.is_dir() or is_link_or_reparse(shared_root):
+            return []
+        entries: list[dict[str, Any]] = []
+        for current, dirnames, filenames in os.walk(shared_root, followlinks=False):
+            current_path = Path(current)
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if not name.startswith(".")
+                and not is_link_or_reparse(current_path / name)
+            )
+            for name in sorted(filenames):
+                if name.startswith("."):
+                    continue
+                path = current_path / name
+                if is_link_or_reparse(path) or not path.is_file():
+                    continue
+                mime_type = detect_mime(path, name)
+                size, sha256 = file_digest(path)
+                entries.append(
+                    {
+                        "relative_path": path.relative_to(workspace).as_posix(),
+                        "filename": name,
+                        "mime_type": mime_type,
+                        "size_bytes": size,
+                        "sha256": sha256,
+                        # Preview stays on the verified committed path, so
+                        # walked-but-uncommitted files never advertise one.
+                        "previewable": False,
+                    }
+                )
         return entries
 
     def preview(self, task_id: str, relative_path: str) -> dict[str, Any]:
@@ -917,7 +966,15 @@ class AssetService(AssetRecoveryMixin):
 
     def download(self, task_id: str, relative_path: str) -> dict[str, Any]:
         workspace = self.initialize_task_workspace(task_id)
-        opened = self._open_browser_file(task_id, workspace, relative_path)
+        try:
+            opened = self._open_browser_file(task_id, workspace, relative_path)
+        except HarnessError as exc:
+            if exc.code != "ASSET_VALIDATION_FAILED":
+                raise
+            # The shared folder is the user-facing product area: deliverables
+            # dropped there by agents ahead of any committed manifest stay
+            # downloadable, exactly as they are in the shared zip archive.
+            opened = open_shared_file(workspace, relative_path)
         filename = quote(opened.filename, safe="")
         return {
             "stream": opened.stream,
@@ -932,7 +989,12 @@ class AssetService(AssetRecoveryMixin):
         }
 
     def download_shared_archive(self, task_id: str) -> dict[str, Any]:
-        """Zip every regular file under resources/shared, including agent notes."""
+        """Zip every user-visible regular file under resources/shared.
+
+        Hidden entries (``.name``) are internal bookkeeping — agent state,
+        in-flight publication temporaries — and are excluded so the archive
+        contains exactly the files shown in the delivery file list.
+        """
 
         task = self._require_task(task_id)
         workspace = self.initialize_task_workspace(task_id)
@@ -949,13 +1011,14 @@ class AssetService(AssetRecoveryMixin):
                     dirnames[:] = sorted(
                         name
                         for name in dirnames
-                        if not is_link_or_reparse(current_path / name)
+                        if not name.startswith(".")
+                        and not is_link_or_reparse(current_path / name)
                     )
                     for name in sorted(filenames):
+                        if name.startswith("."):
+                            continue
                         path = current_path / name
                         if is_link_or_reparse(path) or not path.is_file():
-                            continue
-                        if name.startswith(".") and name.endswith(".tmp"):
                             continue
                         arcname = path.relative_to(shared_root).as_posix()
                         archive.write(path, arcname)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import secrets
 import shutil
@@ -83,13 +84,13 @@ class GeneralAgentAdapter:
         instance_root = self.store.layout.initialize_instance(task_id, instance_id)
         shared_root = request.task_root / "resources" / "shared"
         shared_root.mkdir(parents=True, exist_ok=True)
-        managed_state_root = shared_root / ".general-agent-state"
+        managed_state_root = instance_root / "runtime" / "general-agent-state"
         managed_state_root.mkdir(parents=True, exist_ok=True)
         if (
             managed_state_root.is_symlink()
             or not managed_state_root.is_dir()
             or not managed_state_root.resolve(strict=True).is_relative_to(
-                shared_root.resolve(strict=True)
+                instance_root.resolve(strict=True)
             )
         ):
             raise HarnessError(
@@ -128,6 +129,7 @@ class GeneralAgentAdapter:
         else:
             atomic_write_json(state_path, expected)
         chat_state_path = managed_state_root / expected["chat_state_name"]
+        self._migrate_legacy_chat_state(shared_root, managed_state_root, chat_state_path)
         snapshot = self.task_config.resolve(task_id)
         model_id = snapshot.runtime.models.text_reasoning
         model = next(
@@ -168,7 +170,7 @@ class GeneralAgentAdapter:
                 "GENERAL_AGENT_RUNTIME_CONFIG": str(runtime_config),
                 "GENERAL_AGENT_MODEL_CONFIG": str(runtime_config),
             },
-            writable_roots=(shared_root.resolve(),),
+            writable_roots=(shared_root.resolve(), managed_state_root.resolve()),
             health_path="/healthz",
             readiness_path="/readyz",
             ui_path="/",
@@ -296,6 +298,37 @@ class GeneralAgentAdapter:
             / "runtime"
             / "general-adapter.json"
         )
+
+    @staticmethod
+    def _migrate_legacy_chat_state(
+        shared_root: Path, managed_state_root: Path, chat_state_path: Path
+    ) -> None:
+        """Move chat state kept inside the shared folder by older revisions.
+
+        Revisions that stored ``resources/shared/.general-agent-state`` leaked
+        internal bookkeeping into the user-facing delivery area. Adopting the
+        existing file keeps in-flight chats intact while emptying the shared
+        folder of non-deliverable files.
+        """
+
+        legacy_root = shared_root / ".general-agent-state"
+        if legacy_root.is_symlink() or not legacy_root.is_dir():
+            return
+        legacy_state = legacy_root / chat_state_path.name
+        if (
+            not chat_state_path.exists()
+            and legacy_state.is_file()
+            and not legacy_state.is_symlink()
+        ):
+            try:
+                shutil.move(str(legacy_state), str(chat_state_path))
+            except OSError as exc:
+                raise HarnessError(
+                    "PROCESS_START_FAILED",
+                    "The legacy General Agent chat state could not be migrated.",
+                ) from exc
+        with contextlib.suppress(OSError):
+            legacy_root.rmdir()
 
     def _prepare_runtime_artifact(self) -> Path:
         source_digest = content_tree_sha256(
