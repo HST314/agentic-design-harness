@@ -364,7 +364,10 @@ class MasterOrchestrator:
             "PlanDraft "
             "submitted at once. Merge deliverables into one stage only when they truly "
             "cannot be delivered independently. Never emit more than 6 image stages in a "
-            "single plan. "
+            "single plan. For every image stage, when the user explicitly states a numeric "
+            "aspect ratio such as 3:4, 1:1, or 16:9, copy that exact ratio into "
+            "parameters.aspect_ratio; never leave it null or substitute a different ratio. "
+            "Leave aspect_ratio null only when the user did not specify one. "
             + (
                 "This task has no assets: every input_asset_ids value must be an empty list, "
                 "and no instruction may claim or cite an asset. "
