@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn
 
 from ..core.errors import HarnessError
+from ..storage.paths import normalized_relative_path
 from ..storage.safe_open import open_regular_readonly
 from .asset_browser import committed_browser_event
 from .asset_files import detect_mime_stream, stream_digest
@@ -45,7 +47,9 @@ def open_committed_asset(
 
     normalized, event = committed_browser_event(relative_path, events)
     manifest = event["manifest"]
-    stream = _open_beneath(workspace, normalized.parts, manifest["asset_id"])
+    stream = _open_beneath(
+        workspace, normalized.parts, lambda: _corrupted(manifest["asset_id"])
+    )
     try:
         filename = normalized.name
         mime_type = detect_mime_stream(stream, filename)
@@ -80,12 +84,61 @@ def open_committed_asset(
         raise
 
 
-def _open_beneath(root: Path, parts: tuple[str, ...], asset_id: str) -> BinaryIO:
+def open_shared_file(workspace: Path, relative_path: str) -> OpenedCommittedAsset:
+    """Open one user-visible file inside ``resources/shared`` race-safely.
+
+    The shared folder is the task's product area: agents may drop deliverables
+    there ahead of any committed manifest (the general-purpose Agent writes
+    documents directly), so reads allow uncommitted files but refuse hidden
+    bookkeeping entries such as ``.general-agent-state``.
+    """
+
+    normalized = normalized_relative_path(relative_path)
+    parts = normalized.parts
+    if (
+        len(parts) < 3
+        or parts[:2] != ("resources", "shared")
+        or any(part.startswith(".") for part in parts[2:])
+    ):
+        raise HarnessError(
+            "ASSET_VALIDATION_FAILED",
+            "Only non-hidden files inside the shared folder may be browsed.",
+            {"path": relative_path},
+        )
+
+    def _invalid() -> NoReturn:
+        raise HarnessError(
+            "ASSET_VALIDATION_FAILED",
+            "The requested shared file does not exist.",
+            {"path": relative_path},
+        )
+
+    stream = _open_beneath(workspace, parts, _invalid)
+    try:
+        filename = normalized.name
+        mime_type = detect_mime_stream(stream, filename)
+        size_bytes, sha256 = stream_digest(stream)
+        return OpenedCommittedAsset(
+            relative_path=normalized.as_posix(),
+            filename=filename,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            stream=stream,
+        )
+    except BaseException:
+        stream.close()
+        raise
+
+
+def _open_beneath(
+    root: Path, parts: tuple[str, ...], on_error: Callable[[], NoReturn]
+) -> BinaryIO:
     if os.name == "nt":
         try:
             descriptor = open_regular_readonly(root.joinpath(*parts), trusted_root=root)
         except OSError:
-            _corrupted(asset_id)
+            on_error()
         return os.fdopen(descriptor, "rb")
     directory_flags = (
         os.O_RDONLY
@@ -108,12 +161,12 @@ def _open_beneath(root: Path, parts: tuple[str, ...], asset_id: str) -> BinaryIO
             try:
                 next_fd = os.open(part, flags, dir_fd=current_fd)
             except OSError:
-                _corrupted(asset_id)
+                on_error()
             os.close(current_fd)
             current_fd = next_fd
         metadata = os.fstat(current_fd)
         if not stat.S_ISREG(metadata.st_mode):
-            _corrupted(asset_id)
+            on_error()
         stream = os.fdopen(current_fd, "rb")
         current_fd = -1
         return stream

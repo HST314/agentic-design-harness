@@ -116,6 +116,10 @@ class AssetServiceTests(unittest.TestCase):
         notes.mkdir()
         (notes / "agent-log.txt").write_text("agent 写入的文档\n", encoding="utf-8")
         (shared / ".pub_inflight.tmp").write_bytes(b"partial publication")
+        state = shared / ".general-agent-state"
+        state.mkdir()
+        (state / "state_secret.json").write_text("{}", encoding="utf-8")
+        (notes / ".hidden.md").write_text("internal\n", encoding="utf-8")
         if hasattr(os, "symlink"):
             (shared / "link.png").symlink_to(shared / "bundle_1.png")
 
@@ -132,6 +136,57 @@ class AssetServiceTests(unittest.TestCase):
                 zipped.read("notes/agent-log.txt").decode("utf-8"),
                 "agent 写入的文档\n",
             )
+
+    def test_shared_listing_matches_archive_for_uncommitted_files(self) -> None:
+        task_root = self.store.layout.workspace_root / "tasks" / "t_assets"
+        shared = task_root / "resources" / "shared"
+        (shared / "学院介绍.md").write_text("# 介绍\n", encoding="utf-8")
+        notes = shared / "notes"
+        notes.mkdir()
+        (notes / "agent-log.txt").write_text("agent 写入的文档\n", encoding="utf-8")
+        state = shared / ".general-agent-state"
+        state.mkdir()
+        (state / "state_secret.json").write_text("{}", encoding="utf-8")
+        (notes / ".hidden.md").write_text("internal\n", encoding="utf-8")
+
+        listed = {
+            item["relative_path"]
+            for item in self.assets.list_files("t_assets", "shared")
+            if item["relative_path"].startswith("resources/shared/")
+        }
+        self.assertEqual(
+            listed,
+            {"resources/shared/学院介绍.md", "resources/shared/notes/agent-log.txt"},
+        )
+
+        archive = self.assets.download_shared_archive("t_assets")
+        with zipfile.ZipFile(io.BytesIO(archive["content"])) as zipped:
+            self.assertEqual(
+                {f"resources/shared/{name}" for name in zipped.namelist()},
+                listed,
+            )
+
+    def test_download_serves_uncommitted_shared_file_but_not_hidden_ones(self) -> None:
+        task_root = self.store.layout.workspace_root / "tasks" / "t_assets"
+        shared = task_root / "resources" / "shared"
+        (shared / "学院介绍.md").write_text("# 介绍\n", encoding="utf-8")
+        state = shared / ".general-agent-state"
+        state.mkdir()
+        (state / "state_secret.json").write_text("{}", encoding="utf-8")
+
+        download = self.assets.download("t_assets", "resources/shared/学院介绍.md")
+        self.assertEqual(download["stream"].read(), "# 介绍\n".encode())
+        download["stream"].close()
+        self.assertEqual(download["mime_type"], "text/markdown")
+
+        with self.assertRaises(HarnessError) as hidden:
+            self.assets.download(
+                "t_assets", "resources/shared/.general-agent-state/state_secret.json"
+            )
+        self.assertEqual(hidden.exception.code, "ASSET_VALIDATION_FAILED")
+        with self.assertRaises(HarnessError) as missing:
+            self.assets.download("t_assets", "resources/shared/absent.md")
+        self.assertEqual(missing.exception.code, "ASSET_VALIDATION_FAILED")
 
     @unittest.skipIf(os.name == "nt", "Windows denies replacement of an open asset")
     def test_preview_and_download_keep_the_verified_inode_during_symlink_swap(self) -> None:
@@ -368,13 +423,10 @@ class AssetServiceTests(unittest.TestCase):
             )
         )
 
-    def test_browser_rejects_every_uncommitted_file(self) -> None:
+    def test_browser_rejects_uncommitted_files_outside_the_shared_area(self) -> None:
         task_root = self.store.layout.workspace_root / "tasks" / "t_assets"
         private_candidate = self.instance_root / "outputs" / "draft.png"
         private_candidate.write_bytes(b"\x89PNG\r\n\x1a\nuncommitted-output")
-        forged_public = task_root / "resources" / "shared" / "a_forged" / "forged.png"
-        forged_public.parent.mkdir(parents=True)
-        forged_public.write_bytes(b"\x89PNG\r\n\x1a\nuncommitted-shared")
         forged_manifest = task_root / "resources" / "manifests" / "a_forged.json"
         forged_manifest.write_text("{}", encoding="utf-8")
 
@@ -383,7 +435,6 @@ class AssetServiceTests(unittest.TestCase):
         }
         for relative_path in (
             "instances/i_image_1/outputs/draft.png",
-            "resources/shared/a_forged/forged.png",
             "resources/manifests/a_forged.json",
         ):
             self.assertNotIn(relative_path, listed)
@@ -391,6 +442,25 @@ class AssetServiceTests(unittest.TestCase):
                 self.assets.preview("t_assets", relative_path)
             with self.assertRaises(HarnessError):
                 self.assets.download("t_assets", relative_path)
+
+        # The shared folder is the user-facing product area: files dropped
+        # there are listed and downloadable (exactly like the shared zip),
+        # but preview stays on the verified committed path.
+        forged_public = task_root / "resources" / "shared" / "a_forged" / "forged.png"
+        forged_public.parent.mkdir(parents=True)
+        forged_public.write_bytes(b"\x89PNG\r\n\x1a\nuncommitted-shared")
+        self.assertIn(
+            "resources/shared/a_forged/forged.png",
+            {
+                item["relative_path"]
+                for item in self.assets.list_files("t_assets", "all")
+            },
+        )
+        with self.assertRaises(HarnessError):
+            self.assets.preview("t_assets", "resources/shared/a_forged/forged.png")
+        download = self.assets.download("t_assets", "resources/shared/a_forged/forged.png")
+        self.assertEqual(download["stream"].read(), b"\x89PNG\r\n\x1a\nuncommitted-shared")
+        download["stream"].close()
 
         committed = self.assets.import_bytes(
             "t_assets",
