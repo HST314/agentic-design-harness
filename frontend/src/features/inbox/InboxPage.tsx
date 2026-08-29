@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, type ApprovalDetailResponse, type InboxItem } from "../../api/client";
-import { api, approvalDetailQuery, inboxQuery } from "../../api/queries";
+import { api, approvalDetailQuery, inboxQuery, workItemsQuery } from "../../api/queries";
 import { Icon } from "../../components/Icon";
 import { actionLabel } from "../../ui";
 
@@ -220,6 +220,9 @@ function InboxCard({
                   details={details}
                   onResolved={() => {
                     void queryClient.invalidateQueries({ queryKey: approvalDetailQuery(approvalId).queryKey });
+                    void queryClient.invalidateQueries({
+                      queryKey: workItemsQuery(details.approval.task_id).queryKey,
+                    });
                     onChanged();
                   }}
                 />

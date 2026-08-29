@@ -44,18 +44,21 @@ class ApprovalInboxService:
         instance = self.store.instance.get(task_id, instance_id)
         if instance is None or instance["task_id"] != task_id:
             raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
-        identity = digest_json(
-            {
-                "task_id": task_id,
-                "instance_id": instance_id,
-                "step_id": step_id,
-                "operation_id": operation_id,
-            }
+        approval_id = self.workflow_approval_id(
+            task_id, instance_id, step_id=step_id, operation_id=operation_id
         )
-        approval_id = f"ap_{identity[:24]}"
         approval_lock = self.store.layout.control_root / "locks" / f"approval-{task_id}.lock"
         with FileLock(approval_lock, self.store.lock_timeout_seconds):
             existing = self.store.approval.get(task_id, approval_id)
+            if existing is not None and existing["status"] != "PENDING":
+                raise HarnessError(
+                    "STALE_AGENT_OBSERVATION",
+                    "A resolved workflow gate cannot be reopened by a stale Agent observation.",
+                    {
+                        "approval_id": approval_id,
+                        "approval_status": existing["status"],
+                    },
+                )
             if existing is None:
                 now = utc_now()
                 payload_ref = f"approvals/{approval_id}/request.json"
@@ -122,6 +125,42 @@ class ApprovalInboxService:
             "approval_revision": self.store.approval.revision(task_id, approval_id),
             "notification": notification,
         }
+
+    @staticmethod
+    def workflow_approval_id(
+        task_id: str,
+        instance_id: str,
+        *,
+        step_id: str,
+        operation_id: str,
+    ) -> str:
+        """Return the stable identity of one externally observed workflow gate."""
+
+        identity = digest_json(
+            {
+                "task_id": task_id,
+                "instance_id": instance_id,
+                "step_id": step_id,
+                "operation_id": operation_id,
+            }
+        )
+        return f"ap_{identity[:24]}"
+
+    def workflow_approval(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        step_id: str,
+        operation_id: str,
+    ) -> dict[str, Any] | None:
+        """Read the approval already bound to a deterministic workflow gate."""
+
+        approval_id = self.workflow_approval_id(
+            task_id, instance_id, step_id=step_id, operation_id=operation_id
+        )
+        approval = self.store.approval.get(task_id, approval_id)
+        return None if approval is None else deepcopy(approval)
 
     def ensure_delivery_review_approval(
         self,
@@ -528,15 +567,12 @@ class ApprovalInboxService:
 
         current_approval_id = None
         if current_step_id is not None and current_operation_id is not None:
-            identity = digest_json(
-                {
-                    "task_id": task_id,
-                    "instance_id": instance_id,
-                    "step_id": current_step_id,
-                    "operation_id": current_operation_id,
-                }
+            current_approval_id = self.workflow_approval_id(
+                task_id,
+                instance_id,
+                step_id=current_step_id,
+                operation_id=current_operation_id,
             )
-            current_approval_id = f"ap_{identity[:24]}"
         resolved: list[dict[str, Any]] = []
         for approval in self.list_approvals(
             task_id=task_id, instance_id=instance_id, status="PENDING"

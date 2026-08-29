@@ -35,6 +35,7 @@ class ApplicationDeliveryMixin:
         instance = self._instance(task_id, instance_id)
         if instance["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
             return {"instance": instance, "observation": None, "transition": None}
+        observed_revision = self.store.task.revision(task_id, task_id)
         adapter = self.adapters.get(instance["agent_type"])
         observation = adapter.get_status(instance_id)
         config_application = None
@@ -53,6 +54,52 @@ class ApplicationDeliveryMixin:
                 "The Agent adapter returned a non-projectable status.",
                 {"status": observation.status},
             )
+        # Polling is intentionally outside the locks. Only persistence is serialized,
+        # then fenced by the revision captured before the poll. This avoids blocking a
+        # human decision on Agent I/O while preventing an older observation from landing.
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            self.commands.task_guard(task_id),
+        ):
+            instance = self._instance(task_id, instance_id)
+            if (
+                self.store.task.revision(task_id, task_id) != observed_revision
+                or instance["status"]
+                not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}
+            ):
+                return {
+                    "instance": deepcopy(instance),
+                    "observation": {
+                        "status": observation.status,
+                        "step_id": observation.step_id,
+                        "capabilities": list(observation.capabilities),
+                        "details": deepcopy(observation.details),
+                        "stale": True,
+                    },
+                    "transition": None,
+                    "approval": None,
+                    "config_application": config_application,
+                }
+            return self._project_observation_locked(
+                task_id,
+                instance_id,
+                instance,
+                adapter,
+                observation,
+                config_application,
+            )
+
+    def _project_observation_locked(
+        self,
+        task_id: str,
+        instance_id: str,
+        instance: dict[str, Any],
+        adapter: Any,
+        observation: Any,
+        config_application: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Persist a current observation while both task guards are held."""
+
         adapter_actor_id = f"{instance['agent_type']}_adapter"
         observation_operation_id = str(
             observation.details.get("job_id")
@@ -64,6 +111,59 @@ class ApplicationDeliveryMixin:
                 }
             )[:24]
         )
+        if observation.status == "WAITING_APPROVAL":
+            resolved_gate = self.approvals.workflow_approval(
+                task_id,
+                instance_id,
+                step_id=str(observation.step_id),
+                operation_id=observation_operation_id,
+            )
+            if resolved_gate is not None and resolved_gate["status"] != "PENDING":
+                transition = None
+                pending = [
+                    item
+                    for item in self.approvals.list_approvals(
+                        task_id=task_id,
+                        instance_id=instance_id,
+                        status="PENDING",
+                    )
+                    if item["kind"] == "WORKFLOW"
+                ]
+                # Repair instances stranded by older versions of the observer. Do not
+                # disturb a newer, genuinely pending workflow gate for the same instance.
+                if instance["status"] == "WAITING_APPROVAL" and not pending:
+                    transition = self.commands.transition_instance(
+                        task_id,
+                        instance_id,
+                        "RUNNING",
+                        CommandEnvelope(
+                            idempotency_key=(
+                                f"discard-stale-gate-{resolved_gate['approval_id']}-"
+                                f"{self.store.task.revision(task_id, task_id)}"
+                            ),
+                            actor_type="adapter",
+                            actor_id=f"{instance['agent_type']}_adapter",
+                            expected_revision=self.store.task.revision(task_id, task_id),
+                        ),
+                    )
+                    instance = next(
+                        item
+                        for item in transition["plan"]["instances"]
+                        if item["instance_id"] == instance_id
+                    )
+                return {
+                    "instance": deepcopy(instance),
+                    "observation": {
+                        "status": observation.status,
+                        "step_id": observation.step_id,
+                        "capabilities": list(observation.capabilities),
+                        "details": deepcopy(observation.details),
+                        "stale": True,
+                    },
+                    "transition": transition,
+                    "approval": None,
+                    "config_application": config_application,
+                }
         self.approvals.acknowledge_external_workflow_approvals(
             task_id,
             instance_id,
