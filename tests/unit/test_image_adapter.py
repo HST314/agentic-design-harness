@@ -228,6 +228,7 @@ class ImageAdapterTests(unittest.TestCase):
                     ],
                     "aspect_ratio": "16:9",
                 },
+                "output_spec": "16:9",
             },
         )
         self.assertEqual(
@@ -244,6 +245,17 @@ class ImageAdapterTests(unittest.TestCase):
         self.assertEqual(mapped["asset_inputs"][0]["verified"], True)
         self.assertNotIn("schema_version", mapped)
         self.assertNotIn("credential_pair_ref", digest_json(mapped))
+
+    def test_unspecified_aspect_ratio_does_not_override_runtime_default(self) -> None:
+        card = self._card([])
+        card["parameters"]["aspect_ratio"] = None
+
+        mapped = self.adapter.map_task_card(self._request(card))
+
+        self.assertNotIn("output_spec", mapped["known_facts"])
+        self.assertIsNone(
+            mapped["known_facts"]["harness_output_contract"]["aspect_ratio"]
+        )
 
     def test_prompt_only_task_card_maps_to_a_stable_auditable_source(self) -> None:
         card = self._card([])
