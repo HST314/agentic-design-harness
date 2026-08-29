@@ -92,4 +92,20 @@ describe("runtime settings bridge protocol", () => {
     }, "instance_image", base.nonce)).toBeNull();
     expect(parseBridgeRequest({ ...request, payload: {} }, "instance_image", base.nonce)).toBeNull();
   });
+
+  test("accepts only an exact delivery completion bundle identifier", () => {
+    const request = {
+      ...base,
+      action: "delivery.complete",
+      payload: { bundle_id: "bundle_0123456789abcdef" },
+    };
+    expect(parseBridgeRequest(request, "instance_image", base.nonce)).toEqual(request);
+    expect(parseBridgeRequest({
+      ...request,
+      payload: { bundle_id: "../shared", semantic_hint: "publish" },
+    }, "instance_image", base.nonce)).toBeNull();
+    expect(bridgeIdempotencyKey("delivery.complete", base.request_id)).toBe(
+      "workbench_complete_bridge_request_12345678",
+    );
+  });
 });

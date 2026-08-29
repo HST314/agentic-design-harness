@@ -169,6 +169,90 @@ test("bridges managed settings through the verified parent with a rotating nonce
   expect(JSON.stringify(proposalBody)).not.toContain("request_key");
 });
 
+test("publishes the exact Image delivery bundle when the managed workbench completes", async ({ page }) => {
+  const item = workItem("image");
+  let approvalBody: Record<string, unknown> | null = null;
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_image", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ schema_version: "1.0", task, item, refresh_after_ms: 3000, projection_revision: "image-delivery" }),
+  }));
+  await page.route("**/api/v1/instances/instance_image/ui-link?*", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      schema_version: "1.0",
+      task_id: task.task_id,
+      work_item_id: item.work_item_id,
+      instance_id: "instance_image",
+      agent_type: "image",
+      instance_status: "WAITING_APPROVAL",
+      task_revision: 10,
+      ui_url: "http://127.0.0.1:19096/",
+      link_status: "READY",
+      embeddable: true,
+      frame_policy: "FRAME_ANCESTORS_ALLOWED",
+      diagnostic: "Allowed.",
+    }),
+  }));
+  await page.route("**/api/v1/tasks/task_workbench_e2e/delivery-bundles", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      schema_version: "1.0",
+      candidates: [{
+        bundle_id: "bundle_0123456789abcdef",
+        instance_id: "instance_image",
+        status: "PENDING_CONFIRMATION",
+      }],
+      manifests: [],
+      reviews: [{
+        bundle_id: "bundle_0123456789abcdef",
+        approval: { approval_id: "approval_delivery", status: "PENDING" },
+        approval_revision: 7,
+      }],
+    }),
+  }));
+  await page.route("**/api/v1/approvals/approval_delivery/resolve", async (route) => {
+    approvalBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ schema_version: "1.0", status: "PUBLISHED" }),
+    });
+  });
+  await page.route("http://127.0.0.1:19096/", async (route) => route.fulfill({
+    status: 200,
+    contentType: "text/html",
+    body: `<!doctype html><html><body><output id="delivery-result">等待完成</output><script>
+      const parentOrigin = new URL(document.referrer).origin;
+      const base = { protocol: 'image-agent-runtime-settings', version: '1.0', instance_id: 'instance_image' };
+      addEventListener('message', (event) => {
+        if (event.source !== parent || event.origin !== parentOrigin || event.data.protocol !== base.protocol) return;
+        if (event.data.type === 'bridge.init') {
+          parent.postMessage({ ...base, type: 'bridge.request', request_id: 'bridge_delivery_complete_123', nonce: event.data.nonce, action: 'delivery.complete', payload: { bundle_id: 'bundle_0123456789abcdef' } }, parentOrigin);
+        } else if (event.data.type === 'bridge.response') {
+          document.querySelector('#delivery-result').textContent = event.data.ok ? '已进入共享文件夹' : event.data.error.message;
+        }
+      });
+      parent.postMessage({ ...base, type: 'bridge.hello' }, parentOrigin);
+    </script></html>`,
+  }));
+
+  await page.goto("/tasks/task_workbench_e2e/work-items/work_image/focus");
+  await expect(page.frameLocator("iframe").locator("#delivery-result")).toHaveText("已进入共享文件夹");
+  expect(approvalBody).toMatchObject({
+    decision: "APPROVED",
+    action: "publish_bundle",
+    payload: {},
+    envelope: {
+      actor_type: "human",
+      actor_id: "human_operator",
+      expected_revision: 7,
+    },
+  });
+});
+
 test("shows frame-policy failure with a controlled external fallback", async ({ page }) => {
   const item = workItem("image");
   await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_image", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, item, refresh_after_ms: 3000, projection_revision: "image-blocked" }) }));

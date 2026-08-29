@@ -5,7 +5,8 @@ export type RuntimeSettingsBridgeAction =
   | "runtime_settings.get"
   | "runtime_settings.propose"
   | "runtime_settings.confirm"
-  | "runtime_settings.sync_toggle";
+  | "runtime_settings.sync_toggle"
+  | "delivery.complete";
 
 export interface RuntimeSettingsBridgeRequest {
   protocol: typeof RUNTIME_SETTINGS_BRIDGE_PROTOCOL;
@@ -121,6 +122,11 @@ function validOverrides(value: unknown): boolean {
 }
 
 function validPayload(action: RuntimeSettingsBridgeAction, payload: Record<string, unknown>): boolean {
+  if (action === "delivery.complete") {
+    return Object.keys(payload).length === 1
+      && typeof payload.bundle_id === "string"
+      && IDENTIFIER.test(payload.bundle_id);
+  }
   if (action === "runtime_settings.get") return Object.keys(payload).length === 0;
   if (action === "runtime_settings.confirm") {
     return Object.keys(payload).length === 1
@@ -167,7 +173,7 @@ export function parseBridgeRequest(
     || value.nonce !== nonce
     || typeof value.request_id !== "string"
     || !REQUEST_ID.test(value.request_id)
-    || !["runtime_settings.get", "runtime_settings.propose", "runtime_settings.confirm", "runtime_settings.sync_toggle"].includes(String(value.action))
+    || !["runtime_settings.get", "runtime_settings.propose", "runtime_settings.confirm", "runtime_settings.sync_toggle", "delivery.complete"].includes(String(value.action))
     || !record(value.payload)) return null;
   const action = value.action as RuntimeSettingsBridgeAction;
   if (!validPayload(action, value.payload)) return null;

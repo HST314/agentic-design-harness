@@ -30,6 +30,41 @@ async function executeBridgeRequest(
   if (request.action === "runtime_settings.get") {
     return api.instanceRuntimeSettings(instanceId);
   }
+  if (request.action === "delivery.complete") {
+    const bundleId = String(request.payload.bundle_id);
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const bundles = await api.deliveryBundles(scope.taskId);
+      const candidate = bundles.candidates.find((item) => (
+        item.bundle_id === bundleId && item.instance_id === instanceId
+      ));
+      if (candidate?.status === "PUBLISHED") {
+        return { bundle_id: bundleId, status: "PUBLISHED" };
+      }
+      if (candidate && candidate.status !== "PENDING_CONFIRMATION") {
+        throw new Error("当前交付候选已经处理，无法再次完成入库。");
+      }
+      const review = bundles.reviews.find((item) => (
+        item.bundle_id === bundleId && item.approval.status === "PENDING"
+      ));
+      if (candidate && review) {
+        const operationId = bridgeIdempotencyKey(request.action, request.request_id);
+        return api.resolveApproval(review.approval.approval_id, {
+          decision: "APPROVED",
+          action: "publish_bundle",
+          payload: {},
+          operation_id: operationId,
+          envelope: {
+            idempotency_key: operationId,
+            actor_type: "human",
+            actor_id: "human_operator",
+            expected_revision: review.approval_revision,
+          },
+        });
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    throw new Error("主系统尚未完成交付候选对账，请稍后再点击完成。");
+  }
   if (!Number.isInteger(taskRevision)) {
     throw new Error("当前任务版本已变化，请刷新专业工作台后重试。");
   }
