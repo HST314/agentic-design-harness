@@ -1842,6 +1842,162 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(replay["bundle_manifest"], resolved["bundle_manifest"])
         self.assertEqual(len(self.assets.list_assets(task_id)), 4)
 
+    def test_delivery_read_sweep_reconciles_completed_bundle_source(self) -> None:
+        task_id = "t_delivery_read_sweep"
+        self._running_image_task(task_id, 1)
+        image = b"\x89PNG\r\n\x1a\nswept-final-image"
+        note = b"# Swept branch note\n"
+        instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
+        (instance_root / "outputs" / "swept-image.png").write_bytes(image)
+        (instance_root / "outputs" / "swept-note.md").write_bytes(note)
+        card = self.store.plan.get(task_id, task_id)["task_cards"][0]
+        candidate = {
+            "schema_version": "1.0",
+            "bundle_id": "bundle_swept_01",
+            "task_id": task_id,
+            "work_item_id": "work_swept_01",
+            "instance_id": "i_image_1",
+            "task_card_revision": card["revision"],
+            "branch_id": "main",
+            "checkpoint_id": "checkpoint_0123456789abcdef01234567",
+            "image": {
+                "private_relative_path": "instances/i_image_1/outputs/swept-image.png",
+                "mime_type": "image/png",
+                "size_bytes": len(image),
+                "sha256": hashlib.sha256(image).hexdigest(),
+                "width": 1920,
+                "height": 1080,
+            },
+            "design_note": {
+                "private_relative_path": "instances/i_image_1/outputs/swept-note.md",
+                "mime_type": "text/markdown",
+                "size_bytes": len(note),
+                "sha256": hashlib.sha256(note).hexdigest(),
+            },
+            "status": "PENDING_CONFIRMATION",
+            "created_at": "2026-08-29T05:00:41Z",
+            "decided_at": None,
+            "actor": None,
+            "publication_batch_id": None,
+        }
+        self.fake_adapter.delivery_bundles = [candidate]
+        self.fake_adapter.observation = AdapterObservation(
+            "RUNNING", step_id="completed", details={"completed": True}
+        )
+
+        self.assertEqual(self.application.list_delivery_bundle_candidates(task_id), [])
+        self.application.observe_delivery_sources(task_id)
+
+        candidates = self.application.list_delivery_bundle_candidates(task_id)
+        self.assertEqual([item["bundle_id"] for item in candidates], ["bundle_swept_01"])
+        self.assertEqual(candidates[0]["status"], "PENDING_CONFIRMATION")
+        self.assertEqual(
+            self.store.instance.get(task_id, "i_image_1")["status"],
+            "WAITING_APPROVAL",
+        )
+        pending = self.approvals.list_approvals(
+            task_id=task_id, instance_id="i_image_1", status="PENDING"
+        )
+        self.assertEqual([item["kind"] for item in pending], ["DELIVERY_REVIEW"])
+
+        self.application.observe_delivery_sources(task_id)
+        self.assertEqual(
+            self.application.list_delivery_bundle_candidates(task_id), candidates
+        )
+        self.assertEqual(
+            self.approvals.list_approvals(
+                task_id=task_id, instance_id="i_image_1", status="PENDING"
+            ),
+            pending,
+        )
+
+        resolved = self.application.resolve_approval(
+            pending[0]["approval_id"],
+            decision="APPROVED",
+            action="publish_bundle",
+            payload={},
+            operation_id="publish_swept_bundle_01",
+            envelope=envelope(
+                "publish-swept-bundle-01",
+                self.approvals.get_approval(pending[0]["approval_id"])[
+                    "approval_revision"
+                ],
+            ),
+        )
+        self.assertEqual(resolved["candidate"]["status"], "PUBLISHED")
+        self.assertEqual(
+            {item["manifest"]["relative_path"] for item in self.assets.list_assets(task_id)},
+            {
+                "resources/shared/bundle_swept_01.png",
+                "resources/shared/bundle_swept_01.md",
+            },
+        )
+        self.application.observe_delivery_sources(task_id)
+        self.assertEqual(
+            self.application.list_delivery_bundle_candidates(task_id)[0]["status"],
+            "PUBLISHED",
+        )
+
+    def test_delivery_read_sweep_skips_agents_without_bundle_collection(self) -> None:
+        task_id = "t_delivery_sweep_scope"
+        created = create_task(self.commands, task_id, "auto")
+        draft = image_to_ppt_plan(task_id)
+        saved = self.commands.save_plan(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            envelope=envelope(f"save-{task_id}", created["revision"]),
+        )
+        revision = saved["task_revision"]
+        for instance in draft["instances"]:
+            instance_id = instance["instance_id"]
+            starting = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "STARTING",
+                envelope(f"start-{task_id}-{instance_id}", revision, "adapter"),
+            )
+            running = self.commands.transition_instance(
+                task_id,
+                instance_id,
+                "RUNNING",
+                envelope(
+                    f"run-{task_id}-{instance_id}",
+                    starting["task_revision"],
+                    "adapter",
+                ),
+            )
+            revision = running["task_revision"]
+
+        observed_ppt: list[str] = []
+        original_ppt_get_status = self.fake_ppt_adapter.get_status
+        self.fake_ppt_adapter.get_status = lambda instance_id: (
+            observed_ppt.append(instance_id) or original_ppt_get_status(instance_id)
+        )
+        self.fake_ppt_adapter.collect_delivery_bundles = None
+
+        self.application.observe_delivery_sources(task_id)
+
+        self.assertEqual(observed_ppt, [])
+        self.assertEqual(self.application.list_delivery_bundle_candidates(task_id), [])
+
+    def test_delivery_read_sweep_keeps_read_available_when_observation_fails(self) -> None:
+        task_id = "t_delivery_sweep_failure"
+        self._running_image_task(task_id, 1)
+
+        def failing_status(instance_id: str):
+            raise HarnessError("PROCESS_START_FAILED", "Image Agent is unreachable.")
+
+        self.fake_adapter.get_status = failing_status
+
+        self.application.observe_delivery_sources(task_id)
+
+        self.assertEqual(self.application.list_delivery_bundle_candidates(task_id), [])
+        self.assertEqual(
+            self.store.instance.get(task_id, "i_image_1")["status"], "RUNNING"
+        )
+
     def test_bundle_publication_recovers_after_manifest_write_without_half_visibility(
         self,
     ) -> None:

@@ -479,6 +479,34 @@ class ApplicationDeliveryMixin:
         atomic_write_json(intent_path, intent)
         return result
 
+    def observe_delivery_sources(self, task_id: str) -> None:
+        """Reconcile active bundle-producing instances before a delivery read.
+
+        Observation otherwise runs only when the instance redirect page polls a
+        single instance, so a completed Image Agent never surfaced its delivery
+        candidates while the human stayed inside the workbench. Delivery reads
+        (the workbench bridge, the delivery confirmation page) sweep here first
+        so the poll itself drives reconciliation. Observation failures are
+        best-effort: the projection read must stay available.
+        """
+
+        validate_identifier(task_id, "task_id")
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            return
+        for instance in plan["instances"]:
+            if instance["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+                continue
+            adapter = self.adapters.get_optional(instance["agent_type"])
+            if adapter is None or not callable(
+                getattr(adapter, "collect_delivery_bundles", None)
+            ):
+                continue
+            try:
+                self.observe_instance(task_id, instance["instance_id"])
+            except HarnessError:
+                continue
+
     def list_delivery_bundle_candidates(
         self,
         task_id: str,
