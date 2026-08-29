@@ -8,9 +8,10 @@ import type {
   TaskIntakeResponse,
 } from "../../api/client";
 import { ApiError } from "../../api/client";
-import { api, taskHistoryQuery, taskIntakeQuery } from "../../api/queries";
+import { api, masterSessionQuery, taskHistoryQuery, taskIntakeQuery } from "../../api/queries";
 import { ExpandableComposerTextarea } from "../../components/ExpandableComposerTextarea";
 import { Icon } from "../../components/Icon";
+import { MasterChatBridge, PendingThinking, PendingUserMessage } from "../master-thread/MasterChatBridge";
 import { FoundationPage } from "../workbench/FoundationPage";
 
 const ACTOR_ID = "human_operator";
@@ -277,8 +278,15 @@ function NewTaskIntakePage(): React.JSX.Element {
   return (
     <section className="workbench-page master-workspace intake-chat" aria-labelledby="task-intake-title">
       <h1 id="task-intake-title" className="sr-only">创建新的设计任务</h1>
-      <div className="master-thread intake-chat__thread" role="log" aria-label="新任务对话">
-        <p className="master-thread__empty">描述你的设计目标与交付要求，Master 会在对话中为你生成执行计划。</p>
+      <div className={`master-thread intake-chat__thread${sent ? " intake-chat__thread--sent" : ""}`} role="log" aria-label="新任务对话">
+        {sent ? (
+          <>
+            <PendingUserMessage prompt={prompt} attachmentCount={uploads.length} />
+            <PendingThinking title="Master 正在接收任务" detail="即将进入与 Master 的对话。" />
+          </>
+        ) : (
+          <p className="master-thread__empty">描述你的设计目标与交付要求，Master 会在对话中为你生成执行计划。</p>
+        )}
       </div>
       <form
         className="master-composer intake-chat__composer"
@@ -481,6 +489,7 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
         task_revision: response.task_revision ?? current.task_revision,
         assets: response.assets ?? current.assets,
       } : current);
+      void queryClient.prefetchQuery(masterSessionQuery(taskId));
       void queryClient.invalidateQueries({ queryKey: taskHistoryQuery.queryKey });
     },
     onError: () => setAutoSubmit(false),
@@ -514,14 +523,15 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
   const locked = data.intake.status !== "DRAFT";
   if (autoSubmit && !locked) {
     const total = Math.max(data.assets.length + uploads.length, expectedAutoAssets.current);
+    const uploading = uploads.some((item) => item.status === "queued" || item.status === "uploading");
     return (
-      <TaskIntakeFrame badge="正在创建">
-        <div className="workbench-intake-card intake-chat__progress" role="status">
-          <strong>正在上传并提交首次材料…</strong>
-          <p>{total ? `已完成 ${data.assets.length} / ${total} 个文件；` : ""}提交后自动进入与 Master 的对话。</p>
-          {submit.isError ? <p className="workbench-inline-error" role="alert">{submit.error.message}</p> : null}
-        </div>
-      </TaskIntakeFrame>
+      <MasterChatBridge
+        prompt={data.intake.prompt}
+        attachmentCount={expectedAutoAssets.current}
+        statusTitle={uploading ? "正在上传首次材料…" : "正在提交首次材料…"}
+        statusDetail={`${total ? `已完成 ${data.assets.length} / ${total} 个文件，` : ""}提交后自动进入与 Master 的对话。`}
+        error={submit.isError ? submit.error.message : null}
+      />
     );
   }
   const activeUploads = uploads.some((item) => item.status === "queued" || item.status === "uploading");

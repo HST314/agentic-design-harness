@@ -1,6 +1,7 @@
 export const ICON_NAMES = [
   "archive",
   "board",
+  "check",
   "chevron-left",
   "close",
   "collapse",
@@ -32,6 +33,7 @@ export type IconName = (typeof ICON_NAMES)[number];
 const iconPaths: Record<IconName, React.JSX.Element> = {
   archive: <><path d="M3 6h18M5 6v14h14V6M9 10h6" /><path d="M4 3h16v3H4z" /></>,
   board: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16" /></>,
+  check: <path d="M20 6 9 17l-5-5" />,
   "chevron-left": <path d="m15 18-6-6 6-6" />,
   close: <path d="M18 6 6 18M6 6l12 12" />,
   collapse: <><path d="m4 4 5 5M4 9h5V4" /><path d="m20 20-5-5M20 15h-5v5" /></>,

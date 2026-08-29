@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, type ApprovalDetailResponse, type InboxItem } from "../../api/client";
 import { api, approvalDetailQuery, inboxQuery, workItemsQuery } from "../../api/queries";
@@ -24,6 +24,22 @@ const inboxKindLabel: Record<InboxItem["kind"], string> = {
   STAGE_READY: "阶段就绪",
   TASK_FAILED: "任务失败",
   TASK_SUCCEEDED: "任务完成",
+};
+
+type InboxKindTone = "action" | "success" | "danger";
+
+const inboxKindTone: Record<InboxItem["kind"], InboxKindTone> = {
+  APPROVAL_REQUIRED: "action",
+  BUDGET_APPROVAL_REQUIRED: "action",
+  CONFIG_RESTART_REQUIRED: "action",
+  DELIVERY_REVIEW_REQUIRED: "action",
+  INSTANCE_CRASHED: "danger",
+  INSTANCE_DELIVERY_REJECTED: "danger",
+  INSTANCE_FAILED: "danger",
+  INSTANCE_SUCCEEDED: "success",
+  STAGE_READY: "success",
+  TASK_FAILED: "danger",
+  TASK_SUCCEEDED: "success",
 };
 
 const payloadFreeActions = new Set([
@@ -180,11 +196,11 @@ function InboxCard({
   const missingApproval = approval.error instanceof ApiError
     && [404, 410].includes(approval.error.status);
   return (
-    <article ref={cardRef} className={`inbox-card${selected ? " inbox-card--selected" : ""}`}>
+    <article ref={cardRef} className={`inbox-card inbox-card--${item.status.toLowerCase()}${selected ? " inbox-card--selected" : ""}`}>
       <header className="inbox-card__head">
         <div>
           <span className={`inbox-status inbox-status--${item.status.toLowerCase()}`}><span aria-hidden="true" />{inboxStatusLabel[item.status]}</span>
-          <span className="inbox-card__kind">{inboxKindLabel[item.kind] ?? item.kind}</span>
+          <span className={`inbox-card__kind inbox-card__kind--${inboxKindTone[item.kind] ?? "action"}`}>{inboxKindLabel[item.kind] ?? item.kind}</span>
         </div>
         <time dateTime={item.created_at}>{formatTime(item.created_at)}</time>
       </header>
@@ -240,11 +256,45 @@ export function InboxPage(): React.JSX.Element {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const selectedApproval = searchParams.get("approval_id");
-  const items = inbox.data?.items ?? [];
+  const items = useMemo(() => (
+    [...(inbox.data?.items ?? [])].sort((a, b) => {
+      const timeDelta = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      return timeDelta !== 0 ? timeDelta : b.sequence - a.sequence;
+    })
+  ), [inbox.data?.items]);
+  const unreadItems = useMemo(() => items.filter((item) => item.status === "UNREAD"), [items]);
   const pendingCount = items.filter((item) => item.status !== "HANDLED").length;
   const refresh = (): void => {
     void queryClient.invalidateQueries({ queryKey: inboxQuery.queryKey });
   };
+  const markAllRead = useMutation({
+    mutationFn: async () => {
+      await Promise.all(unreadItems.map((item) => api.updateInboxStatus(item.inbox_id, {
+        status: "READ",
+        envelope: commandEnvelope("human_operator", item.revision),
+      })));
+    },
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: inboxQuery.queryKey });
+      const previous = queryClient.getQueryData(inboxQuery.queryKey);
+      queryClient.setQueryData(inboxQuery.queryKey, (current: typeof previous) => (
+        current ? {
+          ...current,
+          unread_count: 0,
+          items: current.items.map((item) => (
+            item.status === "UNREAD" ? { ...item, status: "READ" as const } : item
+          )),
+        } : current
+      ));
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(inboxQuery.queryKey, context.previous);
+      }
+    },
+    onSettled: refresh,
+  });
   return (
     <section className="workbench-page inbox-page" aria-labelledby="inbox-title">
       <h1 id="inbox-title" className="sr-only">收件箱</h1>
@@ -260,8 +310,20 @@ export function InboxPage(): React.JSX.Element {
         items.length ? (
           <>
             <div className="inbox-page__heading">
-              <h2>待处理通知</h2>
-              <span className="delivery-count">{pendingCount} 待处理</span>
+              <div className="inbox-page__title">
+                <h2>待处理通知</h2>
+                <span className="inbox-page__count">{pendingCount} 待处理</span>
+              </div>
+              {unreadItems.length ? (
+                <button
+                  type="button"
+                  className="workbench-secondary-button inbox-page__mark-read"
+                  disabled={markAllRead.isPending}
+                  onClick={() => markAllRead.mutate()}
+                >
+                  <Icon name="check" />{markAllRead.isPending ? "正在标记…" : "一键已读"}
+                </button>
+              ) : null}
             </div>
             <div className="inbox-page__list">
               {items.map((item) => (
