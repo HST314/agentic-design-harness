@@ -79,10 +79,6 @@ function commandEnvelope(actorId: string, revision: number): Record<string, unkn
   };
 }
 
-function inboxRevision(item: InboxItem): number {
-  return (item as InboxItem & { store_revision?: number }).store_revision ?? item.revision;
-}
-
 export function designerFacingNotification(value: string): string {
   return value
     .replace(/\bImage Agent\b/gi, "图片助手")
@@ -177,15 +173,6 @@ function InboxCard({
     enabled: Boolean(approvalId && (selected || detailsOpen)),
   });
   const details = approval.data ?? null;
-  const markRead = useMutation({
-    mutationFn: () => api.updateInboxStatus(item.inbox_id, {
-      status: "READ",
-      envelope: commandEnvelope("human_operator", inboxRevision(item)),
-    }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: inboxQuery.queryKey });
-    },
-  });
   useEffect(() => {
     if (selected) cardRef.current?.scrollIntoView({ block: "center" });
   }, [selected]);
@@ -204,11 +191,6 @@ function InboxCard({
       <h3>{designerFacingNotification(item.title)}</h3>
       <p className="inbox-card__message">{designerFacingNotification(item.message)}</p>
       <div className="inbox-card__actions">
-        {item.status === "UNREAD" ? (
-          <button className="workbench-secondary-button" type="button" disabled={markRead.isPending} onClick={() => markRead.mutate()}>
-            <Icon name="file-check" />{markRead.isPending ? "正在保存…" : markRead.isError ? "重试标为已读" : "标为已读"}
-          </button>
-        ) : null}
         {instanceId ? (
           <Link className="workbench-secondary-button" to={`/instances/${encodeURIComponent(instanceId)}`}>打开专业工作台</Link>
         ) : null}

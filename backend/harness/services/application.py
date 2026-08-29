@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable, Collection
 from contextlib import suppress
 from copy import deepcopy
@@ -57,17 +58,77 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._instance_start_reconciled = False
         self.start_operation_runner = StartOperationRunner(self._run_pending_starts)
+        self.observation_runner = StartOperationRunner(
+            self.observe_active_instances,
+            interval_seconds=2.0,
+            thread_name="harness-agent-observations",
+        )
+        self._observation_logger = logging.getLogger("harness.agent_observations")
 
     @property
     def start_operation_runner_alive(self) -> bool:
         return self.start_operation_runner.alive
 
+    @property
+    def observation_runner_alive(self) -> bool:
+        return self.observation_runner.alive
+
     def start_monitoring(self) -> None:
         self.start_operation_runner.start()
         self.start_operation_runner.notify()
+        self.observation_runner.start()
+        self.observation_runner.notify()
 
     def close_monitoring(self) -> None:
+        self.observation_runner.close()
         self.start_operation_runner.close()
+
+    def observe_active_instances(self) -> None:
+        """Reconcile active Image/PPT instances independently of browser navigation."""
+
+        tasks_root = self.store.layout.control_root / "tasks"
+        for task_directory in sorted(tasks_root.iterdir() if tasks_root.exists() else []):
+            if not task_directory.is_dir():
+                continue
+            task_id = task_directory.name
+            plan = self.store.plan.get(task_id, task_id)
+            if plan is None:
+                continue
+            for instance in plan["instances"]:
+                if (
+                    instance["agent_type"] not in {"image", "ppt"}
+                    or instance["status"]
+                    not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}
+                ):
+                    continue
+                adapter = self.adapters.get_optional(instance["agent_type"])
+                if adapter is None or not adapter.available:
+                    continue
+                try:
+                    self.observe_instance(task_id, instance["instance_id"])
+                except HarnessError as exc:
+                    self._observation_logger.warning(
+                        "agent_observation_failed",
+                        extra={
+                            "fields": {
+                                "task_id": task_id,
+                                "instance_id": instance["instance_id"],
+                                "error_code": exc.code,
+                                "error_message": exc.message,
+                            }
+                        },
+                    )
+                except Exception as exc:
+                    self._observation_logger.exception(
+                        "agent_observation_failed",
+                        extra={
+                            "fields": {
+                                "task_id": task_id,
+                                "instance_id": instance["instance_id"],
+                                "error_type": type(exc).__name__,
+                            }
+                        },
+                    )
 
     def save_plan_and_create_instances(
         self,

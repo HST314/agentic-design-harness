@@ -1092,8 +1092,24 @@ export class ApiClient {
     return this.get(`/api/v1/approvals/${encodeURIComponent(approvalId)}`, signal);
   }
 
-  inbox(signal?: AbortSignal): Promise<{ schema_version: string; items: InboxItem[] }> {
+  inbox(signal?: AbortSignal): Promise<{
+    schema_version: string;
+    items: InboxItem[];
+    unread_count: number;
+  }> {
     return this.get("/api/v1/inbox?owner=human", signal);
+  }
+
+  viewInstance(instanceId: string): Promise<{
+    schema_version: string;
+    items: InboxItem[];
+    unread_count: number;
+  }> {
+    return this.send(
+      "POST",
+      `/api/v1/instances/${encodeURIComponent(instanceId)}/view`,
+      {},
+    );
   }
 
   taskApprovals(

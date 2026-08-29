@@ -102,10 +102,10 @@ class StateMachine:
             return task["status"]
         if preserve_start_confirmation and task["status"] == "AWAITING_START_CONFIRMATION":
             return task["status"]
-        if any(item["status"] in ACTIVE for item in instances):
-            return "RUNNING"
         if any(item["required"] and item["status"] == "WAITING_APPROVAL" for item in instances):
             return "WAITING_APPROVAL"
+        if any(item["status"] in ACTIVE for item in instances):
+            return "RUNNING"
         if any(item["required"] and item["status"] in FAILED for item in instances):
             return "FAILED"
         if any(item["required"] and item["status"] == "UNAVAILABLE" for item in stages):

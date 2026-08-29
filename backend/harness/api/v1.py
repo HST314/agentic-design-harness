@@ -1099,8 +1099,13 @@ def build_v1_router(container: Container) -> APIRouter:
             status=status,
             limit=None,
         )
+        unread_count = await run_in_threadpool(
+            container.approvals.unread_count,
+            owner=owner,
+        )
         return {
             "schema_version": "1.0",
+            "unread_count": unread_count,
             **paginate(
                 items,
                 scope=f"inbox:{owner}:{status or '*'}",
@@ -1109,6 +1114,22 @@ def build_v1_router(container: Container) -> APIRouter:
                 cursor=cursor,
                 order=order,
             ),
+        }
+
+    @router.post("/instances/{instance_id}/view", tags=["inbox"])
+    async def view_instance(instance_id: str) -> dict[str, Any]:
+        items = await run_in_threadpool(
+            container.approvals.mark_instance_notifications_read,
+            instance_id,
+        )
+        unread_count = await run_in_threadpool(
+            container.approvals.unread_count,
+            owner="human",
+        )
+        return {
+            "schema_version": "1.0",
+            "items": items,
+            "unread_count": unread_count,
         }
 
     @router.post("/inbox/{inbox_id}/status", tags=["inbox"])

@@ -345,15 +345,11 @@ class ApplicationTests(unittest.TestCase):
 
                 inbox = client.get("/api/v1/inbox?owner=human")
                 self.assertEqual(inbox.status_code, 200, inbox.text)
-                item = inbox.json()["items"][0]
-                marked_read = client.post(
-                    f"/api/v1/inbox/{item['inbox_id']}/status",
-                    json={
-                        "status": "READ",
-                        "envelope": self._envelope("api-g3-read", item["store_revision"]),
-                    },
-                )
-                self.assertEqual(marked_read.json()["item"]["status"], "READ")
+                self.assertEqual(inbox.json()["unread_count"], 1)
+                viewed = client.post("/api/v1/instances/i_api_g2/view")
+                self.assertEqual(viewed.status_code, 200, viewed.text)
+                self.assertEqual(viewed.json()["items"][0]["status"], "READ")
+                self.assertEqual(viewed.json()["unread_count"], 0)
                 resolved = client.post(
                     f"/api/v1/approvals/{approval_id}/resolve",
                     json={

@@ -94,6 +94,7 @@ class Container:
             self.store.ready
             and self.recovery_completed
             and self.application.start_operation_runner_alive
+            and self.application.observation_runner_alive
             and self.master_threads.run_monitor_alive
         )
 
