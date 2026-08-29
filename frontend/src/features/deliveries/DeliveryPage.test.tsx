@@ -34,7 +34,7 @@ describe("buildGalleryItems", () => {
 });
 
 describe("DeliveryGallery", () => {
-  test("renders one tile per image with zoom actions and note actions only for pairs", () => {
+  test("renders one clean tile per image with note action only for pairs", () => {
     const items = buildGalleryItems([
       file("resources/shared/bundle_b.png", "image/png"),
       file("resources/shared/bundle_b.md", "text/markdown"),
@@ -42,9 +42,10 @@ describe("DeliveryGallery", () => {
     ]);
     const markup = renderToStaticMarkup(<DeliveryGallery taskId="task_x" items={items} />);
 
-    expect(markup.match(/delivery-tile__/g)).toHaveLength(2 + 2 + 2); // thumb + meta + actions per tile
+    expect(markup.match(/delivery-tile__thumb/g)).toHaveLength(2);
     expect(markup).toContain("/api/v1/tasks/task_x/files/preview?path=resources%2Fshared%2Fbundle_a.png");
-    expect(markup.match(/放大<\/button>/g)).toHaveLength(2);
+    expect(markup).not.toContain("delivery-tile__meta");
+    expect(markup).not.toContain(">放大</button>");
     expect(markup.match(/设计理念<\/button>/g)).toHaveLength(1);
     expect(markup.match(/aria-label="放大查看 /g)).toHaveLength(2);
   });

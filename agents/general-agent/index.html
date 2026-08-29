@@ -5,39 +5,48 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>通用 Agent</title>
   <style>
-    :root { color-scheme: light; font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; color: #172033; background: #f5f7fb; }
+    :root { color-scheme: light; font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; color: #172033; background: #f4f6fb; }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; }
-    .shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; background: linear-gradient(180deg, #f8faff 0, #f3f5fa 100%); }
-    header { padding: 18px 24px; border-bottom: 1px solid #dfe5ef; background: rgba(255,255,255,.9); }
-    header div { display: flex; align-items: center; gap: 10px; }
-    .badge { padding: 4px 9px; border-radius: 999px; background: #ede9fe; color: #6d28d9; font-size: 12px; font-weight: 700; }
-    h1 { margin: 0; font-size: 17px; }
-    header p { margin: 5px 0 0; color: #667085; font-size: 13px; }
-    #messages { overflow-y: auto; padding: 24px max(24px, calc((100% - 820px)/2)); display: flex; flex-direction: column; gap: 14px; }
-    .message { max-width: min(78%, 680px); padding: 12px 14px; border: 1px solid #dfe5ef; border-radius: 14px; background: #fff; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(34,48,74,.04); }
-    .message--user { align-self: flex-end; border-color: #d8ccfb; background: #f3efff; }
-    .message--assistant { align-self: flex-start; }
+    body { margin: 0; }
+    .shell { height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+    header { display: flex; align-items: center; gap: 10px; padding: 13px 22px; border-bottom: 1px solid #e2e8f0; background: #fff; }
+    .badge { padding: 3px 9px; border-radius: 999px; background: #ede9fe; color: #6d28d9; font-size: 12px; font-weight: 700; }
+    h1 { margin: 0; font-size: 15px; }
+    header p { margin: 0 0 0 auto; color: #8a94a6; font-size: 12px; }
+    #messages { overflow-y: auto; padding: 22px max(20px, calc((100% - 780px)/2)); display: flex; flex-direction: column; gap: 12px; }
+    .message { max-width: min(76%, 640px); padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; box-shadow: 0 1px 4px rgba(34,48,74,.05); }
+    .message--user { align-self: flex-end; border-color: #ddd2fc; background: #f1ebff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
+    .message--assistant { align-self: flex-start; border-bottom-left-radius: 4px; }
     .message--error { border-color: #fecaca; background: #fff1f2; }
-    .message small { display: block; margin-bottom: 5px; color: #667085; font-size: 11px; font-weight: 700; }
-    form { padding: 16px max(24px, calc((100% - 820px)/2)) 20px; border-top: 1px solid #dfe5ef; background: rgba(255,255,255,.95); }
-    .composer { display: flex; align-items: flex-end; gap: 10px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 14px; background: #fff; box-shadow: 0 6px 22px rgba(34,48,74,.08); }
-    textarea { min-height: 44px; max-height: 160px; flex: 1; resize: vertical; border: 0; padding: 10px; font: inherit; line-height: 1.45; }
-    textarea:focus { outline: none; }
+    .message small { display: block; margin-bottom: 4px; color: #8a94a6; font-size: 11px; font-weight: 700; }
+    .md > :first-child { margin-top: 0; }
+    .md > :last-child { margin-bottom: 0; }
+    .md h3 { margin: 10px 0 6px; font-size: 15px; }
+    .md h4 { margin: 8px 0 4px; font-size: 14px; }
+    .md p { margin: 6px 0; }
+    .md ul { margin: 6px 0; padding-left: 20px; }
+    .md pre { margin: 8px 0; padding: 10px; border-radius: 8px; background: #f1f5f9; font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .thinking { align-self: flex-start; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 14px; border-bottom-left-radius: 4px; background: #fff; color: #475467; font-size: 13px; box-shadow: 0 1px 4px rgba(34,48,74,.05); }
+    .spinner { flex: 0 0 auto; width: 14px; height: 14px; border: 2px solid #d8ccfb; border-top-color: #6d28d9; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    form { padding: 14px max(20px, calc((100% - 780px)/2)) 16px; border-top: 1px solid #e2e8f0; background: #fff; }
+    .composer { display: flex; align-items: flex-end; gap: 10px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 14px; background: #fff; }
     .composer:focus-within { border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124,58,237,.14); }
+    textarea { min-height: 44px; max-height: 160px; flex: 1; resize: vertical; border: 0; padding: 10px; font: inherit; line-height: 1.45; background: transparent; }
+    textarea:focus { outline: none; }
     button { min-height: 42px; padding: 0 18px; border: 0; border-radius: 10px; color: #fff; background: #6d28d9; font-weight: 700; cursor: pointer; transition: background .15s ease; }
-    button:hover { background: #5b21b6; }
+    button:hover:not(:disabled) { background: #5b21b6; }
     button:focus-visible { outline: 3px solid rgba(124,58,237,.28); outline-offset: 2px; }
-    button:disabled { cursor: wait; opacity: .55; }
-    #status { min-height: 20px; margin: 7px 4px 0; color: #667085; font-size: 12px; }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+    #status { min-height: 18px; margin: 6px 4px 0; color: #667085; font-size: 12px; }
     #status.error { color: #b42318; }
-    @media (max-width: 640px) { header { padding: 14px 16px; } #messages, form { padding-left: 14px; padding-right: 14px; } .message { max-width: 90%; } }
-    @media (prefers-reduced-motion: reduce) { button { transition: none; } }
+    @media (max-width: 640px) { header { padding: 12px 14px; } #messages, form { padding-left: 12px; padding-right: 12px; } .message { max-width: 90%; } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } button { transition: none; } }
   </style>
 </head>
 <body>
   <main class="shell">
-    <header><div><span class="badge">通用</span><h1>任务对话</h1></div><p>可读取与写入当前任务共享文件夹</p></header>
+    <header><span class="badge">通用</span><h1>任务对话</h1><p>可读取与写入当前任务共享文件夹</p></header>
     <section id="messages" aria-label="通用 Agent 对话" aria-live="polite"></section>
     <form id="form">
       <div class="composer"><textarea id="input" rows="1" maxlength="20000" placeholder="继续补充任务要求…" aria-label="发送给通用 Agent 的消息" required></textarea><button id="send" type="submit">发送</button></div>
@@ -50,39 +59,154 @@
     const input = document.querySelector('#input');
     const send = document.querySelector('#send');
     const status = document.querySelector('#status');
+    let current = [];
+    let running = false;
+    let pollTimer = null;
+
+    function renderMarkdown(container, markdown) {
+      const blocks = markdown.split(/\n{2,}/).filter(block => block.trim());
+      for (const block of blocks) {
+        const value = block.trim();
+        const heading = value.match(/^(#{1,3})\s+(.+)$/s);
+        if (heading) {
+          const node = document.createElement(heading[1].length === 1 ? 'h3' : 'h4');
+          node.textContent = heading[2];
+          container.append(node);
+          continue;
+        }
+        const lines = value.split('\n');
+        if (lines.every(line => /^[-*]\s+/.test(line))) {
+          const list = document.createElement('ul');
+          for (const line of lines) {
+            const item = document.createElement('li');
+            item.textContent = line.replace(/^[-*]\s+/, '');
+            list.append(item);
+          }
+          container.append(list);
+          continue;
+        }
+        if (/^```/.test(value) && /```$/.test(value)) {
+          const pre = document.createElement('pre');
+          const code = document.createElement('code');
+          code.textContent = value.replace(/^```[^\n]*\n?/, '').replace(/```$/, '');
+          pre.append(code);
+          container.append(pre);
+          continue;
+        }
+        const paragraph = document.createElement('p');
+        lines.forEach((line, index) => {
+          paragraph.append(document.createTextNode(line));
+          if (index < lines.length - 1) paragraph.append(document.createElement('br'));
+        });
+        container.append(paragraph);
+      }
+    }
+
+    function thinkingNode() {
+      const node = document.createElement('div');
+      node.className = 'thinking';
+      node.setAttribute('role', 'status');
+      const spinner = document.createElement('span');
+      spinner.className = 'spinner';
+      spinner.setAttribute('aria-hidden', 'true');
+      const text = document.createElement('span');
+      text.textContent = 'Agent 正在处理…';
+      node.append(spinner, text);
+      return node;
+    }
+
     function render(items) {
       messages.replaceChildren(...items.map(item => {
         const node = document.createElement('article');
         node.className = `message message--${item.role}${item.status === 'error' ? ' message--error' : ''}`;
         const label = document.createElement('small');
         label.textContent = item.role === 'user' ? '任务指令' : '通用 Agent';
-        const text = document.createElement('div');
-        text.textContent = item.content;
-        node.append(label, text);
+        const body = document.createElement('div');
+        if (item.role === 'assistant') {
+          body.className = 'md';
+          renderMarkdown(body, item.content);
+        } else {
+          body.textContent = item.content;
+        }
+        node.append(label, body);
         return node;
       }));
+      if (running) messages.append(thinkingNode());
       messages.scrollTop = messages.scrollHeight;
     }
-    async function load() {
-      const response = await fetch('/api/messages', {cache: 'no-store'});
-      if (!response.ok) throw new Error('无法读取对话');
-      render((await response.json()).messages);
+
+    function setRunning(next) {
+      running = next;
+      input.disabled = next;
+      send.disabled = next;
+      if (next) {
+        if (pollTimer === null) pollTimer = setInterval(poll, 2000);
+      } else if (pollTimer !== null) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
     }
+
+    function showError(text) {
+      status.className = 'error';
+      status.setAttribute('role', 'alert');
+      status.textContent = text;
+    }
+
+    async function poll() {
+      try {
+        const response = await fetch('/api/messages', {cache: 'no-store'});
+        if (!response.ok) return;
+        const payload = await response.json();
+        current = payload.messages;
+        if (!payload.running) setRunning(false);
+        render(current);
+        if (!payload.running) input.focus();
+      } catch (error) {
+        // 网络抖动时继续轮询，直到 Agent 恢复可达。
+      }
+    }
+
     form.addEventListener('submit', async event => {
       event.preventDefault();
       const content = input.value.trim();
-      if (!content) return;
-      send.disabled = true; input.disabled = true; status.className = ''; status.textContent = '通用 Agent 正在执行任务…';
+      if (!content || running) return;
+      status.className = '';
+      status.textContent = '';
+      send.disabled = true;
+      input.disabled = true;
       try {
         const response = await fetch('/api/messages', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({content})});
         const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || '本轮执行失败');
-        input.value = ''; render(payload.messages); status.textContent = '';
+        if (response.status === 409) {
+          setRunning(true);
+          render(current);
+          return;
+        }
+        if (!response.ok) throw new Error(payload.error || '发送失败');
+        current = payload.messages;
+        input.value = '';
+        setRunning(true);
+        render(current);
       } catch (error) {
-        status.className = 'error'; status.setAttribute('role', 'alert'); status.textContent = error instanceof Error ? error.message : '本轮执行失败';
-      } finally { send.disabled = false; input.disabled = false; input.focus(); }
+        setRunning(false);
+        showError(error instanceof Error ? error.message : '发送失败');
+        input.focus();
+      }
     });
-    load().catch(error => { status.className = 'error'; status.setAttribute('role', 'alert'); status.textContent = error.message; });
+
+    (async () => {
+      try {
+        const response = await fetch('/api/messages', {cache: 'no-store'});
+        if (!response.ok) throw new Error('无法读取对话');
+        const payload = await response.json();
+        current = payload.messages;
+        setRunning(Boolean(payload.running));
+        render(current);
+      } catch (error) {
+        showError(error instanceof Error ? error.message : '无法读取对话');
+      }
+    })();
   </script>
 </body>
 </html>

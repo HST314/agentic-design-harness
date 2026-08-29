@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -117,12 +119,102 @@ class GeneralAgentRuntimeTests(unittest.TestCase):
                 ]
             )
             agent._complete = lambda _round: next(responses)
-            messages = agent.chat("开始执行")
+            queued = agent.chat("开始执行")
+            self.assertEqual(queued[-1]["role"], "user")
+            self.assertTrue(agent.is_running())
+            self._wait_until_idle(agent)
             self.assertEqual((shared / "notes.txt").read_text(encoding="utf-8"), "approved")
+            messages = agent.public_messages()
             self.assertEqual(messages[-1]["role"], "assistant")
             self.assertIn("notes.txt", messages[-1]["content"])
             self.assertEqual(agent.state["usage"][0]["agent_type"], "general")
             self.assertEqual(agent.state["usage"][0]["total_tokens"], 12)
+
+    def test_chat_rejects_new_message_while_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            os.environ,
+            {
+                "ARK_BASE_URL": "http://127.0.0.1:1",
+                "ARK_API_KEY": "test-secret",
+                "GENERAL_AGENT_MODEL": "test-model",
+            },
+        ):
+            shared = Path(temporary)
+            card = {
+                "card_id": "card_general",
+                "task_id": "task_general",
+                "instance_id": "instance_general",
+                "objective": "Create notes.txt",
+                "instructions": [],
+            }
+            agent = MODULE.GeneralAgent(card, shared, shared / ".state.json")
+            gate = threading.Event()
+
+            def blocked(_round: int) -> dict:
+                gate.wait(5)
+                return {"choices": [{"message": {"content": "已完成。"}}]}
+
+            agent._complete = blocked
+            agent.chat("继续任务")
+            self.assertTrue(agent.is_running())
+            with self.assertRaises(MODULE.AgentBusyError):
+                agent.chat("再来一条")
+            gate.set()
+            self._wait_until_idle(agent)
+            messages = agent.public_messages()
+            self.assertEqual(messages[-1]["role"], "assistant")
+            self.assertEqual(messages[-1]["content"], "已完成。")
+            self.assertEqual(
+                sum(1 for item in messages if item["role"] == "user"),
+                2,
+            )
+
+    def test_autostart_runs_unanswered_instruction_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            os.environ,
+            {
+                "ARK_BASE_URL": "http://127.0.0.1:1",
+                "ARK_API_KEY": "test-secret",
+                "GENERAL_AGENT_MODEL": "test-model",
+            },
+        ):
+            shared = Path(temporary)
+            card = {
+                "card_id": "card_general",
+                "task_id": "task_general",
+                "instance_id": "instance_general",
+                "objective": "Summarize the shared folder.",
+                "instructions": [],
+            }
+            agent = MODULE.GeneralAgent(card, shared, shared / ".state.json")
+            gate = threading.Event()
+
+            def blocked(_round: int) -> dict:
+                gate.wait(5)
+                return {"choices": [{"message": {"content": "摘要已完成。"}}]}
+
+            agent._complete = blocked
+            agent.autostart()
+            self.assertTrue(agent.is_running())
+            gate.set()
+            self._wait_until_idle(agent)
+            messages = agent.public_messages()
+            self.assertEqual(len(messages), 2)
+            self.assertEqual(messages[-1]["role"], "assistant")
+            self.assertEqual(messages[-1]["content"], "摘要已完成。")
+
+            recovered = MODULE.GeneralAgent(card, shared, shared / ".state.json")
+            recovered.autostart()
+            self.assertFalse(recovered.is_running())
+            self.assertEqual(len(recovered.public_messages()), 2)
+
+    @staticmethod
+    def _wait_until_idle(agent: MODULE.GeneralAgent, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while agent.is_running() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if agent.is_running():
+            raise AssertionError("The general Agent did not finish in time.")
 
     def test_tools_reject_traversal_absolute_paths_and_symlink_escape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

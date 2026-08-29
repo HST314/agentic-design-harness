@@ -8,12 +8,6 @@ import { TaskTabs } from "../master-thread/MasterThreadPage";
 
 const SHARED_PREFIX = "resources/shared/";
 
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function MarkdownPreview({ markdown }: { markdown: string }): React.JSX.Element {
   const blocks = markdown.split(/\n{2,}/).filter((item) => item.trim());
   return (
@@ -94,20 +88,13 @@ export function DeliveryGallery({
               loading="lazy"
             />
           </button>
-          <div className="delivery-tile__meta">
-            <strong title={item.file.filename}>{item.file.filename}</strong>
-            <span>{formatBytes(item.file.size_bytes)}</span>
-          </div>
-          <div className="delivery-tile__actions">
-            <button type="button" className="workbench-secondary-button" onClick={() => onZoom(item.file)}>
-              <Icon name="expand" />放大
-            </button>
-            {item.notePath ? (
+          {item.notePath ? (
+            <div className="delivery-tile__actions">
               <button type="button" className="workbench-secondary-button" onClick={() => onShowNote(item)}>
                 <Icon name="file" />设计理念
               </button>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
         </article>
       ))}
     </div>
@@ -174,13 +161,12 @@ function DeliveryNoteDialog({
     <dialog
       ref={dialogRef}
       className="delivery-dialog delivery-note-dialog"
-      aria-labelledby="delivery-note-title"
+      aria-label="设计理念"
       onClose={onClose}
     >
       <div className="workbench-drawer__header">
         <div>
           <p className="workbench-eyebrow">设计理念</p>
-          <h2 id="delivery-note-title">{item.file.filename}</h2>
         </div>
         <button type="button" className="workbench-icon-button" aria-label="关闭设计理念" onClick={onClose}>
           <Icon name="close" />

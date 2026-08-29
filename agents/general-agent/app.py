@@ -150,6 +150,10 @@ class SharedFolderTools:
         return candidate
 
 
+class AgentBusyError(RuntimeError):
+    """Raised when a chat message arrives while the Agent is still running."""
+
+
 class GeneralAgent:
     def __init__(self, task_card: dict[str, Any], shared_root: Path, state_path: Path) -> None:
         self.task_card = task_card
@@ -161,6 +165,7 @@ class GeneralAgent:
         self.model = os.environ["GENERAL_AGENT_MODEL"]
         self.timeout = int(os.environ.get("GENERAL_AGENT_TIMEOUT_SECONDS", "180"))
         self.max_rounds = int(os.environ.get("GENERAL_AGENT_MAX_TOOL_ROUNDS", "8"))
+        self.running = False
         self.state = self._load_or_initialize()
 
     def _load_or_initialize(self) -> dict[str, Any]:
@@ -196,30 +201,68 @@ class GeneralAgent:
         with self.lock:
             return [dict(item) for item in self.state["messages"]]
 
+    def is_running(self) -> bool:
+        with self.lock:
+            return self.running
+
     def chat(self, content: str) -> list[dict[str, str]]:
         if not isinstance(content, str) or not content.strip() or len(content) > 20_000:
             raise ValueError("Message content must contain 1 to 20000 characters.")
         with self.lock:
+            if self.running:
+                raise AgentBusyError(
+                    "The Agent is still processing the previous message."
+                )
             if len(self.state["messages"]) >= MAX_HISTORY_MESSAGES:
                 raise ValueError("The chat history has reached its managed limit.")
             cleaned = content.strip()
             self.state["messages"].append(self._message("user", cleaned))
             self.state["model_messages"].append({"role": "user", "content": cleaned})
             self._persist(self.state)
-            try:
-                answer = self._run_loop()
-            except Exception:
+            self.running = True
+        self._start_background_run()
+        return self.public_messages()
+
+    def autostart(self) -> None:
+        """Run the latest instruction if it never received a reply.
+
+        Covers both first boot (the task-card instruction is the only message)
+        and crash recovery (a user message was persisted but the process died
+        before the assistant reply was appended).
+        """
+        with self.lock:
+            if self.running:
+                return
+            messages = self.state["messages"]
+            if not messages or messages[-1].get("role") != "user":
+                return
+            self.running = True
+        self._start_background_run()
+
+    def _start_background_run(self) -> None:
+        threading.Thread(
+            target=self._execute, name="general-agent-run", daemon=True
+        ).start()
+
+    def _execute(self) -> None:
+        try:
+            answer = self._run_loop()
+        except Exception:
+            with self.lock:
                 self.state["messages"].append(
                     self._message(
                         "assistant", "模型暂时未能完成本轮任务; 请稍后重试。", status="error"
                     )
                 )
                 self._persist(self.state)
-                raise
-            self.state["messages"].append(self._message("assistant", answer))
-            self.state["model_messages"].append({"role": "assistant", "content": answer})
-            self._persist(self.state)
-            return [dict(item) for item in self.state["messages"]]
+        else:
+            with self.lock:
+                self.state["messages"].append(self._message("assistant", answer))
+                self.state["model_messages"].append({"role": "assistant", "content": answer})
+                self._persist(self.state)
+        finally:
+            with self.lock:
+                self.running = False
 
     def _run_loop(self) -> str:
         for round_index in range(1, self.max_rounds + 1):
@@ -386,7 +429,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in {"/healthz", "/readyz"}:
             self._json(HTTPStatus.OK, {"status": "ok"})
         elif self.path == "/api/messages":
-            self._json(HTTPStatus.OK, {"messages": self.server.agent.public_messages()})
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "messages": self.server.agent.public_messages(),
+                    "running": self.server.agent.is_running(),
+                },
+            )
         elif self.path == "/api/usage":
             with self.server.agent.lock:
                 self._json(
@@ -411,7 +460,11 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("The request body must be an object.")
             messages = self.server.agent.chat(body.get("content"))
-            self._json(HTTPStatus.OK, {"messages": messages})
+            self._json(
+                HTTPStatus.ACCEPTED, {"messages": messages, "running": True}
+            )
+        except AgentBusyError as exc:
+            self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
         except ValueError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception:
@@ -459,9 +512,9 @@ def main() -> int:
     shared_root = Path(os.environ["GENERAL_AGENT_SHARED_ROOT"])
     state_path = Path(os.environ["GENERAL_AGENT_STATE_PATH"])
     task_card = json.loads(task_card_path.read_text(encoding="utf-8"))
-    server = GeneralAgentServer(
-        (args.host, args.port), GeneralAgent(task_card, shared_root, state_path)
-    )
+    agent = GeneralAgent(task_card, shared_root, state_path)
+    server = GeneralAgentServer((args.host, args.port), agent)
+    agent.autostart()
     server.serve_forever()
     return 0
 

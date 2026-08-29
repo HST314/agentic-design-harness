@@ -135,6 +135,7 @@ class GeneralAgentIntegrationTests(unittest.TestCase):
                         f"{instance['ui_url']}api/messages", timeout=3
                     ) as response:
                         payload = json.loads(response.read())
+                    self.assertIn("running", payload)
                     self.assertEqual(payload["messages"][0]["role"], "user")
                     self.assertIn(
                         "Summarize the files", payload["messages"][0]["content"]
