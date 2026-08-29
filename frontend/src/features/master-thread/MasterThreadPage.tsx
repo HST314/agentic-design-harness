@@ -612,8 +612,9 @@ function ProposalCardGroup({
     proposal.work_items.flatMap((item) => item.task_card_ids.map((cardId) => [cardId, item.title] as const)),
   );
   const planLabel = proposal.status === "SUPERSEDED" ? "历史执行计划" : "当前执行计划";
+  const singleCard = proposal.execution_cards.length === 1;
   return (
-    <section className="master-plan-cards" aria-label={`${planLabel}任务卡`}>
+    <section className={`master-plan-cards${singleCard ? " master-plan-cards--single" : ""}`} aria-label={`${planLabel}任务卡`}>
       <header className="master-plan-cards__header">
         <p className="workbench-eyebrow">{planLabel}</p>
         <div className="master-plan-cards__meta">

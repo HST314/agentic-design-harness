@@ -554,6 +554,32 @@ class ApprovalInboxService:
             updated.append(result["item"])
         return updated
 
+    def clear_read_notifications(self, *, owner: str = "human") -> dict[str, Any]:
+        """Remove every READ notification for the owner; unread/handled stay."""
+
+        if owner not in {"human", "master"}:
+            raise HarnessError("VALIDATION_ERROR", "The inbox owner is invalid.")
+        removed: list[str] = []
+        for item in self.list_inbox(owner=owner, status="READ", limit=None):
+            try:
+                deleted = self.store.inbox.delete(
+                    item["task_id"],
+                    item["inbox_id"],
+                    expected_revision=item["store_revision"],
+                    actor=Actor(owner, f"{owner}_operator"),
+                    command="clear_read_inbox",
+                    idempotency_key=(
+                        f"clear-read-{item['inbox_id']}-{item['store_revision']}"
+                    ),
+                )
+            except HarnessError as exc:
+                if exc.code != "REVISION_CONFLICT":
+                    raise
+                continue
+            if deleted:
+                removed.append(item["inbox_id"])
+        return {"removed": removed, "removed_count": len(removed)}
+
     def acknowledge_external_workflow_approvals(
         self,
         task_id: str,

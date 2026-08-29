@@ -1203,6 +1203,15 @@ export class ApiClient {
     return this.send("POST", `/api/v1/inbox/${encodeURIComponent(inboxId)}/status`, body);
   }
 
+  clearReadInbox(): Promise<{
+    schema_version: string;
+    removed: string[];
+    removed_count: number;
+    unread_count: number;
+  }> {
+    return this.send("POST", "/api/v1/inbox/clear-read", {});
+  }
+
   updateApprovalMode(
     instanceId: string,
     body: Record<string, unknown>,

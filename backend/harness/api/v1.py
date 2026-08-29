@@ -1132,6 +1132,18 @@ def build_v1_router(container: Container) -> APIRouter:
             "unread_count": unread_count,
         }
 
+    @router.post("/inbox/clear-read", tags=["inbox"])
+    async def clear_read_inbox() -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.approvals.clear_read_notifications,
+            owner="human",
+        )
+        unread_count = await run_in_threadpool(
+            container.approvals.unread_count,
+            owner="human",
+        )
+        return {"schema_version": "1.0", **result, "unread_count": unread_count}
+
     @router.post("/inbox/{inbox_id}/status", tags=["inbox"])
     async def update_inbox_status(
         inbox_id: str, body: InboxStatusRequest

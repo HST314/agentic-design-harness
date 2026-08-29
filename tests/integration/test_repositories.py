@@ -114,3 +114,97 @@ class RepositoryTests(unittest.TestCase):
             second.start()
         self.assertEqual(captured.exception.code, "REVISION_CONFLICT")
         self.assertFalse(second.writer_lease.acquired)
+
+    def test_inbox_delete_removes_snapshot_keeps_audit_and_rebuilds_index(self) -> None:
+        payload = {
+            "schema_version": "1.0",
+            "inbox_id": "inbox_delete_me",
+            "task_id": "t_repositories",
+            "instance_id": "i_one",
+            "approval_id": "ap_one",
+            "kind": "APPROVAL_REQUIRED",
+            "owner": "human",
+            "created_at": "2026-08-20T12:00:00Z",
+            "sequence": 1,
+            "status": "READ",
+            "read_at": "2026-08-20T12:00:01Z",
+            "read_by_type": "human",
+            "read_by_id": "tester",
+            "title": "Approval required",
+            "message": "The Image workflow is waiting for a decision.",
+            "deep_link": "inbox/ap_one",
+            "revision": 1,
+            "dedupe_key": "approval:inbox_delete_me",
+        }
+        self.store.inbox.put(
+            "t_repositories",
+            "inbox_delete_me",
+            payload,
+            expected_revision=0,
+            actor=self.actor,
+            command="create_inbox",
+            idempotency_key="inbox-delete-me",
+        )
+        snapshot = self.store.inbox.path("t_repositories", "inbox_delete_me")
+        self.assertTrue(snapshot.exists())
+
+        with self.assertRaises(HarnessError) as conflict:
+            self.store.inbox.delete(
+                "t_repositories",
+                "inbox_delete_me",
+                expected_revision=99,
+                actor=self.actor,
+                command="clear_read_inbox",
+                idempotency_key="clear-read-wrong-revision",
+            )
+        self.assertEqual(conflict.exception.code, "REVISION_CONFLICT")
+        self.assertTrue(snapshot.exists())
+
+        deleted = self.store.inbox.delete(
+            "t_repositories",
+            "inbox_delete_me",
+            expected_revision=1,
+            actor=self.actor,
+            command="clear_read_inbox",
+            idempotency_key="clear-read-inbox-delete-me-1",
+        )
+        self.assertTrue(deleted)
+        self.assertFalse(snapshot.exists())
+        self.assertIsNone(self.store.inbox.get("t_repositories", "inbox_delete_me"))
+
+        # Removing the same object again is an idempotent no-op.
+        self.assertFalse(
+            self.store.inbox.delete(
+                "t_repositories",
+                "inbox_delete_me",
+                expected_revision=1,
+                actor=self.actor,
+                command="clear_read_inbox",
+                idempotency_key="clear-read-inbox-delete-me-1",
+            )
+        )
+
+        events = [
+            json.loads(line)
+            for line in (
+                self.store.layout.control_root
+                / "tasks"
+                / "t_repositories"
+                / "events.ndjson"
+            ).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        removal = next(
+            event for event in events if event.get("event_type") == "OBJECT_REMOVED"
+        )
+        self.assertEqual(removal["object_type"], "inbox")
+        self.assertEqual(removal["object_id"], "inbox_delete_me")
+        self.assertEqual(removal["command"], "clear_read_inbox")
+        self.assertEqual(removal["revision"], 1)
+
+        inbox_index = self.store.layout.control_root / "indexes" / "inbox-index.json"
+        index = json.loads(inbox_index.read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "inbox_delete_me",
+            [item["inbox_id"] for item in index["entries"]],
+        )
