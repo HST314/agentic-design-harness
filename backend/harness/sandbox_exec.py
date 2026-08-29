@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import runpy
 import sys
 from pathlib import Path
 
@@ -31,15 +32,23 @@ def main() -> int:
 def _run_windows_python_child(command: list[str]) -> int:
     """Run the pinned Python command without discarding the Windows audit hook."""
 
+    if len(command) < 2 or Path(command[0]).resolve() != Path(sys.executable).resolve():
+        raise RuntimeError("The Windows write sandbox only accepts the managed Python child.")
+    if command[1] == "-c" and len(command) >= 3:
+        sys.argv = ["-c", *command[3:]]
+        namespace = {"__name__": "__main__", "__builtins__": __builtins__}
+        exec(compile(command[2], "<managed-agent-launcher>", "exec"), namespace, namespace)
+        return 0
+    script = Path(command[1])
     if (
-        len(command) < 3
-        or Path(command[0]).resolve() != Path(sys.executable).resolve()
-        or command[1] != "-c"
+        not script.is_absolute()
+        or script.suffix.lower() != ".py"
+        or script.is_symlink()
+        or not script.is_file()
     ):
         raise RuntimeError("The Windows write sandbox only accepts the managed Python child.")
-    sys.argv = ["-c", *command[3:]]
-    namespace = {"__name__": "__main__", "__builtins__": __builtins__}
-    exec(compile(command[2], "<managed-agent-launcher>", "exec"), namespace, namespace)
+    sys.argv = [str(script), *command[2:]]
+    runpy.run_path(str(script), run_name="__main__")
     return 0
 
 

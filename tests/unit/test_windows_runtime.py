@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import harness.storage.locks as locks
 from harness.core.errors import HarnessError
 from harness.runtime import validate_runtime_platform
+from harness.sandbox_exec import _run_windows_python_child
 from harness.services.process_control import process_start_identity
 from harness.storage.locks import FileLock
 from harness.storage.safe_open import open_regular_readonly
@@ -21,8 +23,41 @@ from harness.write_sandbox import (
     require_write_sandbox,
 )
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 class PortableSafeOpenTests(unittest.TestCase):
+    def test_windows_sandbox_runs_managed_python_script_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / "managed_agent.py"
+            output = root / "result.json"
+            script.write_text(
+                "import json, sys\n"
+                "from pathlib import Path\n"
+                "Path(sys.argv[1]).write_text(json.dumps({"
+                "'argv': sys.argv[2:], 'file': __file__}))\n",
+                encoding="utf-8",
+            )
+            previous_argv = sys.argv
+            try:
+                result = _run_windows_python_child(
+                    [
+                        sys.executable,
+                        str(script.resolve()),
+                        str(output),
+                        "--host",
+                        "127.0.0.1",
+                    ]
+                )
+            finally:
+                sys.argv = previous_argv
+
+            self.assertEqual(result, 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["argv"], ["--host", "127.0.0.1"])
+            self.assertEqual(Path(payload["file"]), script.resolve())
+
     def test_extended_windows_paths_share_the_declared_root_namespace(self) -> None:
         self.assertEqual(
             _without_windows_extended_prefix(r"\\?\D:\workspace\projects\deck"),
@@ -111,6 +146,52 @@ class PortableSafeOpenTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "requires a real Windows kernel")
 class WindowsRuntimeTests(unittest.TestCase):
+    def test_sandbox_exec_runs_script_entrypoint_with_active_write_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            allowed = root / "allowed"
+            blocked = root / "blocked"
+            allowed.mkdir()
+            blocked.mkdir()
+            script = root / "managed_agent.py"
+            result_path = allowed / "result.json"
+            blocked_path = blocked / "escaped.txt"
+            script.write_text(
+                "import json, sys\n"
+                "from pathlib import Path\n"
+                "blocked = Path(sys.argv[2])\n"
+                "try:\n"
+                "    blocked.write_text('bad')\n"
+                "    escaped = True\n"
+                "except PermissionError:\n"
+                "    escaped = False\n"
+                "Path(sys.argv[1]).write_text(json.dumps({"
+                "'escaped': escaped, 'argv': sys.argv[3:]}))\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "backend" / "harness" / "sandbox_exec.py"),
+                    json.dumps([str(allowed.resolve())]),
+                    sys.executable,
+                    str(script.resolve()),
+                    str(result_path),
+                    str(blocked_path),
+                    "--port",
+                    "19300",
+                ],
+                check=True,
+            )
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(
+                json.loads(result_path.read_text(encoding="utf-8")),
+                {"escaped": False, "argv": ["--port", "19300"]},
+            )
+            self.assertFalse(blocked_path.exists())
+
     def test_managed_write_sandbox_is_available(self) -> None:
         require_write_sandbox()
 
