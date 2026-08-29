@@ -58,6 +58,7 @@ class FakeImageAdapter:
         self.deliveries = []
         self.delivery_bundles = []
         self.advance_delay = 0.0
+        self.observation_delay = 0.0
         self.advance_accepted = True
         self.validation_delegate = None
         self.prepare_error = None
@@ -89,6 +90,8 @@ class FakeImageAdapter:
         return AdapterCommandResult(True, operation_id, {"reason": reason})
 
     def get_status(self, instance_id):
+        if self.observation_delay:
+            time.sleep(self.observation_delay)
         return self.observation
 
     def request_advance(self, instance_id, action, payload, operation_id):
@@ -2219,6 +2222,141 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(sum(isinstance(item, dict) for item in outcomes), 1)
         self.assertEqual(sum(isinstance(item, HarnessError) for item in outcomes), 1)
         self.assertEqual(len(self.fake_adapter.advance_calls), 1)
+
+    def test_approval_and_delayed_observation_finish_running(self) -> None:
+        task_id = "t_delayed_approval_observation"
+        observed = self._waiting_approval(task_id)
+        approval = observed["approval"]
+        self.fake_adapter.observation_delay = 0.1
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            delayed_observation = executor.submit(
+                self.application.observe_instance, task_id, "i_image_1"
+            )
+            time.sleep(0.02)
+            resolution = executor.submit(
+                self.application.resolve_approval,
+                approval["approval"]["approval_id"],
+                decision="APPROVED",
+                action="approve_taskbook",
+                payload={},
+                operation_id="resolve_delayed_approval_observation",
+                envelope=envelope(
+                    "resolve-delayed-approval-observation",
+                    approval["approval_revision"],
+                ),
+            )
+            delayed_observation.result()
+            resolution.result()
+
+        instance = self.store.instance.get(task_id, "i_image_1")
+        self.assertEqual(instance["status"], "RUNNING")
+
+    def test_resolved_gate_old_snapshot_cannot_restore_waiting_or_notification(self) -> None:
+        task_id = "t_resolved_gate_old_snapshot"
+        observed = self._waiting_approval(task_id)
+        approval = observed["approval"]
+        self.application.resolve_approval(
+            approval["approval"]["approval_id"],
+            decision="APPROVED",
+            action="approve_taskbook",
+            payload={},
+            operation_id="resolve_old_snapshot_gate",
+            envelope=envelope("resolve-old-snapshot-gate", approval["approval_revision"]),
+        )
+
+        replay = self.application.observe_instance(task_id, "i_image_1")
+
+        self.assertEqual(replay["instance"]["status"], "RUNNING")
+        self.assertTrue(replay["observation"]["stale"])
+        self.assertIsNone(replay["approval"])
+        self.assertEqual(
+            self.approvals.list_approvals(task_id=task_id, status="PENDING"), []
+        )
+        self.assertEqual(self.approvals.unread_count(owner="human"), 0)
+
+    def test_new_gate_after_resolved_old_gate_creates_fresh_attention(self) -> None:
+        task_id = "t_new_gate_after_resolution"
+        observed = self._waiting_approval(task_id)
+        first = observed["approval"]
+        self.application.resolve_approval(
+            first["approval"]["approval_id"],
+            decision="APPROVED",
+            action="approve_taskbook",
+            payload={},
+            operation_id="resolve_before_new_gate",
+            envelope=envelope("resolve-before-new-gate", first["approval_revision"]),
+        )
+        self.fake_adapter.observation = AdapterObservation(
+            "WAITING_APPROVAL",
+            step_id="waiting_human_approval",
+            capabilities=("approve_taskbook",),
+            details={"job_id": "job_genuinely_new_gate"},
+        )
+
+        next_gate = self.application.observe_instance(task_id, "i_image_1")
+
+        self.assertEqual(next_gate["instance"]["status"], "WAITING_APPROVAL")
+        self.assertNotEqual(
+            next_gate["approval"]["approval"]["approval_id"],
+            first["approval"]["approval_id"],
+        )
+        self.assertEqual(next_gate["approval"]["approval"]["status"], "PENDING")
+        self.assertEqual(next_gate["approval"]["notification"]["status"], "UNREAD")
+
+    def test_image_adapter_hides_resolved_gate_until_boundary_advances(self) -> None:
+        checkpoint = "checkpoint_" + "a" * 24
+        next_checkpoint = "checkpoint_" + "b" * 24
+        state = {
+            "settling_gate": {
+                "step_id": "candidate_generation_completed",
+                "checkpoint_id": checkpoint,
+                "timeline_cursor": 12,
+                "advance_job_id": "job_advance",
+            }
+        }
+        old_waiting = AdapterObservation(
+            "WAITING_APPROVAL",
+            step_id="candidate_generation_completed",
+            capabilities=("approve_final",),
+            details={
+                "job_id": "job_advance",
+                "job_status": "succeeded",
+                "timeline_cursor": 15,
+                "workflow_boundary": {"checkpoint_id": checkpoint},
+            },
+        )
+
+        settling = ImageAgentAdapter._stabilize_advanced_gate(old_waiting, state)
+
+        self.assertEqual(settling.status, "RUNNING")
+        self.assertTrue(settling.details["settling_after_approval"])
+        self.assertIn("settling_gate", state)
+
+        active_job = ImageAgentAdapter._stabilize_advanced_gate(
+            AdapterObservation(
+                "RUNNING",
+                details={
+                    "phase": "candidate_generation_completed",
+                    "workflow_boundary": {"checkpoint_id": checkpoint},
+                },
+            ),
+            state,
+        )
+        self.assertEqual(active_job.status, "RUNNING")
+        self.assertIn("settling_gate", state)
+
+        next_gate = ImageAgentAdapter._stabilize_advanced_gate(
+            AdapterObservation(
+                "WAITING_APPROVAL",
+                step_id="candidate_generation_completed",
+                capabilities=("approve_final",),
+                details={"workflow_boundary": {"checkpoint_id": next_checkpoint}},
+            ),
+            state,
+        )
+        self.assertEqual(next_gate.status, "WAITING_APPROVAL")
+        self.assertNotIn("settling_gate", state)
 
     def _waiting_approval(self, task_id: str) -> dict:
         created = create_task(self.commands, task_id, "auto")

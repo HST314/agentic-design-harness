@@ -574,6 +574,7 @@ class ImageAgentAdapter(ImageObservationMixin):
         if view is None:
             self._protocol_error("Image Agent returned an empty project response.")
         observation = self._observation(view, job, cursor, state.get("compatibility"))
+        observation = self._stabilize_advanced_gate(observation, state)
         state["last_observation"] = {
             "status": observation.status,
             "step_id": observation.step_id,
@@ -727,12 +728,70 @@ class ImageAgentAdapter(ImageObservationMixin):
         )
         job = self._require_job(job)
         state = self._state(task_id, instance_id)
-        state.update({"operation_id": operation_id, "job_id": job["job_id"]})
+        workflow_boundary = observation.details.get("workflow_boundary")
+        checkpoint_id = (
+            workflow_boundary.get("checkpoint_id")
+            if isinstance(workflow_boundary, dict)
+            else None
+        )
+        state.update(
+            {
+                "operation_id": operation_id,
+                "job_id": job["job_id"],
+                "settling_gate": {
+                    "step_id": observation.step_id,
+                    "checkpoint_id": checkpoint_id,
+                    "timeline_cursor": observation.details.get("timeline_cursor"),
+                    "advance_job_id": job["job_id"],
+                },
+            }
+        )
         self._write_state(task_id, instance_id, state)
         return AdapterCommandResult(
             accepted=True,
             operation_id=operation_id,
             details={"job_id": job["job_id"], "job_status": job["status"]},
+        )
+
+    @staticmethod
+    def _stabilize_advanced_gate(
+        observation: AdapterObservation, state: dict[str, Any]
+    ) -> AdapterObservation:
+        """Hide the resolved gate until the Image workflow boundary moves forward."""
+
+        settling = state.get("settling_gate")
+        if not isinstance(settling, dict):
+            return observation
+        if observation.status == "FAILED":
+            state.pop("settling_gate", None)
+            return observation
+        boundary = observation.details.get("workflow_boundary")
+        checkpoint_id = boundary.get("checkpoint_id") if isinstance(boundary, dict) else None
+        observed_step = observation.step_id or observation.details.get("phase")
+        boundary_advanced = (
+            (
+                observed_step is not None
+                and observed_step != settling.get("step_id")
+            )
+            or (
+                checkpoint_id is not None
+                and checkpoint_id != settling.get("checkpoint_id")
+            )
+        )
+        if boundary_advanced:
+            state.pop("settling_gate", None)
+            return observation
+        if observation.status != "WAITING_APPROVAL":
+            return observation
+        return AdapterObservation(
+            status="RUNNING",
+            step_id=observation.step_id,
+            capabilities=(),
+            details={
+                **deepcopy(observation.details),
+                "settling_after_approval": True,
+                "resolved_gate": deepcopy(settling),
+            },
         )
 
     def collect_delivery_bundles(self, instance_id: str) -> list[DeliveryBundleCandidate]:
