@@ -64,6 +64,7 @@ class RealPptAdapterG5Tests(unittest.TestCase):
                 )
                 self.assertEqual(link.status_code, 200, link.text)
                 self.assertEqual(link.json()["link_status"], "READY")
+                self._update_runtime_settings(base_url, runtime_path, model_path)
                 project = self._drive_all_gates(base_url)
                 revision = project["full_deck_revision"]
                 status, exported, _ = self._call(base_url, "GET", revision["export_url"])
@@ -83,7 +84,9 @@ class RealPptAdapterG5Tests(unittest.TestCase):
 
     @staticmethod
     def _mock_configuration(root: Path) -> tuple[Path, Path]:
-        runtime_path = root / "runtime.yaml"
+        config_root = root / "ppt-config"
+        config_root.mkdir()
+        runtime_path = config_root / "runtime.yaml"
         runtime = yaml.safe_load(
             (ROOT / "config/ppt_agent_runtime.yaml").read_text(encoding="utf-8")
         )
@@ -91,7 +94,7 @@ class RealPptAdapterG5Tests(unittest.TestCase):
         runtime_path.write_text(
             yaml.safe_dump(runtime, allow_unicode=True, sort_keys=False), encoding="utf-8"
         )
-        model_path = root / "model.yaml"
+        model_path = config_root / "model.yaml"
         model = yaml.safe_load(
             (ROOT / "config/ppt_agent_model_config.yaml").read_text(encoding="utf-8")
         )
@@ -107,6 +110,35 @@ class RealPptAdapterG5Tests(unittest.TestCase):
             yaml.safe_dump(model, allow_unicode=True, sort_keys=False), encoding="utf-8"
         )
         return runtime_path, model_path
+
+    def _update_runtime_settings(self, base_url: str, runtime_path: Path, model_path: Path) -> None:
+        status, context, _ = self._call(base_url, "GET", "/api/runtime-context")
+        self.assertEqual(status, 200)
+        context["policy"]["max_auto_questions"] = 4
+        context["model_bindings"][1]["model"] = "managed-settings-preview-v2"
+        payload = {
+            "model_config_id": "managed-settings-e2e",
+            "model_bindings": context["model_bindings"],
+            "policy": context["policy"],
+        }
+
+        status, updated, _ = self._call(base_url, "PUT", "/api/runtime-context", payload)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["policy"]["max_auto_questions"], 4)
+        self.assertEqual(updated["model_bindings"][1]["model"], "managed-settings-preview-v2")
+        self.assertEqual(
+            yaml.safe_load(runtime_path.read_text(encoding="utf-8"))["max_auto_questions"],
+            4,
+        )
+        self.assertEqual(
+            yaml.safe_load(model_path.read_text(encoding="utf-8"))["model_config_id"],
+            "managed-settings-e2e",
+        )
+        status, reloaded, _ = self._call(base_url, "GET", "/api/runtime-context")
+        self.assertEqual(status, 200)
+        self.assertEqual(reloaded["policy"]["max_auto_questions"], 4)
+        self.assertEqual(reloaded["model_bindings"][1]["model"], "managed-settings-preview-v2")
 
     def _create_and_start(self, client: TestClient, root: Path) -> None:
         created = client.post(
