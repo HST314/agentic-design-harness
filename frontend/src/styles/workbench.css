@@ -949,6 +949,9 @@
 .master-plan-cards__meta { display: inline-flex; align-items: center; gap: var(--space-3); }
 .master-plan-cards__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 
+.master-plan-cards--single { width: min(390px, 88%); }
+.master-plan-cards--single .master-plan-cards__grid { grid-template-columns: minmax(0, 1fr); }
+
 .master-mini-card {
   min-width: 0;
   display: grid;
@@ -1889,6 +1892,9 @@
 }
 .inbox-page__mark-read { display: inline-flex; align-items: center; gap: var(--space-2); }
 .inbox-page__mark-read svg { width: 16px; height: 16px; }
+.inbox-page__actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.inbox-page__clear-read { display: inline-flex; align-items: center; gap: var(--space-2); }
+.inbox-page__clear-read svg { width: 16px; height: 16px; }
 
 .inbox-page__list { display: grid; gap: var(--space-3); }
 

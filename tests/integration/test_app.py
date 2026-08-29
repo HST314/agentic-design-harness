@@ -659,6 +659,74 @@ class ApplicationTests(unittest.TestCase):
                 self.assertEqual(replaced.status_code, 409, replaced.text)
                 self.assertEqual(replaced.json()["error"]["code"], "INVALID_STATE_TRANSITION")
 
+    def test_clear_read_inbox_endpoint_removes_only_read_notifications(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = HarnessSettings(
+                control_root=root / "control-data",
+                workspace_root=root / "workspace",
+                contracts_root=ROOT / "contracts" / "v1",
+            )
+            app = create_app(settings)
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/tasks",
+                    json={
+                        "task_id": "t_api_inbox_clear",
+                        "title": "Inbox clear API task",
+                        "goal": "Seed notifications then clear the read ones.",
+                        "master_owner": "master_default",
+                        "start_policy": "manual",
+                        "input_manifest": "inputs/manifests/input.json",
+                        "envelope": self._envelope("create-api-inbox-clear", 0),
+                    },
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                container = app.state.container
+                for index in range(3):
+                    container.approvals.ensure_notification(
+                        "t_api_inbox_clear",
+                        kind="INSTANCE_SUCCEEDED",
+                        owner="human",
+                        title="子任务完成",
+                        message=f"第 {index + 1} 个子任务通知。",
+                        deep_link="instances/i_api_inbox_clear",
+                        dedupe_key=f"api-clear-{index}",
+                        instance_id="i_api_inbox_clear",
+                    )
+                seeded = container.approvals.list_inbox(owner="human", limit=None)
+                self.assertEqual(len(seeded), 3)
+                container.approvals.update_inbox_status(
+                    seeded[0]["inbox_id"],
+                    "READ",
+                    CommandEnvelope(
+                        idempotency_key="api-clear-read-0",
+                        actor_type="human",
+                        actor_id="api_tester",
+                        expected_revision=seeded[0]["store_revision"],
+                    ),
+                )
+
+                cleared = client.post("/api/v1/inbox/clear-read")
+                self.assertEqual(cleared.status_code, 200, cleared.text)
+                self.assertEqual(cleared.json()["removed_count"], 1)
+                self.assertEqual(cleared.json()["removed"], [seeded[0]["inbox_id"]])
+                self.assertEqual(cleared.json()["unread_count"], 2)
+
+                inbox = client.get("/api/v1/inbox?owner=human")
+                remaining = inbox.json()["items"]
+                self.assertEqual(len(remaining), 2)
+                self.assertEqual({item["status"] for item in remaining}, {"UNREAD"})
+                self.assertNotIn(
+                    seeded[0]["inbox_id"],
+                    [item["inbox_id"] for item in remaining],
+                )
+
+                again = client.post("/api/v1/inbox/clear-read")
+                self.assertEqual(again.status_code, 200, again.text)
+                self.assertEqual(again.json()["removed_count"], 0)
+                self.assertEqual(again.json()["unread_count"], 2)
+
     @staticmethod
     def _envelope(key: str, expected_revision: int) -> dict[str, object]:
         return {

@@ -251,6 +251,52 @@ function InboxCard({
   );
 }
 
+export function InboxHeading({
+  pendingCount,
+  unreadCount,
+  readCount,
+  markingRead,
+  clearingRead,
+  onMarkAllRead,
+  onClearRead,
+}: {
+  pendingCount: number;
+  unreadCount: number;
+  readCount: number;
+  markingRead: boolean;
+  clearingRead: boolean;
+  onMarkAllRead: () => void;
+  onClearRead: () => void;
+}): React.JSX.Element {
+  return (
+    <div className="inbox-page__heading">
+      <div className="inbox-page__title">
+        <h2>待处理通知</h2>
+        <span className="inbox-page__count">{pendingCount} 待处理</span>
+      </div>
+      <div className="inbox-page__actions">
+        <button
+          type="button"
+          className="workbench-secondary-button inbox-page__mark-read"
+          disabled={markingRead || clearingRead || unreadCount === 0}
+          onClick={onMarkAllRead}
+        >
+          <Icon name="check" />{markingRead ? "正在标记…" : "一键已读"}
+        </button>
+        <button
+          type="button"
+          className="workbench-secondary-button inbox-page__clear-read"
+          aria-label="删除全部已读消息"
+          disabled={markingRead || clearingRead || readCount === 0}
+          onClick={onClearRead}
+        >
+          <Icon name="trash" />{clearingRead ? "正在删除…" : "删除已读"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function InboxPage(): React.JSX.Element {
   const inbox = useQuery(inboxQuery);
   const queryClient = useQueryClient();
@@ -263,6 +309,7 @@ export function InboxPage(): React.JSX.Element {
     })
   ), [inbox.data?.items]);
   const unreadItems = useMemo(() => items.filter((item) => item.status === "UNREAD"), [items]);
+  const readItems = useMemo(() => items.filter((item) => item.status === "READ"), [items]);
   const pendingCount = items.filter((item) => item.status !== "HANDLED").length;
   const refresh = (): void => {
     void queryClient.invalidateQueries({ queryKey: inboxQuery.queryKey });
@@ -295,6 +342,26 @@ export function InboxPage(): React.JSX.Element {
     },
     onSettled: refresh,
   });
+  const clearRead = useMutation({
+    mutationFn: () => api.clearReadInbox(),
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: inboxQuery.queryKey });
+      const previous = queryClient.getQueryData(inboxQuery.queryKey);
+      queryClient.setQueryData(inboxQuery.queryKey, (current: typeof previous) => (
+        current ? {
+          ...current,
+          items: current.items.filter((item) => item.status !== "READ"),
+        } : current
+      ));
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(inboxQuery.queryKey, context.previous);
+      }
+    },
+    onSettled: refresh,
+  });
   return (
     <section className="workbench-page inbox-page" aria-labelledby="inbox-title">
       <h1 id="inbox-title" className="sr-only">收件箱</h1>
@@ -309,22 +376,15 @@ export function InboxPage(): React.JSX.Element {
       {inbox.data ? (
         items.length ? (
           <>
-            <div className="inbox-page__heading">
-              <div className="inbox-page__title">
-                <h2>待处理通知</h2>
-                <span className="inbox-page__count">{pendingCount} 待处理</span>
-              </div>
-              {unreadItems.length ? (
-                <button
-                  type="button"
-                  className="workbench-secondary-button inbox-page__mark-read"
-                  disabled={markAllRead.isPending}
-                  onClick={() => markAllRead.mutate()}
-                >
-                  <Icon name="check" />{markAllRead.isPending ? "正在标记…" : "一键已读"}
-                </button>
-              ) : null}
-            </div>
+            <InboxHeading
+              pendingCount={pendingCount}
+              unreadCount={unreadItems.length}
+              readCount={readItems.length}
+              markingRead={markAllRead.isPending}
+              clearingRead={clearRead.isPending}
+              onMarkAllRead={() => markAllRead.mutate()}
+              onClearRead={() => clearRead.mutate()}
+            />
             <div className="inbox-page__list">
               {items.map((item) => (
                 <InboxCard
