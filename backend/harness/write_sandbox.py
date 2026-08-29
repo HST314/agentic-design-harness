@@ -151,7 +151,38 @@ def _apply_windows_write_sandbox(writable_roots: Sequence[str | Path]) -> None:
 
 def _normalized_windows_path(value: str | Path) -> str:
     text = _without_windows_extended_prefix(os.fspath(value))
-    return os.path.normcase(os.path.abspath(text)).rstrip("\\/")
+    absolute = os.path.abspath(text)
+    if os.name == "nt":
+        absolute = _expand_windows_short_names(absolute)
+    return os.path.normcase(absolute).rstrip("\\/")
+
+
+def _expand_windows_short_names(path: str) -> str:
+    """Resolve 8.3 short-name spellings to the canonical long-name form.
+
+    ``abspath`` keeps ``RUNNER~1`` style segments verbatim, so two spellings
+    of the same directory would compare unequal and the sandbox would deny a
+    legitimate write.  ``realpath`` (GetFinalPathNameByHandle) expands short
+    names, but only for paths that exist; resolve the longest existing prefix
+    and re-append the not-yet-created tail.
+    """
+
+    tail: list[str] = []
+    current = path
+    while current and not os.path.exists(current):
+        head, name = os.path.split(current)
+        if head == current:
+            break
+        tail.append(name)
+        current = head
+    try:
+        resolved = os.path.realpath(current)
+    except OSError:
+        resolved = current
+    if not tail:
+        return resolved
+    tail.reverse()
+    return os.path.join(resolved, *tail)
 
 
 def _without_windows_extended_prefix(value: str) -> str:

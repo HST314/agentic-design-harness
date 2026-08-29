@@ -66,6 +66,8 @@ jobs:
           -r requirements/image-agent-web.in
       - name: Install locked development dependencies
         run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Install and attest the locked PPT runtime
+        run: python scripts/dev.py setup-ppt-runtime --force
       - name: Run backend core tests
         run: python -m unittest discover -s tests -v
       - name: Run static, contract and security checks once
