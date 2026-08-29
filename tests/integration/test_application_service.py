@@ -1478,7 +1478,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(completed["transition"]["task"]["status"], "SUCCEEDED")
         self.assertEqual(
             [item["kind"] for item in self.approvals.list_inbox(owner="human")],
-            ["INSTANCE_SUCCEEDED", "TASK_SUCCEEDED"],
+            ["INSTANCE_SUCCEEDED"],
         )
 
         replay = self.application.publish_delivery_and_complete(
@@ -1497,7 +1497,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
         self.assertEqual(replay, completed)
         self.assertEqual(len(self.assets.list_assets("t_delivery_application")), 1)
-        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
+        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 1)
 
         with self.assertRaises(HarnessError) as new_delivery:
             self.application.publish_delivery_and_complete(
@@ -2078,7 +2078,7 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             "PUBLISHED",
         )
         self.assertEqual(self.application.recover(), [])
-        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 3)
+        self.assertEqual(len(self.approvals.list_inbox(owner="human")), 2)
 
     def test_delivery_contract_consumes_each_candidate_once_and_rejects_extras(self) -> None:
         task_id = "t_delivery_contract_cardinality"
@@ -2262,6 +2262,45 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             operation_id=f"prepare_{task_id}",
             envelope=envelope(f"prepare-{task_id}", created["revision"]),
         )
+
+    def test_background_observation_tracks_repeated_workbench_gates(self) -> None:
+        task_id = "t_background_observation"
+        self._running_image_task(task_id, 1)
+        self.fake_adapter.observation = AdapterObservation(
+            "WAITING_APPROVAL",
+            step_id="waiting_human_approval",
+            capabilities=("approve_taskbook",),
+            details={"job_id": "job_first"},
+        )
+
+        self.application.observe_active_instances()
+
+        first = self.approvals.list_approvals(task_id=task_id, status="PENDING")[0]
+        plan = self.store.plan.get(task_id, task_id)
+        self.assertEqual(plan["task"]["status"], "WAITING_APPROVAL")
+        self.assertEqual(self.approvals.unread_count(owner="human"), 1)
+
+        self.fake_adapter.observation = AdapterObservation(
+            "RUNNING", step_id="generating", details={"job_id": "job_running"}
+        )
+        self.application.observe_active_instances()
+        self.assertEqual(
+            self.approvals.get_approval(first["approval_id"])["approval"]["status"],
+            "APPROVED",
+        )
+        self.assertEqual(self.approvals.list_inbox(owner="human")[0]["status"], "HANDLED")
+
+        self.fake_adapter.observation = AdapterObservation(
+            "WAITING_APPROVAL",
+            step_id="waiting_human_approval",
+            capabilities=("approve_taskbook",),
+            details={"job_id": "job_second"},
+        )
+        self.application.observe_active_instances()
+        pending = self.approvals.list_approvals(task_id=task_id, status="PENDING")
+        self.assertEqual(len(pending), 1)
+        self.assertNotEqual(pending[0]["approval_id"], first["approval_id"])
+        self.assertEqual(self.approvals.unread_count(owner="human"), 1)
 
     def _running_image_task(self, task_id: str, count: int) -> int:
         created = create_task(self.commands, task_id, "auto")

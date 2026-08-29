@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -22,7 +23,7 @@ from ..services.process_runtime import (
     ProcessSpec,
     runtime_artifact_identity,
 )
-from ..storage.atomic import atomic_write_json, digest_json, read_json
+from ..storage.atomic import atomic_write_bytes, atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
 from ..storage.store import FileStateStore
 from .base import (
@@ -243,18 +244,55 @@ class PptAgentAdapter:
         if not isinstance(view, dict):
             self._protocol_error("PPT Agent returned an invalid project view.")
         state, phase = view.get("state"), view.get("phase")
-        caps = tuple(item for item in view.get("capabilities", []) if isinstance(item, str))
+        checkpoint_id = view.get("checkpoint_id")
+        raw_capabilities = view.get("capabilities")
+        if (
+            not isinstance(state, str)
+            or not isinstance(phase, str)
+            or not isinstance(checkpoint_id, str)
+            or not isinstance(raw_capabilities, list)
+            or any(not isinstance(item, str) for item in raw_capabilities)
+        ):
+            self._protocol_error("PPT Agent returned a malformed project state.")
+        caps = tuple(raw_capabilities)
+        active_job = view.get("active_job")
+        job_active = isinstance(active_job, dict) and active_job.get("status") in {
+            "queued",
+            "running",
+        }
+        waiting = (
+            (state == "intake_clarify" and phase == "waiting_clarification")
+            or (
+                state in {
+                    "narrative_structure",
+                    "slide_outline",
+                    "ppt_sample",
+                    "ppt_full",
+                }
+                and phase == "waiting_human_approval"
+            )
+        ) and not job_active
+        completed = state == "acceptance" and phase == "ready_for_review" and not job_active
+        if waiting and not caps:
+            self._protocol_error("PPT Agent returned a waiting state without capabilities.")
         return AdapterObservation(
-            "RUNNING",
+            "WAITING_APPROVAL" if waiting else "RUNNING",
             step_id=f"{state}:{phase}",
             capabilities=caps,
             details={
                 "project_id": instance_id,
                 "state": state,
                 "phase": phase,
-                "completed": False,
+                "checkpoint_id": checkpoint_id,
+                "job_id": checkpoint_id,
+                "completed": completed,
                 "export_ready": state == "acceptance",
                 "workbench_managed": False,
+                "approval_context": {
+                    "state": state,
+                    "phase": phase,
+                    "checkpoint_id": checkpoint_id,
+                },
             },
         )
 
@@ -268,7 +306,62 @@ class PptAgentAdapter:
         )
 
     def collect_deliveries(self, instance_id: str) -> list[DeliveryCandidate]:
-        return []
+        task_id = self._task_id_for_instance(instance_id)
+        base_url = self._base_url(task_id, instance_id)
+        view = self._request(base_url, "GET", f"/api/projects/{instance_id}")
+        if not isinstance(view, dict) or (
+            view.get("state"), view.get("phase")
+        ) != ("acceptance", "ready_for_review"):
+            return []
+        revision = view.get("full_deck_revision")
+        if not isinstance(revision, dict):
+            self._protocol_error("PPT Agent did not expose its accepted full-deck revision.")
+        export_path = revision.get("export_url")
+        revision_hash = revision.get("revision_hash")
+        if (
+            not isinstance(export_path, str)
+            or not export_path.startswith(f"/api/projects/{instance_id}/")
+            or not isinstance(revision_hash, str)
+        ):
+            self._protocol_error("PPT Agent returned an invalid accepted export reference.")
+        content = self._request_bytes(base_url, export_path)
+        digest = hashlib.sha256(content).hexdigest()
+        filename = f"presentation-{digest[:16]}.zip"
+        relative_path = f"instances/{instance_id}/outputs/{filename}"
+        destination = (
+            self.store.layout.initialize_task(task_id)[1] / relative_path
+        )
+        atomic_write_bytes(destination, content, mode=0o640)
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            raise HarnessError("TASK_NOT_FOUND", "The PPT task plan does not exist.")
+        card = next(
+            item for item in plan["task_cards"] if item["instance_id"] == instance_id
+        )
+        expected = [item for item in card["expected_deliveries"] if item["required"]]
+        declared = next(
+            (
+                item
+                for item in expected
+                if item["kind"] in {"archive", "presentation"}
+                and "application/zip" in item["accepted_mime_types"]
+            ),
+            None,
+        )
+        if declared is None:
+            self._protocol_error("The PPT task card does not accept the exported archive.")
+        return [
+            {
+                "source_relative_path": relative_path,
+                "kind": declared["kind"],
+                "role": declared["role"],
+                "description": "Accepted PPT full-deck export.",
+                "mime_type": "application/zip",
+                "size_bytes": len(content),
+                "sha256": digest,
+                "derivation": {"revision_hash": revision_hash},
+            }
+        ]
 
     def collect_usage(self, instance_id: str, cursor: str | None) -> list[UsageEvent]:
         return []
@@ -562,6 +655,27 @@ class PptAgentAdapter:
             return json.loads(content) if content else None
         except json.JSONDecodeError:
             self._protocol_error("PPT Agent returned invalid JSON.")
+
+    def _request_bytes(self, base_url: str, path: str) -> bytes:
+        request = Request(base_url + path, method="GET", headers={"Accept": "application/zip"})
+        try:
+            with urlopen(request, timeout=self.request_timeout_seconds) as response:
+                if response.status != 200:
+                    self._protocol_error("PPT Agent returned an unexpected export status.")
+                content = response.read()
+        except HTTPError as exc:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "PPT Agent rejected the export request.",
+                {"http_status": exc.code},
+            ) from None
+        except (OSError, TimeoutError, URLError):
+            raise HarnessError(
+                "PROCESS_START_FAILED", "PPT Agent export was not available."
+            ) from None
+        if not content:
+            self._protocol_error("PPT Agent returned an empty export.")
+        return content
 
     @staticmethod
     def _protocol_error(message: str) -> NoReturn:

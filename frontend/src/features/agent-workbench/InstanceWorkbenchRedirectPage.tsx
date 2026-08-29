@@ -1,11 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, workItemsQuery } from "../../api/queries";
+import { api, inboxQuery, workItemsQuery } from "../../api/queries";
 
 export function InstanceWorkbenchRedirectPage(): React.JSX.Element {
   const { instanceId = "" } = useParams();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const instance = useQuery({
     queryKey: ["instance-workbench-redirect", instanceId],
     queryFn: ({ signal }) => api.instance(instanceId, signal),
@@ -21,11 +22,17 @@ export function InstanceWorkbenchRedirectPage(): React.JSX.Element {
 
   useEffect(() => {
     if (!workItem) return;
-    navigate(
-      `/tasks/${encodeURIComponent(workItem.task_id)}/work-items/${encodeURIComponent(workItem.work_item_id)}`,
-      { replace: true },
-    );
-  }, [navigate, workItem]);
+    let active = true;
+    void api.viewInstance(instanceId).catch(() => undefined).then(() => {
+      if (!active) return;
+      void queryClient.invalidateQueries({ queryKey: inboxQuery.queryKey });
+      navigate(
+        `/tasks/${encodeURIComponent(workItem.task_id)}/work-items/${encodeURIComponent(workItem.work_item_id)}`,
+        { replace: true },
+      );
+    });
+    return () => { active = false; };
+  }, [instanceId, navigate, queryClient, workItem]);
 
   if (instance.isError || workItems.isError) {
     return (

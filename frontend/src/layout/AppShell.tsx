@@ -8,7 +8,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import type { ReadyResponse, TaskSummary } from "../api/client";
-import { api, readinessQuery, taskHistoryQuery } from "../api/queries";
+import { api, inboxQuery, readinessQuery, taskHistoryQuery } from "../api/queries";
 import { Icon } from "../components/Icon";
 import { WorkItemDetailsPanel } from "../features/task-board/TaskBoardPage";
 
@@ -218,6 +218,8 @@ export function AppShell(): React.JSX.Element {
   const queryClient = useQueryClient();
   const tasks = useQuery(taskHistoryQuery);
   const readiness = useQuery(readinessQuery);
+  const inbox = useQuery(inboxQuery);
+  const unreadCount = inbox.data?.unread_count ?? 0;
   const taskId = taskIdFromPath(location.pathname);
   const drawer = searchParams.get("drawer");
   const drawerTarget = searchParams.get("target");
@@ -306,7 +308,14 @@ export function AppShell(): React.JSX.Element {
           </nav>
 
           <nav className="workbench-utilities" aria-label="工作台工具">
-            <NavLink to="/inbox"><Icon name="inbox" /><span className="workbench-label">收件箱</span></NavLink>
+            <NavLink
+              to="/inbox"
+              aria-label={unreadCount ? `收件箱，${unreadCount} 条未查看消息` : "收件箱"}
+            >
+              <Icon name="inbox" />
+              <span className="workbench-label">收件箱</span>
+              {unreadCount ? <span className="workbench-inbox-count">{unreadCount}</span> : null}
+            </NavLink>
             <NavLink to="/settings"><Icon name="settings" /><span className="workbench-label">全局设置</span></NavLink>
           </nav>
         </aside>

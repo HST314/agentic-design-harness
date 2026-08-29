@@ -477,6 +477,135 @@ class ApprovalInboxService:
         values.sort(key=lambda item: (item["created_at"], item["sequence"], item["inbox_id"]))
         return values if limit is None else values[:limit]
 
+    def unread_count(self, *, owner: str) -> int:
+        """Count every unread item before API pagination is applied."""
+
+        return len(self.list_inbox(owner=owner, status="UNREAD", limit=None))
+
+    def mark_instance_notifications_read(
+        self, instance_id: str, *, owner: str = "human"
+    ) -> list[dict[str, Any]]:
+        """Mark notifications read only after their professional instance is opened."""
+
+        validate_identifier(instance_id, "instance_id")
+        matches = [
+            item
+            for item in self.list_inbox(owner=owner, status="UNREAD", limit=None)
+            if item["instance_id"] == instance_id
+        ]
+        updated: list[dict[str, Any]] = []
+        for item in matches:
+            try:
+                result = self.update_inbox_status(
+                    item["inbox_id"],
+                    "READ",
+                    CommandEnvelope(
+                        idempotency_key=f"view-{item['inbox_id']}-{item['store_revision']}",
+                        actor_type=cast(
+                            Literal["human", "master", "system", "adapter"], owner
+                        ),
+                        actor_id=f"{owner}_operator",
+                        expected_revision=item["store_revision"],
+                    ),
+                )
+            except HarnessError as exc:
+                if exc.code != "REVISION_CONFLICT":
+                    raise
+                continue
+            updated.append(result["item"])
+        return updated
+
+    def acknowledge_external_workflow_approvals(
+        self,
+        task_id: str,
+        instance_id: str,
+        *,
+        current_step_id: str | None,
+        current_operation_id: str | None,
+        actor_id: str,
+    ) -> list[dict[str, Any]]:
+        """Close workflow gates already handled inside a professional workbench."""
+
+        current_approval_id = None
+        if current_step_id is not None and current_operation_id is not None:
+            identity = digest_json(
+                {
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "step_id": current_step_id,
+                    "operation_id": current_operation_id,
+                }
+            )
+            current_approval_id = f"ap_{identity[:24]}"
+        resolved: list[dict[str, Any]] = []
+        for approval in self.list_approvals(
+            task_id=task_id, instance_id=instance_id, status="PENDING"
+        ):
+            if (
+                approval["kind"] != "WORKFLOW"
+                or approval["approval_id"] == current_approval_id
+            ):
+                continue
+            now = utc_now()
+            updated = {
+                **approval,
+                "status": "APPROVED",
+                "revision": approval["revision"] + 1,
+                "resolved_at": now,
+                "resolved_by_type": "adapter",
+                "resolved_by_id": actor_id,
+            }
+            updated.pop("store_revision", None)
+            self.store.approval.put(
+                task_id,
+                approval["approval_id"],
+                updated,
+                expected_revision=approval["store_revision"],
+                actor=Actor("adapter", actor_id),
+                command="acknowledge_external_workflow_approval",
+                idempotency_key=(
+                    f"external-resolution-{approval['approval_id']}-{approval['store_revision']}"
+                ),
+            )
+            resolved.append(updated)
+        # Approval and inbox records live in separate revisioned stores. Reconcile every
+        # adapter-approved gate so a restart between those writes cannot strand a stale
+        # notification indefinitely.
+        for approval in self.list_approvals(task_id=task_id, instance_id=instance_id):
+            if (
+                approval["kind"] != "WORKFLOW"
+                or approval["status"] != "APPROVED"
+                or approval.get("resolved_by_type") != "adapter"
+            ):
+                continue
+            self._handle_external_approval_notifications(approval, actor_id=actor_id)
+        return resolved
+
+    def _handle_external_approval_notifications(
+        self, approval: dict[str, Any], *, actor_id: str
+    ) -> None:
+        notifications = [
+            item
+            for item in self.list_inbox(owner=approval["owner"], limit=None)
+            if item["approval_id"] == approval["approval_id"]
+        ]
+        for item in notifications:
+            if item["status"] == "HANDLED":
+                continue
+            self.update_inbox_status(
+                item["inbox_id"],
+                "HANDLED",
+                CommandEnvelope(
+                    idempotency_key=(
+                        f"external-handled-{item['inbox_id']}-{item['store_revision']}"
+                    ),
+                    actor_type="adapter",
+                    actor_id=actor_id,
+                    expected_revision=item["store_revision"],
+                ),
+                enforce_owner=False,
+            )
+
     def commit_resolution(
         self,
         approval_id: str,
@@ -646,6 +775,8 @@ class ApprovalInboxService:
             if plan is None:
                 continue
             for instance in plan["instances"]:
+                if instance["agent_type"] not in {"image", "ppt"}:
+                    continue
                 status = instance["status"]
                 if status == "SUCCEEDED":
                     kind = "INSTANCE_SUCCEEDED"
@@ -691,28 +822,6 @@ class ApprovalInboxService:
                     dedupe_key=dedupe_key,
                     instance_id=instance["instance_id"],
                 )
-            task = plan["task"]
-            if task["status"] in {"SUCCEEDED", "PARTIAL"}:
-                self.ensure_notification(
-                    task_id,
-                    kind="TASK_SUCCEEDED",
-                    owner="human",
-                    title="主任务已完成",
-                    message=f"任务 {task_id} 的必需阶段均已完成。",
-                    deep_link=f"tasks/{task_id}",
-                    dedupe_key=f"task-complete:{task_id}:{task['plan_revision']}",
-                )
-            elif task["status"] == "FAILED":
-                self.ensure_notification(
-                    task_id,
-                    kind="TASK_FAILED",
-                    owner="human",
-                    title="主任务失败",
-                    message=f"任务 {task_id} 已进入失败状态。",
-                    deep_link=f"tasks/{task_id}",
-                    dedupe_key=f"task-failed:{task_id}:{task['plan_revision']}",
-                )
-
     def _next_sequence(self) -> int:
         with FileLock(self.sequence_lock, self.store.lock_timeout_seconds):
             current = read_json(self.sequence_path) if self.sequence_path.exists() else {"value": 0}

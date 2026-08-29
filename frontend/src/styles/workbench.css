@@ -328,6 +328,23 @@
   font-weight: 700;
 }
 
+.workbench-inbox-count {
+  min-width: 20px;
+  height: 20px;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--color-on-primary);
+  background: var(--color-primary);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
 .workbench-center { min-width: 0; }
 
 .workbench-topbar {
