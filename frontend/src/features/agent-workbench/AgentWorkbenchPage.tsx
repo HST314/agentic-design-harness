@@ -22,6 +22,27 @@ import {
 
 type FrameState = "loading" | "ready" | "failed";
 
+export function workbenchFocusPath(taskId: string, workItemId: string): string {
+  return `/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}/focus`;
+}
+
+export function FocusTabLink({ taskId, workItemId }: {
+  taskId: string;
+  workItemId: string;
+}): React.JSX.Element {
+  return (
+    <a
+      className="workbench-task-tabs__focus"
+      href={workbenchFocusPath(taskId, workItemId)}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label="在新标签页打开全屏工作台"
+    >
+      <Icon name="external-link" />新标签页
+    </a>
+  );
+}
+
 async function executeBridgeRequest(
   request: RuntimeSettingsBridgeRequest,
   instanceId: string,
@@ -151,7 +172,7 @@ function WorkbenchFailure({
           ) : (
             <a
               className="workbench-secondary-button"
-              href={`/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(workItemId)}/focus`}
+              href={workbenchFocusPath(taskId, workItemId)}
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -322,7 +343,12 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
 
   return (
     <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-label={item.title}>
-      {focusMode ? null : <TaskTabs taskId={taskId} />}
+      {focusMode ? null : (
+        <TaskTabs
+          taskId={taskId}
+          trailing={link.data?.ui_url ? <FocusTabLink taskId={taskId} workItemId={workItemId} /> : null}
+        />
+      )}
       {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 {agentLabel} 工作台地址…</div> : null}
       {link.isError || (link.data && !readyLink) ? (
         <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retry} retryLabel="重新检查链接" retryPending={false} taskId={taskId} workItemId={workItemId} focusMode={focusMode} agentType={item.agent_type} />
