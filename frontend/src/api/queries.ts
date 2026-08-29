@@ -121,6 +121,14 @@ export const deliveryBundlesQuery = (taskId: string) => queryOptions({
   retry: false,
 });
 
+export const sharedDeliveryFilesQuery = (taskId: string) => queryOptions({
+  queryKey: ["delivery-shared-files", taskId],
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.taskSharedFiles(taskId, signal),
+  refetchInterval: 5_000,
+  refetchIntervalInBackground: false,
+  retry: false,
+});
+
 export const inboxQuery = queryOptions({
   queryKey: ["inbox", "human"],
   queryFn: ({ signal }) => api.inbox(signal),

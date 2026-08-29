@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -104,6 +106,32 @@ class AssetServiceTests(unittest.TestCase):
         self.assertNotIn("path", download)
         self.assertEqual(download["stream"].read(), b"# Registered brief\n")
         download["stream"].close()
+
+    def test_shared_archive_zips_every_regular_file(self) -> None:
+        task_root = self.store.layout.workspace_root / "tasks" / "t_assets"
+        shared = task_root / "resources" / "shared"
+        (shared / "bundle_1.png").write_bytes(b"\x89PNG fake image")
+        (shared / "bundle_1.md").write_text("# 设计理念\n", encoding="utf-8")
+        notes = shared / "notes"
+        notes.mkdir()
+        (notes / "agent-log.txt").write_text("agent 写入的文档\n", encoding="utf-8")
+        (shared / ".pub_inflight.tmp").write_bytes(b"partial publication")
+        if hasattr(os, "symlink"):
+            (shared / "link.png").symlink_to(shared / "bundle_1.png")
+
+        archive = self.assets.download_shared_archive("t_assets")
+
+        self.assertEqual(archive["filename"], "Task t_assets-shared.zip")
+        with zipfile.ZipFile(io.BytesIO(archive["content"])) as zipped:
+            self.assertEqual(
+                zipped.namelist(),
+                ["bundle_1.md", "bundle_1.png", "notes/agent-log.txt"],
+            )
+            self.assertEqual(zipped.read("bundle_1.md").decode("utf-8"), "# 设计理念\n")
+            self.assertEqual(
+                zipped.read("notes/agent-log.txt").decode("utf-8"),
+                "agent 写入的文档\n",
+            )
 
     @unittest.skipIf(os.name == "nt", "Windows denies replacement of an open asset")
     def test_preview_and_download_keep_the_verified_inode_during_symlink_swap(self) -> None:

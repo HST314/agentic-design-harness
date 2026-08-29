@@ -7,6 +7,7 @@ import binascii
 import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Header, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
@@ -1272,6 +1273,26 @@ def build_v1_router(container: Container) -> APIRouter:
             media_type=download["mime_type"],
             headers=headers,
             background=BackgroundTask(download["stream"].close),
+        )
+
+    @router.get("/tasks/{task_id}/files/download-archive", tags=["assets"])
+    async def download_task_file_archive(
+        task_id: str,
+        group: Literal["shared"] = Query(default="shared"),
+    ) -> Response:
+        archive = await run_in_threadpool(
+            container.assets.download_shared_archive, task_id
+        )
+        filename = quote(archive["filename"], safe="")
+        content = archive["content"]
+        return Response(
+            content=content,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+                "Content-Length": str(len(content)),
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @router.post("/instances/{instance_id}/deliveries", tags=["assets"])

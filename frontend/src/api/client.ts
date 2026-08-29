@@ -1123,6 +1123,20 @@ export class ApiClient {
     return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/files?group=all`, signal);
   }
 
+  taskSharedFiles(
+    taskId: string,
+    signal?: AbortSignal,
+  ): Promise<{ schema_version: string; items: TaskFile[]; assets: AssetManifest[] }> {
+    return this.get(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/files?group=shared&limit=200`,
+      signal,
+    );
+  }
+
+  sharedArchiveUrl(taskId: string): string {
+    return `${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/files/download-archive?group=shared`;
+  }
+
   deliveryBundles(taskId: string, signal?: AbortSignal): Promise<DeliveryBundlesResponse> {
     return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/delivery-bundles`, signal);
   }

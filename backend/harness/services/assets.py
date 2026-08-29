@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import tempfile
 import uuid
+import zipfile
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
@@ -927,6 +929,40 @@ class AssetService(AssetRecoveryMixin):
                 "X-Content-Type-Options": "nosniff",
                 "Content-Security-Policy": "default-src 'none'; sandbox",
             },
+        }
+
+    def download_shared_archive(self, task_id: str) -> dict[str, Any]:
+        """Zip every regular file under resources/shared, including agent notes."""
+
+        task = self._require_task(task_id)
+        workspace = self.initialize_task_workspace(task_id)
+        shared_root = resolve_task_path(
+            workspace, "resources/shared", require_exists=False
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            if shared_root.is_dir():
+                for current, dirnames, filenames in os.walk(
+                    shared_root, followlinks=False
+                ):
+                    current_path = Path(current)
+                    dirnames[:] = sorted(
+                        name
+                        for name in dirnames
+                        if not is_link_or_reparse(current_path / name)
+                    )
+                    for name in sorted(filenames):
+                        path = current_path / name
+                        if is_link_or_reparse(path) or not path.is_file():
+                            continue
+                        if name.startswith(".") and name.endswith(".tmp"):
+                            continue
+                        arcname = path.relative_to(shared_root).as_posix()
+                        archive.write(path, arcname)
+        title = str(task.get("title") or task_id).strip() or task_id
+        return {
+            "content": buffer.getvalue(),
+            "filename": f"{title}-shared.zip",
         }
 
     def _open_browser_file(
