@@ -109,7 +109,7 @@ test.beforeEach(async ({ page }) => {
     task: task(),
     task_revision: taskRevision,
     gateway_available: true,
-    assets: uploaded ? [{ asset_id: asset.asset_id, filename: asset.filename, description: asset.description, manifest_relpath: `inputs/manifests/${asset.asset_id}.json` }] : [],
+    assets: uploaded ? [{ asset_id: asset.asset_id, filename: asset.filename, description: asset.description, mime_type: asset.mime_type, size_bytes: asset.size_bytes, manifest_relpath: `inputs/manifests/${asset.asset_id}.json` }] : [],
   });
 
   await page.route("**/readyz", async (route) => {
@@ -226,8 +226,8 @@ test("creates a task from the chat-style page and lands in the Master conversati
   await expect(page).toHaveURL(/\/tasks\/task_e2e_intake\/master$/);
   await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("秋季发布会三套主视觉方向");
   await expect(page.getByText("Master 正在分析与思考")).toBeVisible();
-  await expect(page.getByText("引用已有资源（创建提交后不可追加上传）")).toBeVisible();
-  await expect(page.locator('input[type="file"]')).toHaveCount(0);
+  await expect(page.getByText("引用任务资源")).toBeVisible();
+  await expect(page.getByLabel("添加图片 / PDF / TXT / MD")).toBeVisible();
   await expect(page.getByRole("link", { name: /秋季发布会三套主视觉方向/ })).toBeVisible();
 });
 
@@ -296,6 +296,14 @@ test("keeps the create thread flush with the shell and the Master composer at th
   expect(continuedLayout.bottomGap).toBeGreaterThanOrEqual(12);
   expect(continuedLayout.bottomGap).toBeLessThanOrEqual(20);
   expect(Math.abs(continuedLayout.textareaHeight - normalHeight)).toBeLessThanOrEqual(2);
+});
+
+test("shows prompt length without imposing a product character limit", async ({ page }) => {
+  await page.goto("/tasks/new");
+  const textarea = page.getByLabel("发送给 Master 的首条消息");
+  expect(await textarea.getAttribute("maxlength")).toBeNull();
+  await textarea.fill("长".repeat(20_001));
+  await expect(page.getByText("已输入 20,001 字")).toBeVisible();
 });
 
 test("keeps the launch-mode choice out of the conversational create flow", async ({ page }) => {

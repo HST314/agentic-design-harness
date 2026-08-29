@@ -194,6 +194,27 @@ class TaskIntakeApiTests(unittest.TestCase):
                     expected=5,
                 )
                 self.assertEqual(closed.status_code, 409, closed.text)
+                late = client.post(
+                    f"/api/v1/tasks/{task_id}/assets",
+                    files={"file": ("late.txt", b"late", "text/plain")},
+                    data={
+                        "declared_mime_type": "text/plain",
+                        "description": "Late task resource",
+                        "idempotency_key": "upload-late-task-resource",
+                        "actor_id": "human_operator",
+                        "expected_revision": "5",
+                    },
+                )
+                self.assertEqual(late.status_code, 200, late.text)
+                self.assertEqual(late.json()["intake"]["status"], "SUBMITTED")
+                self.assertEqual(late.json()["intake_revision"], 6)
+                master_assets = client.get(
+                    f"/api/v1/tasks/{task_id}/master/messages"
+                ).json()["assets"]
+                self.assertEqual(
+                    [asset["filename"] for asset in master_assets],
+                    ["notes.txt", "late.txt"],
+                )
 
                 renamed = client.patch(
                     f"/api/v1/tasks/{task_id}/presentation",
@@ -231,8 +252,33 @@ class TaskIntakeApiTests(unittest.TestCase):
                 self.assertEqual(recovered.json()["intake"]["status"], "SUBMITTED")
                 self.assertEqual(
                     [item["filename"] for item in recovered.json()["assets"]],
-                    ["notes.txt"],
+                    ["notes.txt", "late.txt"],
                 )
+
+    def test_prompt_has_no_product_character_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(
+                HarnessSettings(
+                    control_root=root / "control-data",
+                    workspace_root=root / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                    config_snapshot=build_config_snapshot(),
+                )
+            )
+            prompt = "长" * 20_001
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/task-intakes",
+                    json={
+                        "prompt": prompt,
+                        "start_policy": "manual",
+                        "envelope": self._envelope("create-long-intake", 0),
+                    },
+                )
+            self.assertEqual(created.status_code, 200, created.text)
+            self.assertEqual(created.json()["intake"]["prompt"], prompt)
+            self.assertEqual(created.json()["task"]["goal"], prompt)
 
     @staticmethod
     def _upload(

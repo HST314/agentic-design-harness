@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, useParams } from "react-router-dom";
 import type {
   CommandEnvelope,
@@ -10,6 +10,8 @@ import type {
   MasterSessionAsset,
   MasterSessionProposal,
   MasterSessionResponse,
+  TaskIntakeMutationResponse,
+  TaskIntakeResponse,
 } from "../../api/client";
 import { ApiError } from "../../api/client";
 import {
@@ -26,6 +28,14 @@ import type {
 } from "../../api/generated-contracts";
 import { ExpandableComposerTextarea } from "../../components/ExpandableComposerTextarea";
 import { Icon } from "../../components/Icon";
+import {
+  LocalUploadList,
+  MAX_TASK_FILES,
+  TaskAssetFilePicker,
+  formatBytes,
+  validateTaskAssetFiles,
+  type LocalUpload,
+} from "../../components/TaskAssetUploads";
 import { DisabledMasterComposer, PendingThinking, PendingUserMessage } from "./MasterChatBridge";
 import { TaskIntakePage } from "../task-intake/TaskIntakePage";
 
@@ -351,6 +361,8 @@ function TaskCardEditorDialog({
         ...asset,
         filename: "未命名任务资源",
         description: "计划引用资产",
+        mime_type: "application/octet-stream",
+        size_bytes: 0,
       });
     }
   }
@@ -717,8 +729,12 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   const [launchingCardId, setLaunchingCardId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pageAlert, setPageAlert] = useState<string | null>(null);
+  const [uploads, setUploads] = useState<LocalUpload[]>([]);
+  const [fileError, setFileError] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const threadEndRef = useRef<HTMLDivElement>(null);
+  const uploadControllers = useRef(new Map<string, AbortController>());
+  const intakeRevisionRef = useRef(0);
   const cardEditorTriggerRef = useRef<HTMLButtonElement | null>(null);
   const detailTriggerRef = useRef<HTMLButtonElement | null>(null);
   const closeCardEditor = () => {
@@ -729,6 +745,89 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
     setDetail(null);
     requestAnimationFrame(() => detailTriggerRef.current?.focus());
   };
+
+  useEffect(() => {
+    if (intake.data) {
+      intakeRevisionRef.current = Math.max(intakeRevisionRef.current, intake.data.intake_revision);
+    }
+  }, [intake.data]);
+
+  useEffect(() => () => {
+    uploadControllers.current.forEach((controller) => controller.abort());
+  }, []);
+
+  const mergeUploadResult = useCallback((response: TaskIntakeMutationResponse): void => {
+    intakeRevisionRef.current = Math.max(intakeRevisionRef.current, response.intake_revision);
+    queryClient.setQueryData<TaskIntakeResponse>(taskIntakeQuery(taskId).queryKey, (current) => {
+      if (!current) return current;
+      const assets = response.asset && !current.assets.some((asset) => asset.asset_id === response.asset?.asset_id)
+        ? [...current.assets, response.asset]
+        : current.assets;
+      return response.intake_revision < current.intake_revision
+        ? { ...current, assets }
+        : { ...current, intake: response.intake, intake_revision: response.intake_revision, assets };
+    });
+    if (response.asset) {
+      const asset = response.asset;
+      const assetId = asset.asset_id;
+      queryClient.setQueryData<MasterSessionResponse>(masterSessionQuery(taskId).queryKey, (current) => {
+        if (!current || current.assets.some((item) => item.asset_id === assetId)) return current;
+        return {
+          ...current,
+          assets: [...current.assets, {
+            asset_id: assetId,
+            filename: asset.filename,
+            description: asset.description,
+            mime_type: asset.mime_type,
+            size_bytes: asset.size_bytes,
+            manifest_relpath: `inputs/manifests/${assetId}.json`,
+          }],
+        };
+      });
+      setSelectedAssets((current) => new Set(current).add(assetId));
+    }
+    void queryClient.invalidateQueries({ queryKey: masterSessionQuery(taskId).queryKey });
+  }, [queryClient, taskId]);
+
+  const uploadOne = useCallback((item: LocalUpload): void => {
+    if (uploadControllers.current.has(item.id)) return;
+    const controller = new AbortController();
+    uploadControllers.current.set(item.id, controller);
+    void api.uploadTaskAsset(
+      taskId,
+      {
+        file: item.file,
+        declaredMimeType: item.declaredMimeType,
+        description: item.description,
+        envelope: envelope(item.id, intakeRevisionRef.current),
+      },
+      (progress) => setUploads((current) => current.map((entry) => entry.id === item.id ? { ...entry, progress } : entry)),
+      controller.signal,
+    ).then((response) => {
+      uploadControllers.current.delete(item.id);
+      mergeUploadResult(response);
+      setUploads((current) => current.filter((entry) => entry.id !== item.id));
+    }).catch((error: unknown) => {
+      uploadControllers.current.delete(item.id);
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setUploads((current) => current.filter((entry) => entry.id !== item.id));
+        return;
+      }
+      const message = error instanceof Error ? error.message : "上传失败，请重试。";
+      setUploads((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "failed", error: message, progress: 0 } : entry));
+      void queryClient.invalidateQueries({ queryKey: taskIntakeQuery(taskId).queryKey });
+    });
+  }, [mergeUploadResult, queryClient, taskId]);
+
+  useEffect(() => {
+    if (!session.data || !intake.data) return;
+    const uploading = uploads.filter((item) => item.status === "uploading").length;
+    const next = uploads.filter((item) => item.status === "queued").slice(0, Math.max(0, 3 - uploading));
+    if (!next.length) return;
+    const ids = new Set(next.map((item) => item.id));
+    setUploads((current) => current.map((item) => ids.has(item.id) ? { ...item, status: "uploading", error: null } : item));
+    next.forEach(uploadOne);
+  }, [intake.data, session.data, uploadOne, uploads]);
 
   const append = useMutation({
     mutationFn: ({ text, refs }: { text: string; refs: MasterAssetReference[] }) => api.appendMasterMessage(taskId, {
@@ -882,13 +981,22 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   const data: MasterSessionResponse = session.data;
   const active = data.thread.active_run;
   const busy = active?.status === "SUBMITTING" || active?.status === "RUNNING";
+  const activeUploads = uploads.some((item) => item.status === "queued" || item.status === "uploading");
+  const failedUploads = uploads.some((item) => item.status === "failed");
+  const serverBytes = data.assets.reduce((sum, asset) => sum + asset.size_bytes, 0);
+  const localBytes = uploads.reduce((sum, item) => sum + item.file.size, 0);
+  const addFiles = (files: File[]): void => {
+    const result = validateTaskAssetFiles(files, data.assets.length + uploads.length, serverBytes + localBytes);
+    setFileError(result.error);
+    if (result.uploads.length) setUploads((current) => [...current, ...result.uploads]);
+  };
   const timeline = buildMasterTimeline(data.messages, data.proposals);
   const refs = data.assets
     .filter((asset) => selectedAssets.has(asset.asset_id))
     .map(({ asset_id, manifest_relpath }) => ({ asset_id, manifest_relpath }));
   const sendMessage = (): void => {
     const text = content.trim();
-    if (!text || busy || append.isPending) return;
+    if (!text || busy || append.isPending || activeUploads || failedUploads) return;
     setNotice(null);
     append.mutate({ text, refs });
   };
@@ -942,7 +1050,6 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
           id="master-message"
           label="发送给 Master"
           textareaRef={composerRef}
-          maxLength={20_000}
           value={content}
           placeholder="补充目标、回答澄清，或说明需要调整的计划内容…"
           onChange={(event) => setContent(event.currentTarget.value)}
@@ -953,10 +1060,25 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
             }
           }}
         />
+        <div className="master-composer__asset-tools">
+          <TaskAssetFilePicker onFiles={addFiles} disabled={data.assets.length + uploads.length >= MAX_TASK_FILES} />
+          <span>{data.assets.length + uploads.length} / 20 个 · {formatBytes(serverBytes + localBytes)} / 200 MiB</span>
+        </div>
+        {fileError ? <p className="workbench-inline-error" role="alert">{fileError}</p> : null}
+        <LocalUploadList
+          items={uploads}
+          onDescription={(id, value) => setUploads((current) => current.map((item) => item.id === id ? { ...item, description: value } : item))}
+          onCancel={(id) => {
+            uploadControllers.current.get(id)?.abort();
+            if (!uploadControllers.current.has(id)) setUploads((current) => current.filter((item) => item.id !== id));
+          }}
+          onRetry={(id) => setUploads((current) => current.map((item) => item.id === id ? { ...item, status: "queued", error: null } : item))}
+        />
         {data.assets.length ? (
-          <fieldset><legend>引用已有资源（创建提交后不可追加上传）</legend><div>{data.assets.map((asset) => <label key={asset.asset_id}><input type="checkbox" checked={selectedAssets.has(asset.asset_id)} onChange={(event) => { const checked = event.currentTarget.checked; setSelectedAssets((current) => { const next = new Set(current); if (checked) next.add(asset.asset_id); else next.delete(asset.asset_id); return next; }); }} /><Icon name="file-check" /><span><strong>{asset.filename}</strong>{asset.description ? <small>{asset.description}</small> : null}</span></label>)}</div></fieldset>
+          <fieldset><legend>引用任务资源</legend><div>{data.assets.map((asset) => <label key={asset.asset_id}><input type="checkbox" checked={selectedAssets.has(asset.asset_id)} onChange={(event) => { const checked = event.currentTarget.checked; setSelectedAssets((current) => { const next = new Set(current); if (checked) next.add(asset.asset_id); else next.delete(asset.asset_id); return next; }); }} /><Icon name="file-check" /><span><strong>{asset.filename}</strong>{asset.description ? <small>{asset.description}</small> : null}</span></label>)}</div></fieldset>
         ) : null}
-        <footer><span>{content.length.toLocaleString("zh-CN")} / 20,000 · Enter 发送，Shift + Enter 换行</span><button type="submit" className="workbench-primary-button" aria-label="发送 Master 消息" disabled={!content.trim() || busy || append.isPending}>{append.isPending ? "正在保存…" : busy ? "等待 Master 完成" : "发送消息"}</button></footer>
+        <footer><span>已输入 {content.length.toLocaleString("zh-CN")} 字 · Enter 发送，Shift + Enter 换行</span><button type="submit" className="workbench-primary-button" aria-label="发送 Master 消息" disabled={!content.trim() || busy || append.isPending || activeUploads || failedUploads}>{append.isPending ? "正在保存…" : activeUploads ? "等待附件上传" : failedUploads ? "处理失败附件" : busy ? "等待 Master 完成" : "发送消息"}</button></footer>
+        {failedUploads ? <p className="workbench-inline-error" role="alert">请重试或移除失败文件后再发送消息。</p> : null}
         {notice ? <p className="master-composer__notice" role="status">{notice}</p> : null}
         {append.isError ? <p className="workbench-inline-error" role="alert">{append.error.message}</p> : null}
       </form>

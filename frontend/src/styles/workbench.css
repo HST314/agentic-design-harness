@@ -1086,6 +1086,7 @@
 .master-composer footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .master-composer footer > span { color: var(--color-muted-foreground); font-size: 12px; }
 .master-composer__notice { margin: 0; color: var(--color-success); font-size: 13px; font-weight: 600; }
+.master-composer__asset-tools { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); color: var(--color-muted-foreground); font-size: 12px; }
 
 .intake-chat {
   min-height: calc(100vh - 52px);

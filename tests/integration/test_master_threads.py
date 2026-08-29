@@ -309,11 +309,31 @@ class MasterThreadApiTests(unittest.TestCase):
                 )
                 self.assertEqual(application.saved, [])
 
+                late_upload = client.post(
+                    f"/api/v1/tasks/{task_id}/assets",
+                    files={"file": ("late.md", b"# late brief\n", "text/markdown")},
+                    data={
+                        "declared_mime_type": "text/markdown",
+                        "description": "后续补充约束",
+                        "idempotency_key": "upload-late-master-resource",
+                        "actor_id": "human_operator",
+                        "expected_revision": "3",
+                    },
+                )
+                self.assertEqual(late_upload.status_code, 200, late_upload.text)
+                late_asset_id = late_upload.json()["asset"]["asset_id"]
+                cast(Any, client.app).state.container.asset_understanding.prepare(
+                    task_id, [late_asset_id]
+                )
+                long_adjustment = "请把方向改得更克制。" + ("补充" * 10_000)
                 adjusted = client.post(
                     f"/api/v1/tasks/{task_id}/master/messages",
                     json={
-                        "content": "请把方向改得更克制。",
-                        "asset_refs": [],
+                        "content": long_adjustment,
+                        "asset_refs": [{
+                            "asset_id": late_asset_id,
+                            "manifest_relpath": f"inputs/manifests/{late_asset_id}.json",
+                        }],
                         "envelope": self._envelope(
                             "adjust-master-plan", first_session["thread_revision"]
                         ),
@@ -321,6 +341,11 @@ class MasterThreadApiTests(unittest.TestCase):
                 )
                 self.assertEqual(adjusted.status_code, 200, adjusted.text)
                 adjusted_session = adjusted.json()
+                self.assertEqual(adjusted_session["messages"][-2]["content"], long_adjustment)
+                self.assertEqual(
+                    adjusted_session["latest_proposal"]["execution_cards"][0]["input_assets"][0]["asset_id"],
+                    late_asset_id,
+                )
                 self.assertEqual(adjusted_session["latest_proposal"]["revision"], 2)
                 proposals = app.state.container.store.plan_proposal.list(task_id)
                 self.assertEqual(
