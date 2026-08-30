@@ -108,4 +108,21 @@ describe("runtime settings bridge protocol", () => {
       "workbench_complete_bridge_request_12345678",
     );
   });
+
+  test("accepts delivery status queries with the same bundle contract", () => {
+    const request = {
+      ...base,
+      action: "delivery.status",
+      payload: { bundle_id: "bundle_0123456789abcdef" },
+    };
+    expect(parseBridgeRequest(request, "instance_image", base.nonce)).toEqual(request);
+    expect(parseBridgeRequest({
+      ...request,
+      payload: { bundle_id: "bundle_0123456789abcdef", verbose: true },
+    }, "instance_image", base.nonce)).toBeNull();
+    expect(parseBridgeRequest({
+      ...request,
+      payload: { bundle_id: "../../etc" },
+    }, "instance_image", base.nonce)).toBeNull();
+  });
 });

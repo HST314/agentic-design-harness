@@ -43,7 +43,7 @@ export function FocusTabLink({ taskId, workItemId }: {
   );
 }
 
-async function executeBridgeRequest(
+export async function executeBridgeRequest(
   request: RuntimeSettingsBridgeRequest,
   instanceId: string,
   taskRevision: number | undefined,
@@ -52,9 +52,20 @@ async function executeBridgeRequest(
   if (request.action === "runtime_settings.get") {
     return api.instanceRuntimeSettings(instanceId);
   }
+  if (request.action === "delivery.status") {
+    const bundleId = String(request.payload.bundle_id);
+    const bundles = await api.deliveryBundles(scope.taskId);
+    const candidate = bundles.candidates.find((item) => (
+      item.bundle_id === bundleId && item.instance_id === instanceId
+    ));
+    return { bundle_id: bundleId, status: candidate?.status ?? "UNKNOWN" };
+  }
   if (request.action === "delivery.complete") {
     const bundleId = String(request.payload.bundle_id);
-    for (let attempt = 0; attempt < 80; attempt += 1) {
+    // Poll on a fixed deadline so the loop can never outrun the child's
+    // 30 second bridge timeout, no matter how slow a single read gets.
+    const deadline = Date.now() + 25_000;
+    while (Date.now() < deadline) {
       const bundles = await api.deliveryBundles(scope.taskId);
       const candidate = bundles.candidates.find((item) => (
         item.bundle_id === bundleId && item.instance_id === instanceId

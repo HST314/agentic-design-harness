@@ -57,6 +57,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         self.intent_root = store.layout.control_root / "application-intents"
         self.intent_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._instance_start_reconciled = False
+        self._delivery_observe_swept_at: dict[str, float] = {}
         self.start_operation_runner = StartOperationRunner(self._run_pending_starts)
         self.observation_runner = StartOperationRunner(
             self.observe_active_instances,
