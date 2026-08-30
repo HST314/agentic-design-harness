@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, Navigate, useParams } from "react-router-dom";
 import {
   agentWorkbenchLinkQuery,
   api,
@@ -166,13 +166,7 @@ function WorkbenchFailure({
   const agentLabel = agentType === "general" ? "通用助手" : agentType === "image" ? "图片助手" : "演示文稿助手";
   const heading = link?.link_status === "FRAME_BLOCKED"
     ? `${agentLabel} 无法安全内嵌`
-    : link?.link_status === "START_FAILED"
-      ? `${agentLabel} 启动未完成`
-      : link?.link_status === "STARTING"
-        ? `${agentLabel} 正在启动`
-    : link?.link_status === "NO_UI_URL"
-      ? `${agentLabel} 尚未提供工作台`
-      : `${agentLabel} 工作台加载失败`;
+    : `${agentLabel} 工作台加载失败`;
   return (
     <div className="agent-workbench-error" role="alert">
       <Icon name="status" />
@@ -349,21 +343,24 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
   }
 
   const readyLink = link.data?.embeddable && link.data.ui_url ? link.data : undefined;
+  // Entry is gated on the board/plan cards, so a not-ready workbench is no
+  // longer reachable from the main flow. Deep links that still land here are
+  // sent back to the board instead of showing the old red retry panel.
+  // STARTING keeps the loading state: the link query polls every second until
+  // the workbench URL is ready. FRAME_BLOCKED and frame load failures are
+  // genuine ready-workbench problems and keep the recovery actions below.
+  const frameBlocked = link.data?.link_status === "FRAME_BLOCKED";
+  const linkStarting = link.data?.link_status === "STARTING";
+  const linkNotReady = !frameBlocked && !linkStarting && (
+    !instanceId
+    || (!link.isPending && (link.isError || Boolean(link.data && !readyLink)))
+  );
+  if (linkNotReady) {
+    return <Navigate to={`/tasks/${encodeURIComponent(taskId)}/board`} replace />;
+  }
   const failureMessage = frameState === "failed"
     ? "工作台在 12 秒内未完成加载。可重新检查、返回看板，或在新标签页专注模式中尝试。"
-    : link.data?.link_status === "FRAME_BLOCKED"
-      ? "当前工作台拒绝安全内嵌。可直接打开原始工作台，或返回看板。"
-      : link.data?.link_status === "NO_UI_URL"
-        ? item.agent_type === "ppt"
-          ? "PPT 工作台尚未启动，请返回 Master 面板启动。"
-          : "工作台仍在准备中，请稍后重新检查。"
-        : link.data?.link_status === "STARTING"
-          ? `启动请求已保存，系统正在准备制品并启动 ${agentLabel}。`
-          : link.data?.link_status === "START_FAILED"
-            ? link.data.start_operation?.last_error?.message ?? `${agentLabel} 启动失败，可安全恢复启动。`
-        : link.data?.link_status === "ADAPTER_UNAVAILABLE"
-          ? link.data.diagnostic ?? "专业工作台暂时不可用，请检查运行环境；当前任务进度已保留。"
-          : link.error?.message ?? "当前专业工作台暂时不可用，请稍后重新检查。";
+    : "当前工作台拒绝安全内嵌。可直接打开原始工作台，或返回看板。";
 
   return (
     <section className={`workbench-page agent-workbench${focusMode ? " agent-workbench--focus" : ""}`} aria-label={item.title}>
@@ -373,8 +370,8 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
           trailing={link.data?.ui_url ? <FocusTabLink taskId={taskId} workItemId={workItemId} /> : null}
         />
       )}
-      {link.isPending ? <div className="agent-workbench__loading" role="status">正在获取受控 {agentLabel} 工作台地址…</div> : null}
-      {link.isError || (link.data && !readyLink) ? (
+      {link.isPending || linkStarting ? <div className="agent-workbench__loading" role="status">正在获取受控 {agentLabel} 工作台地址…</div> : null}
+      {frameBlocked && link.data ? (
         <WorkbenchFailure link={link.data} message={failureMessage} onRetry={retry} retryLabel="重新检查链接" retryPending={false} taskId={taskId} workItemId={workItemId} focusMode={focusMode} agentType={item.agent_type} />
       ) : null}
       {readyLink && frameState === "failed" ? (

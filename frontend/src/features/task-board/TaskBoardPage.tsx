@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, workItemDetailQuery, workItemsQuery } from "../../api/queries";
 import type { ContractWorkItemProjection } from "../../api/generated-contracts";
@@ -74,9 +74,67 @@ export function workbenchPath(item: ContractWorkItemProjection): string {
 }
 
 export function canEnterWorkbench(item: ContractWorkItemProjection): boolean {
-  if (item.agent_type !== "ppt") return true;
-  return ["STARTING", "RUNNING", "WAITING_APPROVAL", "SUCCEEDED"].includes(
+  return ["RUNNING", "WAITING_APPROVAL", "SUCCEEDED"].includes(
     item.current_instance?.status ?? "",
+  );
+}
+
+export function workbenchGateMessage(item: ContractWorkItemProjection): string {
+  const label = agentLabel(item.agent_type);
+  const status = item.current_instance?.status;
+  if (status === "STARTING") {
+    return `「${item.title}」的${label}工作台正在启动，请稍候片刻，待 Master 页显示「已就绪」后再进入。`;
+  }
+  if (status === "FAILED_TO_START" || status === "CRASHED" || status === "FAILED") {
+    return `「${item.title}」的${label}工作台启动未完成。请在 Master 页重试启动，待显示「已就绪」后再进入。`;
+  }
+  if (status === "UNAVAILABLE") {
+    return `「${item.title}」需要的${label}创作能力暂不可用，请返回 Master 页调整计划。`;
+  }
+  return `「${item.title}」的${label}工作台尚未启动。请在 Master 页启动该任务，待显示「已就绪」后再进入。`;
+}
+
+export function WorkbenchGateDialog({ item, open, onClose }: {
+  item: ContractWorkItemProjection;
+  open: boolean;
+  onClose: () => void;
+}): React.JSX.Element | null {
+  const ref = useRef<HTMLDialogElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (open && !dialog.open) {
+      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      dialog.showModal();
+    }
+    if (!open && dialog.open) {
+      dialog.close();
+      requestAnimationFrame(() => returnFocusRef.current?.focus());
+    }
+  }, [open]);
+
+  if (!open) return null;
+  return (
+    <dialog
+      ref={ref}
+      className="master-card-detail task-gate"
+      aria-labelledby="task-gate-title"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+    >
+      <header className="workbench-drawer__header">
+        <div><p className="workbench-eyebrow">专业工作台</p><h2 id="task-gate-title">工作台未就绪</h2></div>
+        <button type="button" className="workbench-icon-button" aria-label="关闭未就绪提示" onClick={onClose}><Icon name="close" /></button>
+      </header>
+      <div className="master-card-detail__body">
+        <p className="task-gate__message">{workbenchGateMessage(item)}</p>
+      </div>
+      <footer className="workbench-dialog-actions task-gate__actions">
+        <button type="button" className="workbench-secondary-button" onClick={onClose}>知道了</button>
+        <Link className="workbench-primary-button" to={`/tasks/${encodeURIComponent(item.task_id)}/master`}>前往 Master</Link>
+      </footer>
+    </dialog>
   );
 }
 
@@ -102,6 +160,7 @@ function WorkItemCard({
     ? `${item.pending_approvals.length} 项待审批`
     : item.alerts[0]?.message;
   const canEnter = canEnterWorkbench(item);
+  const [gateOpen, setGateOpen] = useState(false);
   const statusValue: EditableBusinessStatus = item.business_status === "EXCEPTION"
     ? "TODO"
     : item.business_status;
@@ -117,7 +176,6 @@ function WorkItemCard({
         <div><dt>重试</dt><dd>{item.attempts.length}</dd></div>
       </dl>
       {attention ? <p className="task-card__attention"><Icon name="status" />{attention}</p> : null}
-      {!canEnter ? <p className="task-card__entry-hint">请从 Master 启动，启动成功后可进入 PPT 工作台</p> : null}
     </>
   );
   return (
@@ -152,10 +210,16 @@ function WorkItemCard({
           {cardBody}
         </Link>
       ) : (
-        <div className="task-card__entry task-card__entry--disabled" aria-label={`${item.title}，PPT 工作台尚未启动`}>
+        <button
+          type="button"
+          className="task-card__entry"
+          aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，${agentLabel(item.agent_type)}工作台未就绪，打开提示`}
+          onClick={() => setGateOpen(true)}
+        >
           {cardBody}
-        </div>
+        </button>
       )}
+      <WorkbenchGateDialog item={item} open={gateOpen} onClose={() => setGateOpen(false)} />
       <footer>
         <span>{item.delivery_count ? `${item.delivery_count} 个交付物` : "暂无交付"}</span>
         <time dateTime={item.updated_at}>{formatTime(item.updated_at)}</time>
