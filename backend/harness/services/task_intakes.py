@@ -227,6 +227,7 @@ class TaskIntakeService:
             command="upload_task_intake_asset",
             source="web_task_intake",
             require_draft=True,
+            asset_key_prefix="intake-asset",
         )
 
     def upload_task_asset(
@@ -250,6 +251,7 @@ class TaskIntakeService:
             command="upload_task_asset",
             source="web_task_asset",
             require_draft=False,
+            asset_key_prefix="task-asset",
         )
 
     def _upload_asset(
@@ -264,6 +266,7 @@ class TaskIntakeService:
         command: str,
         source: str,
         require_draft: bool,
+        asset_key_prefix: str,
     ) -> dict[str, Any]:
         self._require_human(envelope)
         if len(description) > 4_000:
@@ -292,7 +295,7 @@ class TaskIntakeService:
             filename=filename,
             description=description,
             source=source,
-            idempotency_key=self._derived_key("task-asset", identity),
+            idempotency_key=self._derived_key(asset_key_prefix, identity),
             max_file_bytes=min(PER_MIME_LIMITS[declared_mime_type], remaining),
         )
         if manifest["mime_type"] != declared_mime_type:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +17,58 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class TaskIntakeApiTests(unittest.TestCase):
+    def test_draft_upload_replays_an_asset_imported_with_the_legacy_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = create_app(
+                HarnessSettings(
+                    control_root=Path(temporary) / "control-data",
+                    workspace_root=Path(temporary) / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                    config_snapshot=build_config_snapshot(),
+                )
+            )
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/task-intakes",
+                    json={
+                        "prompt": "Create a launch visual.",
+                        "start_policy": "manual",
+                        "envelope": self._envelope("create-legacy-replay", 0),
+                    },
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                task_id = created.json()["task"]["task_id"]
+                upload_key = "legacy-upload-replay"
+                identity = hashlib.sha256(f"{task_id}\0{upload_key}".encode()).hexdigest()
+                legacy_manifest = app.state.container.assets.import_stream(
+                    task_id,
+                    io.BytesIO(b"legacy brief\n"),
+                    filename="legacy.txt",
+                    description="Description for legacy.txt",
+                    source="web_task_intake",
+                    idempotency_key=f"intake-asset-{identity[:40]}",
+                    max_file_bytes=10 * 1024 * 1024,
+                )
+
+                replayed = self._upload(
+                    client,
+                    task_id,
+                    name="legacy.txt",
+                    content=b"legacy brief\n",
+                    mime="text/plain",
+                    key=upload_key,
+                    expected=1,
+                )
+
+                self.assertEqual(replayed.status_code, 200, replayed.text)
+                self.assertEqual(
+                    replayed.json()["asset"]["asset_id"], legacy_manifest["asset_id"]
+                )
+                self.assertEqual(
+                    client.get(f"/api/v1/task-intakes/{task_id}").json()["intake"]["asset_ids"],
+                    [legacy_manifest["asset_id"]],
+                )
+
     def test_precreation_snapshot_survives_a_failure_before_the_task_fact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

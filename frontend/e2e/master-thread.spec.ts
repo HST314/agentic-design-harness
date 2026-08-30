@@ -4,6 +4,7 @@ import { expect, test } from "@playwright/test";
 test.beforeEach(async ({ page }, testInfo) => {
   const startPolicy: "manual" | "auto" = testInfo.title.includes("auto mode") ? "auto" : "manual";
   const delayMessageResponse = testInfo.title.includes("sends revision feedback");
+  const switchesTasks = testInfo.title.includes("clears task-scoped upload state");
   let threadRevision = 4;
   let confirmed = false;
   let busy = false;
@@ -174,13 +175,24 @@ test.beforeEach(async ({ page }, testInfo) => {
   });
 
   await page.route("**/readyz", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ready" }) }));
-  await page.route("**/api/v1/tasks", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", items: [{ task_id: "task_master_e2e", status: confirmed ? "RUNNING" : "DRAFT", title: "秋季发布会主视觉", updated_at: "2026-08-22T10:02:00Z", revision: confirmed ? 4 : 2 }] }) }));
+  await page.route("**/api/v1/tasks", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", items: [
+    { task_id: "task_master_e2e", status: confirmed ? "RUNNING" : "DRAFT", title: "秋季发布会主视觉", updated_at: "2026-08-22T10:02:00Z", revision: confirmed ? 4 : 2 },
+    ...(switchesTasks ? [{ task_id: "task_master_other", status: "DRAFT", title: "冬季发布会主视觉", updated_at: "2026-08-22T10:02:00Z", revision: 2 }] : []),
+  ] }) }));
   await page.route("**/api/v1/task-intakes/task_master_e2e", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", intake: { schema_version: "1.0", task_id: "task_master_e2e", prompt: "为秋季发布会生成主视觉。", upload_session: { session_id: "upload_master", status: "LOCKED", accepted_mime_types: ["text/markdown"], max_files: 20, max_total_bytes: 209715200 }, asset_ids: ["asset_brief"], status: "SUBMITTED", start_policy: startPolicy, revision: 3, created_at: "2026-08-22T10:00:00Z", updated_at: "2026-08-22T10:01:00Z", submitted_at: "2026-08-22T10:01:00Z" }, intake_revision: 3, task: session().task, task_revision: session().task_revision, assets: [] }) }));
   await page.route("**/api/v1/tasks/task_master_e2e/asset-uploads", async (route) => {
+    if (switchesTasks) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", error: { code: "UPLOAD_FAILED", message: "simulated upload failure", retryable: true, details: {} } }) });
+      return;
+    }
     const uploaded = { asset_id: "asset_late", filename: "late.md", description: "", mime_type: "text/markdown", size_bytes: 12, sha256: "b".repeat(64), created_at: "2026-08-22T10:03:00Z" };
     taskAssets.push({ ...uploaded, manifest_relpath: "inputs/manifests/asset_late.json" });
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", intake: { status: "SUBMITTED" }, intake_revision: 4, asset: uploaded }) });
   });
+  if (switchesTasks) {
+    await page.route("**/api/v1/task-intakes/task_master_other", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", intake: { schema_version: "1.0", task_id: "task_master_other", prompt: "为冬季发布会生成主视觉。", upload_session: { session_id: "upload_other", status: "LOCKED", accepted_mime_types: ["text/markdown"], max_files: 20, max_total_bytes: 209715200 }, asset_ids: [], status: "SUBMITTED", start_policy: "manual", revision: 1, created_at: "2026-08-22T10:00:00Z", updated_at: "2026-08-22T10:01:00Z", submitted_at: "2026-08-22T10:01:00Z" }, intake_revision: 1, task: { ...session().task, task_id: "task_master_other", title: "冬季发布会主视觉" }, task_revision: 2, assets: [] }) }));
+    await page.route("**/api/v1/tasks/task_master_other/master/messages", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...session(), task: { ...session().task, task_id: "task_master_other", title: "冬季发布会主视觉" }, assets: [] }) }));
+  }
   await page.route("**/api/v1/instances/instance_direction_a*", async (route) => {
     if (instancePhase === "starting") {
       startPolls += 1;
@@ -368,6 +380,22 @@ test("uploads and selects a new task resource after intake submission", async ({
   });
   await expect(page.getByRole("checkbox", { name: /late\.md/ })).toBeChecked();
   await expect(page.getByText("2 / 20 个")).toBeVisible();
+});
+
+test("clears task-scoped upload state when navigating between tasks", async ({ page }) => {
+  await page.goto("/tasks/task_master_e2e/master");
+  await page.getByLabel("添加图片 / PDF / TXT / MD").setInputFiles({
+    name: "failed-a.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from("# task A only"),
+  });
+  await expect(page.getByText("simulated upload failure")).toBeVisible();
+
+  await page.getByRole("link", { name: "冬季发布会主视觉" }).click();
+
+  await expect(page).toHaveURL(/\/tasks\/task_master_other\/master$/);
+  await expect(page.getByText("failed-a.md")).toHaveCount(0);
+  await expect(page.getByText("simulated upload failure")).toHaveCount(0);
 });
 
 test("launches one card from the chat flow and streams its live start status", async ({ page }) => {

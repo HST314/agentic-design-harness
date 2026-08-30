@@ -1119,5 +1119,5 @@ export function MasterRoutePage(): React.JSX.Element {
   if (intake.isError && !(intake.error instanceof ApiError && intake.error.status === 404)) {
     return <section className="workbench-page"><div className="workbench-intake-card"><p className="workbench-inline-error" role="alert">{intake.error.message}</p></div></section>;
   }
-  return <MasterWorkspace taskId={taskId} />;
+  return <MasterWorkspace key={taskId} taskId={taskId} />;
 }
