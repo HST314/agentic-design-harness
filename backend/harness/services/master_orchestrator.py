@@ -36,6 +36,7 @@ _MAX_VALIDATION_REPAIR_ATTEMPTS = 2
 _INVALID_PLAN_MESSAGE = "Master 生成的计划未通过结构校验, 请重新发送要求后重试。"
 _ASSET_CATALOG_MESSAGE = "Master 无法读取任务素材, 请检查素材后重试。"
 _ASSET_TOOL_MESSAGE = "Master 无法读取所选素材内容, 请检查素材后重试。"
+_TOOL_ROUND_LIMIT_MESSAGE = "Master 已完成素材读取, 但未能生成最终计划, 请重试。"
 _PLAN_REASON_BY_MESSAGE = {
     (
         "Every input asset in a Master execution card requires an asset_id/page or "
@@ -194,9 +195,13 @@ class MasterOrchestrator:
             )
             output: dict[str, Any] | None = None
             for round_index in range(snapshot.runtime.master.max_tool_rounds + 1):
+                final_round = round_index == snapshot.runtime.master.max_tool_rounds
                 result = client.complete_structured(
                     messages=messages,
-                    tools=tools,
+                    # Reserve the last call for producing the structured answer. A
+                    # model that keeps requesting tools must not turn a tool-budget
+                    # exhaustion into a bogus schema-validation error.
+                    tools=[] if final_round else tools,
                     response_schema=response_schema,
                     idempotency_key=f"{run['run_id']}-round-{round_index}",
                 )
@@ -204,10 +209,10 @@ class MasterOrchestrator:
                 if not result.tool_calls:
                     output = result.output
                     break
-                if round_index >= snapshot.runtime.master.max_tool_rounds:
+                if final_round:
                     raise MasterOrchestratorFailure(
-                        "MASTER_OUTPUT_INVALID",
-                        _INVALID_PLAN_MESSAGE,
+                        "MASTER_TOOL_ROUND_LIMIT",
+                        _TOOL_ROUND_LIMIT_MESSAGE,
                         self._diagnostic(
                             phase="model_tool_loop",
                             cause_code="MASTER_TOOL_ROUND_LIMIT",

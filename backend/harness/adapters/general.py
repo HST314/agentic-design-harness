@@ -19,6 +19,7 @@ from ..services.process_runtime import AgentRuntimeArtifact, ProcessSpec
 from ..services.task_config import TaskConfigService
 from ..storage.atomic import atomic_write_bytes, atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
+from ..storage.paths import resolve_task_path
 from ..storage.store import FileStateStore
 from .base import (
     AdapterCommandResult,
@@ -216,38 +217,31 @@ class GeneralAgentAdapter:
                     "The General Agent input manifest has the wrong owner.",
                     {"asset_id": asset_id},
                 )
-            selected_root = task_root / "inputs" / "selected" / asset_id
-            selected_parent = task_root / "inputs" / "selected"
             try:
-                if selected_root.is_symlink() or not selected_root.resolve(
-                    strict=True
-                ).is_relative_to(selected_parent.resolve(strict=True)):
-                    raise OSError
-                candidates = [
-                    path
-                    for path in selected_root.iterdir()
-                    if path.is_file() and not path.is_symlink()
-                ]
-            except OSError:
-                candidates = []
-            if len(candidates) != 1:
+                source = resolve_task_path(
+                    task_root,
+                    str(manifest["relative_path"]),
+                    allowed_prefixes=("inputs/original",),
+                )
+            except (OSError, HarnessError) as exc:
                 raise HarnessError(
                     "INPUT_ASSET_NOT_MATERIALIZED",
                     "The General Agent input file is unavailable.",
                     {"asset_id": asset_id},
-                )
-            source = candidates[0]
-            if manifest["size_bytes"] > _GENERAL_INPUT_MAX_BYTES:
+                ) from exc
+            try:
+                size = source.stat().st_size
+                digest = hashlib.sha256()
+                with source.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError as exc:
                 raise HarnessError(
                     "INPUT_ASSET_NOT_MATERIALIZED",
-                    "The General Agent input file exceeds its readable size limit.",
+                    "The General Agent input file is unavailable.",
                     {"asset_id": asset_id},
-                )
-            raw = source.read_bytes()
-            if (
-                len(raw) != manifest["size_bytes"]
-                or hashlib.sha256(raw).hexdigest() != manifest["sha256"]
-            ):
+                ) from exc
+            if size != manifest["size_bytes"] or digest.hexdigest() != manifest["sha256"]:
                 raise HarnessError(
                     "INPUT_ASSET_NOT_MATERIALIZED",
                     "The General Agent input file failed integrity verification.",
@@ -267,7 +261,14 @@ class GeneralAgentAdapter:
                 str(manifest["mime_type"]).startswith("text/")
                 or manifest["mime_type"] == "application/json"
             ):
+                if size > _GENERAL_INPUT_MAX_BYTES:
+                    raise HarnessError(
+                        "INPUT_ASSET_NOT_MATERIALIZED",
+                        "The General Agent input file exceeds its readable size limit.",
+                        {"asset_id": asset_id},
+                    )
                 try:
+                    raw = source.read_bytes()
                     text = decode_local_text(raw)
                 except UnicodeDecodeError as exc:
                     raise HarnessError(
@@ -290,7 +291,25 @@ class GeneralAgentAdapter:
                 and not understanding.is_symlink()
                 and understanding.stat().st_size <= _GENERAL_INPUT_MAX_BYTES
             ):
-                document = read_json(understanding)
+                try:
+                    document = read_json(understanding)
+                    self.contracts.validate("asset-understanding", document)
+                except (OSError, ValueError, HarnessError) as exc:
+                    raise HarnessError(
+                        "INPUT_ASSET_NOT_MATERIALIZED",
+                        "The General Agent input understanding is invalid.",
+                        {"asset_id": asset_id},
+                    ) from exc
+                if (
+                    document["asset_id"] != asset_id
+                    or document["source_sha256"] != manifest["sha256"]
+                    or document["status"] != "READY"
+                ):
+                    raise HarnessError(
+                        "INPUT_ASSET_NOT_MATERIALIZED",
+                        "The General Agent input understanding has the wrong owner.",
+                        {"asset_id": asset_id},
+                    )
                 understanding_path = asset_root / "understanding.json"
                 atomic_write_json(understanding_path, document, mode=0o640)
                 mappings.append(

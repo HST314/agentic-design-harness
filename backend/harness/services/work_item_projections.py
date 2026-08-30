@@ -32,11 +32,23 @@ def logical_work_items(
         item
         for item in store.plan_proposal.list(task_id)
         if item["status"] == "CONFIRMED"
-        and item["revision"] == plan["task"]["plan_revision"]
+        and item["revision"] <= plan["task"]["plan_revision"]
     ]
     if confirmed:
-        latest = max(confirmed, key=lambda item: (item["revision"], item["updated_at"]))
-        return deepcopy(latest["work_items"])
+        # Append proposals contain only the newly added batch. Fold every
+        # confirmed revision into one read model so a later batch cannot hide
+        # already-running cards. A later occurrence of the same stable identity
+        # remains authoritative for merge/retry proposals.
+        by_id: dict[str, dict[str, Any]] = {}
+        for proposal in sorted(
+            confirmed, key=lambda item: (item["revision"], item["updated_at"])
+        ):
+            for work_item in proposal["work_items"]:
+                by_id[work_item["work_item_id"]] = deepcopy(work_item)
+        current_stage_ids = {stage["stage_id"] for stage in stages}
+        return [
+            item for item in by_id.values() if item["stage_id"] in current_stage_ids
+        ]
 
     # API-created legacy plans predate WorkItem. Each immutable execution card
     # receives a deterministic logical identity so retries never duplicate it.

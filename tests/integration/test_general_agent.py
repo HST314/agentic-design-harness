@@ -58,9 +58,9 @@ class GeneralAgentIntegrationTests(unittest.TestCase):
                     source="user_upload",
                     idempotency_key="general-gb18030-input",
                 )
-                app.state.container.assets.select_inputs(
-                    task_id, [imported["asset_id"]], manifest_id="selected_general"
-                )
+                # Assets uploaded after the initial intake are authorized by the
+                # TaskCard and their immutable manifest; they need not appear in
+                # the intake-time selected snapshot.
                 app.state.container.asset_understanding.prepare(task_id, [imported["asset_id"]])
                 planned = client.put(
                     f"/api/v1/tasks/{task_id}/plan",
