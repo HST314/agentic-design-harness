@@ -212,6 +212,9 @@ test.beforeEach(async ({ page }) => {
 
 test("creates a task from the chat-style page and lands in the Master conversation", async ({ page }) => {
   await page.goto("/tasks/new");
+  const intakePicker = page.locator(".task-asset-file-picker");
+  await expect(intakePicker).toHaveText("");
+  await expect(page.getByText("后续对话仍可添加附件")).toHaveCount(0);
   const send = page.getByRole("button", { name: "发送并创建任务" });
   await expect(send).toBeDisabled();
   await page.getByLabel("发送给 Master 的首条消息").fill("秋季发布会三套主视觉方向");
@@ -227,7 +230,10 @@ test("creates a task from the chat-style page and lands in the Master conversati
   await expect(page.getByRole("log", { name: "Master 消息记录" })).toContainText("秋季发布会三套主视觉方向");
   await expect(page.getByText("Master 正在分析与思考")).toBeVisible();
   await expect(page.getByText("引用任务资源")).toBeVisible();
-  await expect(page.getByLabel("添加图片 / PDF / TXT / MD")).toBeVisible();
+  const runningPicker = page.locator(".task-asset-file-picker");
+  await expect(runningPicker).toHaveText("");
+  await expect(runningPicker).toHaveCSS("width", "44px");
+  await expect(runningPicker).toHaveCSS("height", "44px");
   await expect(page.getByRole("link", { name: /秋季发布会三套主视觉方向/ })).toBeVisible();
 });
 
