@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +17,58 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class TaskIntakeApiTests(unittest.TestCase):
+    def test_draft_upload_replays_an_asset_imported_with_the_legacy_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = create_app(
+                HarnessSettings(
+                    control_root=Path(temporary) / "control-data",
+                    workspace_root=Path(temporary) / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                    config_snapshot=build_config_snapshot(),
+                )
+            )
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/task-intakes",
+                    json={
+                        "prompt": "Create a launch visual.",
+                        "start_policy": "manual",
+                        "envelope": self._envelope("create-legacy-replay", 0),
+                    },
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                task_id = created.json()["task"]["task_id"]
+                upload_key = "legacy-upload-replay"
+                identity = hashlib.sha256(f"{task_id}\0{upload_key}".encode()).hexdigest()
+                legacy_manifest = app.state.container.assets.import_stream(
+                    task_id,
+                    io.BytesIO(b"legacy brief\n"),
+                    filename="legacy.txt",
+                    description="Description for legacy.txt",
+                    source="web_task_intake",
+                    idempotency_key=f"intake-asset-{identity[:40]}",
+                    max_file_bytes=10 * 1024 * 1024,
+                )
+
+                replayed = self._upload(
+                    client,
+                    task_id,
+                    name="legacy.txt",
+                    content=b"legacy brief\n",
+                    mime="text/plain",
+                    key=upload_key,
+                    expected=1,
+                )
+
+                self.assertEqual(replayed.status_code, 200, replayed.text)
+                self.assertEqual(
+                    replayed.json()["asset"]["asset_id"], legacy_manifest["asset_id"]
+                )
+                self.assertEqual(
+                    client.get(f"/api/v1/task-intakes/{task_id}").json()["intake"]["asset_ids"],
+                    [legacy_manifest["asset_id"]],
+                )
+
     def test_precreation_snapshot_survives_a_failure_before_the_task_fact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -194,6 +249,27 @@ class TaskIntakeApiTests(unittest.TestCase):
                     expected=5,
                 )
                 self.assertEqual(closed.status_code, 409, closed.text)
+                late = client.post(
+                    f"/api/v1/tasks/{task_id}/asset-uploads",
+                    files={"file": ("late.txt", b"late", "text/plain")},
+                    data={
+                        "declared_mime_type": "text/plain",
+                        "description": "Late task resource",
+                        "idempotency_key": "upload-late-task-resource",
+                        "actor_id": "human_operator",
+                        "expected_revision": "5",
+                    },
+                )
+                self.assertEqual(late.status_code, 200, late.text)
+                self.assertEqual(late.json()["intake"]["status"], "SUBMITTED")
+                self.assertEqual(late.json()["intake_revision"], 6)
+                master_assets = client.get(
+                    f"/api/v1/tasks/{task_id}/master/messages"
+                ).json()["assets"]
+                self.assertEqual(
+                    [asset["filename"] for asset in master_assets],
+                    ["notes.txt", "late.txt"],
+                )
 
                 renamed = client.patch(
                     f"/api/v1/tasks/{task_id}/presentation",
@@ -253,8 +329,87 @@ class TaskIntakeApiTests(unittest.TestCase):
                 self.assertEqual(recovered.json()["intake"]["status"], "SUBMITTED")
                 self.assertEqual(
                     [item["filename"] for item in recovered.json()["assets"]],
-                    ["notes.txt"],
+                    ["notes.txt", "late.txt"],
                 )
+
+    def test_prompt_has_no_product_character_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(
+                HarnessSettings(
+                    control_root=root / "control-data",
+                    workspace_root=root / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                    config_snapshot=build_config_snapshot(),
+                )
+            )
+            prompt = "长" * 20_001
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/task-intakes",
+                    json={
+                        "prompt": prompt,
+                        "start_policy": "manual",
+                        "envelope": self._envelope("create-long-intake", 0),
+                    },
+                )
+            self.assertEqual(created.status_code, 200, created.text)
+            self.assertEqual(created.json()["intake"]["prompt"], prompt)
+            self.assertEqual(created.json()["task"]["goal"], prompt)
+
+    def test_late_upload_route_does_not_shadow_the_json_import_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(
+                HarnessSettings(
+                    control_root=root / "control-data",
+                    workspace_root=root / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                    config_snapshot=build_config_snapshot(),
+                )
+            )
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/task-intakes",
+                    json={
+                        "prompt": "Create a launch visual.",
+                        "start_policy": "manual",
+                        "envelope": self._envelope("create-for-route-split", 0),
+                    },
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                task_id = created.json()["task"]["task_id"]
+
+                revision = app.state.container.store.task.revision(task_id, task_id)
+                imported = client.post(
+                    f"/api/v1/tasks/{task_id}/assets",
+                    json={
+                        "filename": "imported.md",
+                        "content_base64": base64.b64encode(b"# imported\n").decode("ascii"),
+                        "description": "JSON import stays on the original route",
+                        "operation_id": "import_after_route_split",
+                        "envelope": self._envelope("import-via-json", revision),
+                    },
+                )
+                self.assertEqual(imported.status_code, 200, imported.text)
+                self.assertTrue(
+                    imported.json()["manifest"]["relative_path"].endswith("/imported.md")
+                )
+
+                revision = app.state.container.store.task.revision(task_id, task_id)
+                uploaded = client.post(
+                    f"/api/v1/tasks/{task_id}/asset-uploads",
+                    files={"file": ("uploaded.md", b"# uploaded\n", "text/markdown")},
+                    data={
+                        "declared_mime_type": "text/markdown",
+                        "description": "Multipart upload on its own route",
+                        "idempotency_key": "upload-after-json-import",
+                        "actor_id": "human_operator",
+                        "expected_revision": str(revision),
+                    },
+                )
+                self.assertEqual(uploaded.status_code, 200, uploaded.text)
+                self.assertEqual(uploaded.json()["asset"]["filename"], "uploaded.md")
 
     @staticmethod
     def _upload(

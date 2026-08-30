@@ -57,7 +57,7 @@ class CreateTaskRequest(StrictRequest):
     )
     task_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     title: str = Field(min_length=1, max_length=500)
-    goal: str = Field(min_length=1, max_length=20_000)
+    goal: str = Field(min_length=1)
     master_owner: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     start_policy: Literal["manual", "auto"] = "manual"
     input_manifest: str = Field(min_length=1, max_length=512)
@@ -84,7 +84,7 @@ class RetryStartOperationRequest(StrictRequest):
 
 
 class CreateTaskIntakeRequest(StrictRequest):
-    prompt: str = Field(min_length=1, max_length=20_000)
+    prompt: str = Field(min_length=1)
     start_policy: Literal["manual", "auto"] | None = None
     envelope: CommandEnvelope
 
@@ -116,7 +116,7 @@ class MasterAssetReference(StrictRequest):
 
 
 class AppendMasterMessageRequest(StrictRequest):
-    content: str = Field(min_length=1, max_length=20_000)
+    content: str = Field(min_length=1)
     asset_refs: list[MasterAssetReference] = Field(default_factory=list, max_length=20)
     envelope: CommandEnvelope
 
@@ -198,6 +198,12 @@ class ResolveApprovalRequest(StrictRequest):
     decision: Literal["APPROVED", "REJECTED"]
     action: str | None = Field(default=None, min_length=1, max_length=128)
     payload: dict[str, Any] = Field(default_factory=dict)
+    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
+class CompleteDeliveryBundleRequest(StrictRequest):
+    instance_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
     envelope: CommandEnvelope
 
@@ -383,6 +389,36 @@ def build_v1_router(container: Container) -> APIRouter:
         try:
             return await run_in_threadpool(
                 container.task_intakes.upload_asset,
+                task_id,
+                file.file,
+                filename=file.filename or "upload",
+                declared_mime_type=declared_mime_type,
+                description=description,
+                envelope=CommandEnvelope(
+                    idempotency_key=idempotency_key,
+                    actor_type="human",
+                    actor_id=actor_id,
+                    expected_revision=expected_revision,
+                ),
+            )
+        finally:
+            await file.close()
+
+    @router.post("/tasks/{task_id}/asset-uploads", tags=["assets"])
+    async def upload_task_asset(
+        task_id: str,
+        file: Annotated[UploadFile, File()],
+        declared_mime_type: Annotated[str, Form(min_length=1, max_length=128)],
+        idempotency_key: Annotated[str, Form(min_length=1, max_length=128)],
+        actor_id: Annotated[
+            str, Form(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+        ],
+        expected_revision: Annotated[int, Form(ge=0)],
+        description: Annotated[str, Form(max_length=4_000)] = "",
+    ) -> dict[str, Any]:
+        try:
+            return await run_in_threadpool(
+                container.task_intakes.upload_task_asset,
                 task_id,
                 file.file,
                 filename=file.filename or "upload",
@@ -1248,6 +1284,40 @@ def build_v1_router(container: Container) -> APIRouter:
             "manifests": manifests,
             "reviews": reviews,
         }
+
+    @router.get(
+        "/tasks/{task_id}/delivery-bundles/{bundle_id}/status", tags=["assets"]
+    )
+    async def delivery_bundle_status(
+        task_id: str,
+        bundle_id: str,
+        instance_id: str = Query(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$"),
+    ) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.application.delivery_bundle_status,
+            task_id,
+            instance_id,
+            bundle_id,
+        )
+        return {"schema_version": "1.0", **result}
+
+    @router.post(
+        "/tasks/{task_id}/delivery-bundles/{bundle_id}/complete", tags=["assets"]
+    )
+    async def complete_delivery_bundle(
+        task_id: str,
+        bundle_id: str,
+        body: CompleteDeliveryBundleRequest,
+    ) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.application.complete_delivery_bundle,
+            task_id,
+            body.instance_id,
+            bundle_id,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
 
     @router.get(
         "/tasks/{task_id}/delivery-bundles/{bundle_id}/preview", tags=["assets"]

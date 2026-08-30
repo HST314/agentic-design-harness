@@ -31,8 +31,7 @@
     },
     "goal": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 20000
+      "minLength": 1
     },
     "master_owner": {
       "$ref": "common.schema.json#/$defs/identifier"

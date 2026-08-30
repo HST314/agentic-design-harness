@@ -93,6 +93,8 @@ export interface MasterAssetReference {
 export interface MasterSessionAsset extends MasterAssetReference {
   filename: string;
   description: string;
+  mime_type: string;
+  size_bytes: number;
 }
 
 export type MasterSessionProposal = ContractPlanProposal & {
@@ -713,6 +715,15 @@ export interface DeliveryBundlesResponse {
   reviews: DeliveryReview[];
 }
 
+export interface DeliveryBundleStatusResponse {
+  schema_version: string;
+  bundle_id: string;
+  instance_id: string;
+  status: DeliveryBundleCandidate["status"] | "UNKNOWN";
+  candidate: DeliveryBundleCandidate | null;
+  bundle_manifest: BundleManifest | null;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -1029,10 +1040,48 @@ export class ApiClient {
     onProgress: (percent: number) => void,
     signal: AbortSignal,
   ): Promise<TaskIntakeMutationResponse> {
+    return this.uploadAssetToPath(
+      `/api/v1/task-intakes/${encodeURIComponent(taskId)}/assets`,
+      input,
+      onProgress,
+      signal,
+    );
+  }
+
+  uploadTaskAsset(
+    taskId: string,
+    input: {
+      file: File;
+      declaredMimeType: string;
+      description: string;
+      envelope: CommandEnvelope;
+    },
+    onProgress: (percent: number) => void,
+    signal: AbortSignal,
+  ): Promise<TaskIntakeMutationResponse> {
+    return this.uploadAssetToPath(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/asset-uploads`,
+      input,
+      onProgress,
+      signal,
+    );
+  }
+
+  private uploadAssetToPath(
+    path: string,
+    input: {
+      file: File;
+      declaredMimeType: string;
+      description: string;
+      envelope: CommandEnvelope;
+    },
+    onProgress: (percent: number) => void,
+    signal: AbortSignal,
+  ): Promise<TaskIntakeMutationResponse> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       const abort = (): void => xhr.abort();
-      xhr.open("POST", `${this.baseUrl}/api/v1/task-intakes/${encodeURIComponent(taskId)}/assets`);
+      xhr.open("POST", `${this.baseUrl}${path}`);
       xhr.setRequestHeader("Accept", "application/json");
       xhr.responseType = "json";
       xhr.upload.addEventListener("progress", (event) => {
@@ -1155,6 +1204,37 @@ export class ApiClient {
 
   deliveryBundles(taskId: string, signal?: AbortSignal): Promise<DeliveryBundlesResponse> {
     return this.get(`/api/v1/tasks/${encodeURIComponent(taskId)}/delivery-bundles`, signal);
+  }
+
+  deliveryBundleStatus(
+    taskId: string,
+    instanceId: string,
+    bundleId: string,
+    signal?: AbortSignal,
+  ): Promise<DeliveryBundleStatusResponse> {
+    const query = new URLSearchParams({ instance_id: instanceId });
+    return this.get(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/delivery-bundles/${encodeURIComponent(bundleId)}/status?${query.toString()}`,
+      signal,
+    );
+  }
+
+  completeDeliveryBundle(
+    taskId: string,
+    bundleId: string,
+    body: {
+      instance_id: string;
+      operation_id: string;
+      envelope: CommandEnvelope;
+    },
+    signal?: AbortSignal,
+  ): Promise<DeliveryBundleStatusResponse> {
+    return this.send(
+      "POST",
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/delivery-bundles/${encodeURIComponent(bundleId)}/complete`,
+      body,
+      signal,
+    );
   }
 
   async previewDeliveryMarkdown(taskId: string, bundleId: string, signal?: AbortSignal): Promise<string> {
@@ -1296,11 +1376,13 @@ export class ApiClient {
     method: "DELETE" | "PATCH" | "POST" | "PUT",
     path: string,
     body: object,
+    signal?: AbortSignal,
   ): Promise<Response> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     });
     if (!response.ok) throw await this.error(response);
     return (await response.json()) as Response;

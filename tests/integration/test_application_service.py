@@ -2100,6 +2100,175 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.application.observe_delivery_sources_throttled(task_id)
         self.assertEqual(len(collections), 2)
 
+    def test_complete_delivery_bundle_targets_one_instance_and_replays_published(self) -> None:
+        task_id = "t_delivery_complete_fast_path"
+        self._running_image_task(task_id, 2)
+        image = b"\x89PNG\r\n\x1a\nfast-path-final-image"
+        note = b"# Fast path design note\n"
+        instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
+        (instance_root / "outputs" / "fast-path-image.png").write_bytes(image)
+        (instance_root / "outputs" / "fast-path-note.md").write_bytes(note)
+        (instance_root / "outputs" / "alternate-fast-path-image.png").write_bytes(image)
+        (instance_root / "outputs" / "alternate-fast-path-note.md").write_bytes(note)
+        card = self.store.plan.get(task_id, task_id)["task_cards"][0]
+        candidate = {
+            "schema_version": "1.0",
+            "bundle_id": "bundle_fast_path_01",
+            "task_id": task_id,
+            "work_item_id": "work_fast_path_01",
+            "instance_id": "i_image_1",
+            "task_card_revision": card["revision"],
+            "branch_id": "main",
+            "checkpoint_id": "checkpoint_0123456789abcdef01234567",
+            "image": {
+                "private_relative_path": "instances/i_image_1/outputs/fast-path-image.png",
+                "mime_type": "image/png",
+                "size_bytes": len(image),
+                "sha256": hashlib.sha256(image).hexdigest(),
+                "width": 1920,
+                "height": 1080,
+            },
+            "design_note": {
+                "private_relative_path": "instances/i_image_1/outputs/fast-path-note.md",
+                "mime_type": "text/markdown",
+                "size_bytes": len(note),
+                "sha256": hashlib.sha256(note).hexdigest(),
+            },
+            "status": "PENDING_CONFIRMATION",
+            "created_at": "2026-08-30T07:00:00Z",
+            "decided_at": None,
+            "actor": None,
+            "publication_batch_id": None,
+        }
+        alternate = deepcopy(candidate)
+        alternate.update(
+            bundle_id="bundle_fast_path_02",
+            checkpoint_id="checkpoint_89abcdef0123456701234567",
+            created_at="2026-08-30T07:01:00Z",
+        )
+        alternate["image"]["private_relative_path"] = (
+            "instances/i_image_1/outputs/alternate-fast-path-image.png"
+        )
+        alternate["design_note"]["private_relative_path"] = (
+            "instances/i_image_1/outputs/alternate-fast-path-note.md"
+        )
+        self.fake_adapter.delivery_bundles = [candidate, alternate]
+        self.fake_adapter.observation = AdapterObservation(
+            "RUNNING", step_id="completed", details={"completed": True}
+        )
+        collections: list[str] = []
+        collect = self.fake_adapter.collect_delivery_bundles
+
+        def counting_collect(instance_id: str):
+            collections.append(instance_id)
+            return collect(instance_id)
+
+        self.fake_adapter.collect_delivery_bundles = counting_collect
+
+        status = self.application.delivery_bundle_status(
+            task_id, "i_image_1", candidate["bundle_id"]
+        )
+        self.assertEqual(status["status"], "UNKNOWN")
+        self.assertEqual(collections, [])
+
+        with patch.object(
+            self.application,
+            "_commit_delivery_completion_result",
+            side_effect=SimulatedCrash("before_complete_result_commit"),
+        ), self.assertRaises(SimulatedCrash):
+            self.application.complete_delivery_bundle(
+                task_id,
+                "i_image_1",
+                candidate["bundle_id"],
+                operation_id="complete_fast_path_01",
+                envelope=envelope(
+                    "complete-fast-path-01",
+                    self.store.task.revision(task_id, task_id),
+                ),
+            )
+        bound_intent = read_json(self.application._intent_path("complete_fast_path_01"))
+        self.assertEqual(bound_intent["kind"], "COMPLETE_DELIVERY_BUNDLE")
+        self.assertEqual(bound_intent["state"], "BOUND")
+        self.assertIsNone(bound_intent["result"])
+        self.application.recover()
+
+        result = self.application.complete_delivery_bundle(
+            task_id,
+            "i_image_1",
+            candidate["bundle_id"],
+            operation_id="complete_fast_path_01",
+            envelope=envelope(
+                "complete-fast-path-01",
+                self.store.task.revision(task_id, task_id),
+            ),
+        )
+
+        self.assertEqual(result["status"], "PUBLISHED")
+        committed_intent = read_json(
+            self.application._intent_path("complete_fast_path_01")
+        )
+        self.assertEqual(committed_intent["state"], "COMMITTED")
+        self.assertEqual(collections, ["i_image_1"])
+        self.assertEqual(
+            {item["manifest"]["relative_path"] for item in self.assets.list_assets(task_id)},
+            {
+                "resources/shared/bundle_fast_path_01.png",
+                "resources/shared/bundle_fast_path_01.md",
+            },
+        )
+
+        replay = self.application.complete_delivery_bundle(
+            task_id,
+            "i_image_1",
+            candidate["bundle_id"],
+            operation_id="complete_fast_path_01",
+            envelope=envelope(
+                "complete-fast-path-01",
+                self.store.task.revision(task_id, task_id),
+            ),
+        )
+        self.assertEqual(replay["status"], "PUBLISHED")
+        self.assertEqual(collections, ["i_image_1"])
+
+        alternate_result = self.application.complete_delivery_bundle(
+            task_id,
+            "i_image_1",
+            alternate["bundle_id"],
+            operation_id="complete_fast_path_02",
+            envelope=envelope(
+                "complete-fast-path-02",
+                self.store.task.revision(task_id, task_id),
+            ),
+        )
+        self.assertEqual(alternate_result["status"], "PUBLISHED")
+
+        with self.assertRaises(HarnessError) as different_bundle:
+            self.application.complete_delivery_bundle(
+                task_id,
+                "i_image_1",
+                alternate["bundle_id"],
+                operation_id="complete_fast_path_01",
+                envelope=envelope(
+                    "complete-fast-path-01",
+                    self.store.task.revision(task_id, task_id),
+                ),
+            )
+        self.assertEqual(different_bundle.exception.code, "IDEMPOTENCY_CONFLICT")
+
+        with self.assertRaises(HarnessError) as different_actor:
+            self.application.complete_delivery_bundle(
+                task_id,
+                "i_image_1",
+                candidate["bundle_id"],
+                operation_id="complete_fast_path_01",
+                envelope=envelope(
+                    "complete-fast-path-01",
+                    self.store.task.revision(task_id, task_id),
+                    actor_id="alternate_human",
+                ),
+            )
+        self.assertEqual(different_actor.exception.code, "IDEMPOTENCY_CONFLICT")
+
     def test_delivery_read_sweep_skips_agents_without_bundle_collection(self) -> None:
         task_id = "t_delivery_sweep_scope"
         created = create_task(self.commands, task_id, "auto")
