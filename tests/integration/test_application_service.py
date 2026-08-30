@@ -428,6 +428,60 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(self.fake_adapter.prepare_calls, ["i_image_1", "i_image_1"])
         self.application.cancel_instance("t_single_start_failure", "i_image_1")
 
+    def test_sibling_start_queues_while_confirmed_start_is_preparing(self) -> None:
+        task_id = "t_sibling_start_during_prepare"
+        created = create_task(self.commands, task_id)
+        draft = image_plan(task_id, count=2)
+        saved = self.application.save_plan_and_create_instances(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_sibling_start_during_prepare",
+            envelope=envelope("save-sibling-start-during-prepare", created["revision"]),
+        )
+        self._configure_runtime_artifact("sibling-start-during-prepare-agent")
+        prepare_started = threading.Event()
+        release_prepare = threading.Event()
+        original_prepare = self.fake_adapter.prepare
+
+        def slow_first_prepare(request):
+            if request.instance["instance_id"] == "i_image_1":
+                prepare_started.set()
+                if not release_prepare.wait(3):
+                    raise AssertionError("test did not release the slow prepare")
+            return original_prepare(request)
+
+        self.application.start_monitoring()
+        with patch.object(self.fake_adapter, "prepare", side_effect=slow_first_prepare):
+            first = self.application.confirm_and_start_ready_instances(
+                task_id,
+                operation_id="confirm_first_sibling",
+                envelope=envelope("confirm-first-sibling", saved["task_revision"]),
+                only_instance_ids=["i_image_1"],
+            )
+            self.assertEqual(first["state"], "QUEUED")
+            self.assertTrue(prepare_started.wait(1))
+
+            # This is deliberately the page's pre-confirmation task revision. The
+            # first start advanced the task aggregate, but not this sibling's card.
+            second = self.application.start_instance(
+                task_id,
+                "i_image_2",
+                operation_id="start_second_sibling",
+                envelope=envelope("start-second-sibling", saved["task_revision"]),
+            )
+            self.assertEqual(second["state"], "QUEUED")
+            release_prepare.set()
+            first_done = self._wait_for_start_operation("confirm_first_sibling")
+            second_done = self._wait_for_start_operation("start_second_sibling")
+
+        self.assertEqual(first_done["state"], "COMMITTED")
+        self.assertEqual(second_done["state"], "COMMITTED")
+        self.assertEqual(self.fake_adapter.prepare_calls, ["i_image_1", "i_image_2"])
+        self.application.cancel_instance(task_id, "i_image_1")
+        self.application.cancel_instance(task_id, "i_image_2")
+
     def test_failed_restart_keeps_the_existing_process_running(self) -> None:
         created = create_task(self.commands, "t_restart_prepare_failure")
         draft = image_plan("t_restart_prepare_failure")

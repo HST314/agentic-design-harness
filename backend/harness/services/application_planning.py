@@ -402,7 +402,13 @@ class ApplicationPlanningMixin:
             )
             if active is not None:
                 return self._start_operation_summary(active)
-            self.commands.validate_task_revision(task_id, envelope.expected_revision)
+            # A sibling instance start advances the aggregate task revision. That
+            # revision is therefore not a valid compare-and-swap boundary for an
+            # independently startable card. The task lock plus the instance state
+            # checks below protect the actual start boundary; restarts retain their
+            # aggregate revision guard because they replace an active process.
+            if kind == "RESTART_INSTANCE":
+                self.commands.validate_task_revision(task_id, envelope.expected_revision)
             plan = self._plan(task_id)
             instance = self._instance(task_id, instance_id)
             if kind == "START_INSTANCE":

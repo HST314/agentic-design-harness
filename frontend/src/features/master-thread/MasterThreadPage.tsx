@@ -607,7 +607,7 @@ function ProposalCardGroup({
   proposal,
   instanceStatuses,
   unfinishedImageInstanceIds,
-  launchingCardId,
+  launchingCardIds,
   onLaunchCard,
   onShowDetail,
   onAdjust,
@@ -615,7 +615,7 @@ function ProposalCardGroup({
   proposal: MasterSessionProposal;
   instanceStatuses: MasterSessionResponse["instance_statuses"];
   unfinishedImageInstanceIds: MasterSessionResponse["unfinished_image_instance_ids"];
-  launchingCardId: string | null;
+  launchingCardIds: ReadonlySet<string>;
   onLaunchCard: (proposal: MasterSessionProposal, card: ProposalTaskCard) => void;
   onShowDetail: (proposal: MasterSessionProposal, card: ProposalTaskCard, trigger: HTMLButtonElement) => void;
   onAdjust: (proposal: MasterSessionProposal) => void;
@@ -651,8 +651,8 @@ function ProposalCardGroup({
                 ? unfinishedImageInstanceIds.length
                 : 0
             }
-            launchPending={launchingCardId === card.card_id}
-            launchBlocked={launchingCardId !== null}
+            launchPending={launchingCardIds.has(card.card_id)}
+            launchBlocked={launchingCardIds.has(card.card_id)}
             onLaunch={() => onLaunchCard(proposal, card)}
             onShowDetail={(trigger) => onShowDetail(proposal, card, trigger)}
           />
@@ -717,17 +717,13 @@ function TaskCardDetailDialog({
 
 function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
   const queryClient = useQueryClient();
-  const [pauseMasterPolling, setPauseMasterPolling] = useState(false);
-  const session = useQuery({
-    ...masterSessionQuery(taskId),
-    enabled: !pauseMasterPolling,
-  });
+  const session = useQuery(masterSessionQuery(taskId));
   const intake = useQuery(taskIntakeQuery(taskId));
   const [content, setContent] = useState("");
   const [selectedAssets, setSelectedAssets] = useState<Set<string>>(() => new Set());
   const [detail, setDetail] = useState<{ proposal: MasterSessionProposal; card: ProposalTaskCard } | null>(null);
   const [editingCard, setEditingCard] = useState<{ proposal: MasterSessionProposal; card: ProposalTaskCard } | null>(null);
-  const [launchingCardId, setLaunchingCardId] = useState<string | null>(null);
+  const [launchingCardIds, setLaunchingCardIds] = useState<Set<string>>(() => new Set());
   const [notice, setNotice] = useState<string | null>(null);
   const [pageAlert, setPageAlert] = useState<string | null>(null);
   const [uploads, setUploads] = useState<LocalUpload[]>([]);
@@ -903,9 +899,8 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
       return { confirmation: null };
     },
     onMutate: ({ card }) => {
-      setLaunchingCardId(card.card_id);
+      setLaunchingCardIds((current) => new Set(current).add(card.card_id));
       setPageAlert(null);
-      setPauseMasterPolling(true);
     },
     onSuccess: (result, { card }) => {
       if (result.confirmation) {
@@ -916,6 +911,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         setNotice("已受理，该子任务正在启动。");
       }
       void queryClient.invalidateQueries({ queryKey: instanceStartQuery(card.instance_id, true).queryKey });
+      void queryClient.invalidateQueries({ queryKey: masterSessionQuery(taskId).queryKey });
     },
     onError: (error) => {
       setPageAlert(error instanceof Error ? error.message : "子任务启动失败，请重试。");
@@ -923,9 +919,12 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
         void queryClient.invalidateQueries({ queryKey: masterSessionQuery(taskId).queryKey });
       }
     },
-    onSettled: () => {
-      setLaunchingCardId(null);
-      setPauseMasterPolling(false);
+    onSettled: (_data, _error, { card }) => {
+      setLaunchingCardIds((current) => {
+        const next = new Set(current);
+        next.delete(card.card_id);
+        return next;
+      });
     },
   });
   const reviseCard = useMutation({
@@ -1020,7 +1019,7 @@ function MasterWorkspace({ taskId }: { taskId: string }): React.JSX.Element {
             proposal={item.proposal}
             instanceStatuses={data.instance_statuses ?? {}}
             unfinishedImageInstanceIds={data.unfinished_image_instance_ids}
-            launchingCardId={launchingCardId}
+            launchingCardIds={launchingCardIds}
             onLaunchCard={(proposal, card) => {
               launch.reset();
               setNotice(null);

@@ -566,8 +566,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     ),
                 ):
                     latest = read_json(path)
-                    if latest["state"] in {"QUEUED", "RUNNING"}:
-                        self._resume_start(path, None)
+                    if latest["state"] not in {"QUEUED", "RUNNING"}:
+                        continue
+                    if latest["state"] == "QUEUED":
+                        latest.update({"state": "RUNNING", "updated_at": utc_now()})
+                        atomic_write_json(path, latest)
+                # Runtime preparation and process/adapter startup are intentionally
+                # outside the task lock. Sibling cards must remain enqueueable while
+                # this legacy batch-shaped operation performs slow external I/O.
+                self._resume_start(path, None)
                 continue
             with (
                 FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
