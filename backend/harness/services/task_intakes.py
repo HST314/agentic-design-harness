@@ -69,7 +69,7 @@ class TaskIntakeService:
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
         normalized_prompt = prompt.strip()
-        if not normalized_prompt or len(normalized_prompt) > 20_000:
+        if not normalized_prompt:
             raise HarnessError("VALIDATION_ERROR", "The task Prompt is invalid.")
         if start_policy not in {"manual", "auto"}:
             raise HarnessError("VALIDATION_ERROR", "The task start policy is invalid.")
@@ -217,6 +217,57 @@ class TaskIntakeService:
         description: str,
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
+        return self._upload_asset(
+            task_id,
+            stream,
+            filename=filename,
+            declared_mime_type=declared_mime_type,
+            description=description,
+            envelope=envelope,
+            command="upload_task_intake_asset",
+            source="web_task_intake",
+            require_draft=True,
+            asset_key_prefix="intake-asset",
+        )
+
+    def upload_task_asset(
+        self,
+        task_id: str,
+        stream: BinaryIO,
+        *,
+        filename: str,
+        declared_mime_type: str,
+        description: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Append an input resource at any point in the task lifecycle."""
+        return self._upload_asset(
+            task_id,
+            stream,
+            filename=filename,
+            declared_mime_type=declared_mime_type,
+            description=description,
+            envelope=envelope,
+            command="upload_task_asset",
+            source="web_task_asset",
+            require_draft=False,
+            asset_key_prefix="task-asset",
+        )
+
+    def _upload_asset(
+        self,
+        task_id: str,
+        stream: BinaryIO,
+        *,
+        filename: str,
+        declared_mime_type: str,
+        description: str,
+        envelope: CommandEnvelope,
+        command: str,
+        source: str,
+        require_draft: bool,
+        asset_key_prefix: str,
+    ) -> dict[str, Any]:
         self._require_human(envelope)
         if len(description) > 4_000:
             raise HarnessError("VALIDATION_ERROR", "The file description is too long.")
@@ -226,14 +277,14 @@ class TaskIntakeService:
                 "ASSET_VALIDATION_FAILED",
                 "The filename extension and declared MIME type do not match an allowed format.",
             )
-        intake = self._draft(task_id)
+        intake = self._draft(task_id) if require_draft else self._intake(task_id)
         actual_revision = self.store.task_intake.revision(task_id, task_id)
         self._allow_commutative_revision(
             task_id, envelope.expected_revision, actual_revision
         )
         existing = self._asset_summaries(task_id, intake["asset_ids"])
         if len(existing) >= MAX_FILES:
-            raise HarnessError("ASSET_VALIDATION_FAILED", "The intake already has 20 files.")
+            raise HarnessError("ASSET_VALIDATION_FAILED", "The task already has 20 files.")
         remaining = MAX_TOTAL_BYTES - sum(item["size_bytes"] for item in existing)
         identity = hashlib.sha256(
             f"{task_id}\0{envelope.idempotency_key}".encode()
@@ -243,8 +294,8 @@ class TaskIntakeService:
             stream,
             filename=filename,
             description=description,
-            source="web_task_intake",
-            idempotency_key=self._derived_key("intake-asset", identity),
+            source=source,
+            idempotency_key=self._derived_key(asset_key_prefix, identity),
             max_file_bytes=min(PER_MIME_LIMITS[declared_mime_type], remaining),
         )
         if manifest["mime_type"] != declared_mime_type:
@@ -265,15 +316,14 @@ class TaskIntakeService:
             "sha256": manifest["sha256"],
         }
         with self.commands.task_guard(task_id):
-            replay = self._lookup(task_id, "upload_task_intake_asset", request, envelope)
+            replay = self._lookup(task_id, command, request, envelope)
             if replay is not None:
                 return replay
             try:
-                current = self._draft(task_id)
+                current = self._draft(task_id) if require_draft else self._intake(task_id)
             except HarnessError:
-                # The upload streamed outside the task command lock. If submit won
-                # that race, immediately hide the late import from every browser
-                # projection while retaining its immutable audit evidence.
+                # The upload streamed outside the task command lock. If the intake
+                # closed while using the draft-only route, hide the late import.
                 self.assets.remove_input_asset(
                     task_id,
                     manifest["asset_id"],
@@ -317,7 +367,7 @@ class TaskIntakeService:
                 task_id,
                 updated,
                 expected_revision=current_revision,
-                command="upload_task_intake_asset",
+                command=command,
                 request=request,
                 envelope=envelope,
                 result=result,
@@ -547,13 +597,17 @@ class TaskIntakeService:
             )
 
     def _draft(self, task_id: str) -> dict[str, Any]:
-        intake = self.store.task_intake.get(task_id, task_id)
-        if intake is None:
-            raise HarnessError("TASK_NOT_FOUND", "The requested task intake does not exist.")
+        intake = self._intake(task_id)
         if intake["status"] != "DRAFT" or intake["upload_session"]["status"] != "OPEN":
             raise HarnessError(
                 "INVALID_STATE_TRANSITION", "The task intake no longer accepts uploads."
             )
+        return deepcopy(intake)
+
+    def _intake(self, task_id: str) -> dict[str, Any]:
+        intake = self.store.task_intake.get(task_id, task_id)
+        if intake is None:
+            raise HarnessError("TASK_NOT_FOUND", "The requested task intake does not exist.")
         return deepcopy(intake)
 
     def _put_intake(

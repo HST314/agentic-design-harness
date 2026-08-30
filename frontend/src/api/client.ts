@@ -93,6 +93,8 @@ export interface MasterAssetReference {
 export interface MasterSessionAsset extends MasterAssetReference {
   filename: string;
   description: string;
+  mime_type: string;
+  size_bytes: number;
 }
 
 export type MasterSessionProposal = ContractPlanProposal & {
@@ -1038,10 +1040,48 @@ export class ApiClient {
     onProgress: (percent: number) => void,
     signal: AbortSignal,
   ): Promise<TaskIntakeMutationResponse> {
+    return this.uploadAssetToPath(
+      `/api/v1/task-intakes/${encodeURIComponent(taskId)}/assets`,
+      input,
+      onProgress,
+      signal,
+    );
+  }
+
+  uploadTaskAsset(
+    taskId: string,
+    input: {
+      file: File;
+      declaredMimeType: string;
+      description: string;
+      envelope: CommandEnvelope;
+    },
+    onProgress: (percent: number) => void,
+    signal: AbortSignal,
+  ): Promise<TaskIntakeMutationResponse> {
+    return this.uploadAssetToPath(
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/asset-uploads`,
+      input,
+      onProgress,
+      signal,
+    );
+  }
+
+  private uploadAssetToPath(
+    path: string,
+    input: {
+      file: File;
+      declaredMimeType: string;
+      description: string;
+      envelope: CommandEnvelope;
+    },
+    onProgress: (percent: number) => void,
+    signal: AbortSignal,
+  ): Promise<TaskIntakeMutationResponse> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       const abort = (): void => xhr.abort();
-      xhr.open("POST", `${this.baseUrl}/api/v1/task-intakes/${encodeURIComponent(taskId)}/assets`);
+      xhr.open("POST", `${this.baseUrl}${path}`);
       xhr.setRequestHeader("Accept", "application/json");
       xhr.responseType = "json";
       xhr.upload.addEventListener("progress", (event) => {
