@@ -246,6 +246,39 @@ class AssetServiceTests(unittest.TestCase):
             self.assets.preview("t_assets", imported["relative_path"])
         self.assertEqual(rejected.exception.code, "ASSET_VALIDATION_FAILED")
 
+    def test_images_use_the_larger_preview_limit_while_text_stays_small(self) -> None:
+        self.assets.preview_limit_bytes = 8
+        self.assets.image_preview_limit_bytes = 32
+        small_image = self.assets.import_bytes(
+            "t_assets",
+            filename="small.png",
+            content=b"\x89PNG\r\n\x1a\n" + b"a" * 8,
+            description="Over the text cap, under the image cap",
+            source="user_upload",
+            idempotency_key="small-image-preview",
+        )
+        large_image = self.assets.import_bytes(
+            "t_assets",
+            filename="large.png",
+            content=b"\x89PNG\r\n\x1a\n" + b"b" * 64,
+            description="Over the image cap",
+            source="user_upload",
+            idempotency_key="large-image-preview",
+        )
+
+        entries = {
+            item["relative_path"]: item
+            for item in self.assets.list_files("t_assets", "inputs")
+        }
+        self.assertTrue(entries[small_image["relative_path"]]["previewable"])
+        self.assertFalse(entries[large_image["relative_path"]]["previewable"])
+
+        preview = self.assets.preview("t_assets", small_image["relative_path"])
+        self.assertEqual(preview["mime_type"], "image/png")
+        with self.assertRaises(HarnessError) as rejected:
+            self.assets.preview("t_assets", large_image["relative_path"])
+        self.assertEqual(rejected.exception.code, "ASSET_VALIDATION_FAILED")
+
     def test_path_traversal_symlinks_and_unknown_mime_are_rejected(self) -> None:
         with self.assertRaises(HarnessError) as absolute:
             self.assets.preview("t_assets", "/etc/passwd")

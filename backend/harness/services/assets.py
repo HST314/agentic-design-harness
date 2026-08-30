@@ -78,12 +78,14 @@ class AssetService(AssetRecoveryMixin):
         max_task_bytes: int = 250 * 1024 * 1024,
         allowed_mime_types: set[str] | None = None,
         preview_limit_bytes: int = 512 * 1024,
+        image_preview_limit_bytes: int = 20 * 1024 * 1024,
     ) -> None:
         self.store = store
         self.max_file_bytes = max_file_bytes
         self.max_task_bytes = max_task_bytes
         self.allowed_mime_types = allowed_mime_types or DEFAULT_ALLOWED_MIME
         self.preview_limit_bytes = preview_limit_bytes
+        self.image_preview_limit_bytes = image_preview_limit_bytes
 
     def initialize_task_workspace(self, task_id: str) -> Path:
         self._require_task(task_id)
@@ -821,10 +823,13 @@ class AssetService(AssetRecoveryMixin):
                         "mime_type": mime_type,
                         "size_bytes": size,
                         "sha256": sha256,
-                        "previewable": size <= self.preview_limit_bytes
-                        and (
+                        "previewable": (
                             mime_type.startswith("image/")
-                            or mime_type in SAFE_PREVIEW_MIME
+                            and size <= self.image_preview_limit_bytes
+                        )
+                        or (
+                            mime_type in SAFE_PREVIEW_MIME
+                            and size <= self.preview_limit_bytes
                         ),
                     }
                 )
@@ -879,10 +884,17 @@ class AssetService(AssetRecoveryMixin):
                 )
         return entries
 
+    def _preview_limit_for(self, mime_type: str) -> int:
+        # Images are returned as-is, so a larger cap is safe; the tighter
+        # default keeps text/JSON UTF-8 validation bounded in memory.
+        if mime_type.startswith("image/"):
+            return self.image_preview_limit_bytes
+        return self.preview_limit_bytes
+
     def preview(self, task_id: str, relative_path: str) -> dict[str, Any]:
         workspace = self.initialize_task_workspace(task_id)
         with self._open_browser_file(task_id, workspace, relative_path) as opened:
-            if opened.size_bytes > self.preview_limit_bytes:
+            if opened.size_bytes > self._preview_limit_for(opened.mime_type):
                 self._invalid("The file cannot be safely previewed.")
             if opened.mime_type.startswith("image/"):
                 return {
@@ -944,7 +956,7 @@ class AssetService(AssetRecoveryMixin):
                     "ASSET_CORRUPTED",
                     "The delivery candidate changed after it was frozen.",
                 )
-            if size_bytes > self.preview_limit_bytes:
+            if size_bytes > self._preview_limit_for(mime_type):
                 self._invalid("The delivery candidate is too large to preview safely.")
             if mime_type.startswith("image/"):
                 return {
