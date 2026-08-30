@@ -190,6 +190,12 @@ class ResolveApprovalRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class CompleteDeliveryBundleRequest(StrictRequest):
+    instance_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
 class InboxStatusRequest(StrictRequest):
     status: Literal["READ", "HANDLED"]
     envelope: CommandEnvelope
@@ -1214,6 +1220,40 @@ def build_v1_router(container: Container) -> APIRouter:
             "manifests": manifests,
             "reviews": reviews,
         }
+
+    @router.get(
+        "/tasks/{task_id}/delivery-bundles/{bundle_id}/status", tags=["assets"]
+    )
+    async def delivery_bundle_status(
+        task_id: str,
+        bundle_id: str,
+        instance_id: str = Query(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$"),
+    ) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.application.delivery_bundle_status,
+            task_id,
+            instance_id,
+            bundle_id,
+        )
+        return {"schema_version": "1.0", **result}
+
+    @router.post(
+        "/tasks/{task_id}/delivery-bundles/{bundle_id}/complete", tags=["assets"]
+    )
+    async def complete_delivery_bundle(
+        task_id: str,
+        bundle_id: str,
+        body: CompleteDeliveryBundleRequest,
+    ) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.application.complete_delivery_bundle,
+            task_id,
+            body.instance_id,
+            bundle_id,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
 
     @router.get(
         "/tasks/{task_id}/delivery-bundles/{bundle_id}/preview", tags=["assets"]
