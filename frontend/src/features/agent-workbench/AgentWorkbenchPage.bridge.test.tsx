@@ -126,4 +126,31 @@ describe("executeBridgeRequest delivery.complete", () => {
     await vi.advanceTimersByTimeAsync(26_000);
     await assertion;
   });
+
+  test("aborts a slow in-flight read at the deadline instead of hanging past the bridge timeout", async () => {
+    vi.stubGlobal("window", globalThis);
+    vi.useFakeTimers();
+    let aborted = false;
+    // Every read hangs until its abort signal fires: without deadline-bound
+    // cancellation the loop would stall here well past the 30s bridge timeout.
+    vi.mocked(api.deliveryBundles).mockImplementation(
+      (_taskId: string, signal?: AbortSignal) => new Promise((_, reject) => {
+        signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      }) as never,
+    );
+
+    const pending = executeBridgeRequest(
+      bridgeRequest("delivery.complete", { bundle_id: "bundle_a" }),
+      "instance_image",
+      undefined,
+      SCOPE,
+    );
+    const assertion = expect(pending).rejects.toThrow("主系统尚未完成交付候选对账");
+    await vi.advanceTimersByTimeAsync(26_000);
+    await assertion;
+    expect(aborted).toBe(true);
+  });
 });
