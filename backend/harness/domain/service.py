@@ -909,13 +909,22 @@ class TaskCommandService:
                 )
         now = utc_now()
         normalized_stages = []
-        for raw in sorted(deepcopy(stages), key=lambda item: item["position"]):
+        ordered_stages = sorted(deepcopy(stages), key=lambda item: item["position"])
+        batch_positions = [item["position"] for item in ordered_stages]
+        if batch_positions != list(range(1, len(ordered_stages) + 1)):
+            raise HarnessError(
+                "VALIDATION_ERROR",
+                "Appended stage positions must be contiguous from one within the new batch.",
+            )
+        position_offset = len(existing_plan["stages"])
+        for raw in ordered_stages:
             required = bool(raw["required"])
             normalized_stages.append(
                 {
                     **raw,
                     "schema_version": "1.0",
                     "task_id": task["task_id"],
+                    "position": position_offset + raw["position"],
                     "required": required,
                     "requirement_lifecycle": {
                         "original_required": required,
