@@ -1941,6 +1941,73 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             "PUBLISHED",
         )
 
+    def test_delivery_read_sweep_throttled_per_task(self) -> None:
+        task_id = "t_delivery_sweep_throttle"
+        self._running_image_task(task_id, 1)
+        image = b"\x89PNG\r\n\x1a\nthrottled-final-image"
+        note = b"# Throttled branch note\n"
+        instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
+        (instance_root / "outputs" / "throttled-image.png").write_bytes(image)
+        (instance_root / "outputs" / "throttled-note.md").write_bytes(note)
+        card = self.store.plan.get(task_id, task_id)["task_cards"][0]
+        candidate = {
+            "schema_version": "1.0",
+            "bundle_id": "bundle_throttled_01",
+            "task_id": task_id,
+            "work_item_id": "work_throttled_01",
+            "instance_id": "i_image_1",
+            "task_card_revision": card["revision"],
+            "branch_id": "main",
+            "checkpoint_id": "checkpoint_0123456789abcdef01234567",
+            "image": {
+                "private_relative_path": "instances/i_image_1/outputs/throttled-image.png",
+                "mime_type": "image/png",
+                "size_bytes": len(image),
+                "sha256": hashlib.sha256(image).hexdigest(),
+                "width": 1920,
+                "height": 1080,
+            },
+            "design_note": {
+                "private_relative_path": "instances/i_image_1/outputs/throttled-note.md",
+                "mime_type": "text/markdown",
+                "size_bytes": len(note),
+                "sha256": hashlib.sha256(note).hexdigest(),
+            },
+            "status": "PENDING_CONFIRMATION",
+            "created_at": "2026-08-29T05:00:41Z",
+            "decided_at": None,
+            "actor": None,
+            "publication_batch_id": None,
+        }
+        self.fake_adapter.delivery_bundles = [candidate]
+        self.fake_adapter.observation = AdapterObservation(
+            "RUNNING", step_id="completed", details={"completed": True}
+        )
+        collections: list[str] = []
+        collect = self.fake_adapter.collect_delivery_bundles
+
+        def counting_collect(instance_id: str):
+            collections.append(instance_id)
+            return collect(instance_id)
+
+        self.fake_adapter.collect_delivery_bundles = counting_collect
+
+        self.application.observe_delivery_sources_throttled(task_id)
+        self.assertEqual(len(collections), 1)
+        self.assertEqual(
+            len(self.application.list_delivery_bundle_candidates(task_id)), 1
+        )
+
+        # Bridge-style polls inside the interval must not hit the agent again.
+        self.application.observe_delivery_sources_throttled(task_id)
+        self.application.observe_delivery_sources_throttled(task_id)
+        self.assertEqual(len(collections), 1)
+
+        # Once the interval elapsed the read path tops up reconciliation.
+        self.application._delivery_observe_swept_at[task_id] -= 10
+        self.application.observe_delivery_sources_throttled(task_id)
+        self.assertEqual(len(collections), 2)
+
     def test_delivery_read_sweep_skips_agents_without_bundle_collection(self) -> None:
         task_id = "t_delivery_sweep_scope"
         created = create_task(self.commands, task_id, "auto")

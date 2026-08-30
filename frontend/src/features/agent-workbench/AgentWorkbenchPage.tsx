@@ -43,7 +43,7 @@ export function FocusTabLink({ taskId, workItemId }: {
   );
 }
 
-async function executeBridgeRequest(
+export async function executeBridgeRequest(
   request: RuntimeSettingsBridgeRequest,
   instanceId: string,
   taskRevision: number | undefined,
@@ -52,10 +52,34 @@ async function executeBridgeRequest(
   if (request.action === "runtime_settings.get") {
     return api.instanceRuntimeSettings(instanceId);
   }
+  if (request.action === "delivery.status") {
+    const bundleId = String(request.payload.bundle_id);
+    const bundles = await api.deliveryBundles(scope.taskId);
+    const candidate = bundles.candidates.find((item) => (
+      item.bundle_id === bundleId && item.instance_id === instanceId
+    ));
+    return { bundle_id: bundleId, status: candidate?.status ?? "UNKNOWN" };
+  }
   if (request.action === "delivery.complete") {
     const bundleId = String(request.payload.bundle_id);
-    for (let attempt = 0; attempt < 80; attempt += 1) {
-      const bundles = await api.deliveryBundles(scope.taskId);
+    // Poll on a fixed deadline so the loop can never outrun the child's
+    // 30 second bridge timeout, no matter how slow a single read gets.
+    // Every read is bound to the same deadline via AbortController: a slow
+    // in-flight GET started just before the deadline is aborted instead of
+    // hanging past the bridge timeout.
+    const deadline = Date.now() + 25_000;
+    while (Date.now() < deadline) {
+      const controller = new AbortController();
+      const abortAt = setTimeout(() => controller.abort(), deadline - Date.now());
+      let bundles: Awaited<ReturnType<typeof api.deliveryBundles>>;
+      try {
+        bundles = await api.deliveryBundles(scope.taskId, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) break;
+        throw error;
+      } finally {
+        clearTimeout(abortAt);
+      }
       const candidate = bundles.candidates.find((item) => (
         item.bundle_id === bundleId && item.instance_id === instanceId
       ));
