@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from harness.adapters import AdapterRegistry, AgentWorkState
@@ -260,6 +261,8 @@ class TaskArchiveResumeTests(unittest.TestCase):
             drain_ctx.exception.details["busy_instance_ids"], ["i_image_1"]
         )
         self.assertEqual(self.fake_adapter.stop_calls, [])
+        self.assertFalse(self.fake_adapter.quiesced)
+        self.assertEqual(len(self.fake_adapter.unquiesce_calls), 1)
         self.assertEqual(
             self.store.instance.get("t_drain", "i_image_1")["status"], "RUNNING"
         )
@@ -308,6 +311,7 @@ class TaskArchiveResumeTests(unittest.TestCase):
         )
         # Nothing was stopped: an unproven in-flight state is never idle.
         self.assertEqual(self.fake_adapter.stop_calls, [])
+        self.assertFalse(self.fake_adapter.quiesced)
         self.assertEqual(
             self.store.instance.get("t_unknown", "i_image_1")["status"], "RUNNING"
         )
@@ -342,6 +346,30 @@ class TaskArchiveResumeTests(unittest.TestCase):
         self.assertEqual(
             self.store.instance.get("t_unknown", "i_image_1")["status"], "STOPPED"
         )
+
+    def test_archive_quiesces_before_final_idle_and_rejects_concurrent_submit(self) -> None:
+        self._start_running_task("t_quiesce_race")
+
+        def after_drain(point: str) -> None:
+            if point != "after_archive_drain":
+                return
+            self.assertTrue(self.fake_adapter.quiesced)
+            with self.assertRaises(HarnessError) as submit_ctx:
+                self.fake_adapter.submit_concurrent_work()
+            self.assertEqual(submit_ctx.exception.code, "AGENT_QUIESCED")
+
+        archived = self.application.archive_task(
+            "t_quiesce_race",
+            operation_id="archive_t_quiesce_race",
+            envelope=envelope(
+                "archive-t-quiesce-race", self._task_revision("t_quiesce_race")
+            ),
+            crash_hook=after_drain,
+        )
+
+        self.assertEqual(archived["task"]["status"], "ARCHIVED")
+        self.assertTrue(self.fake_adapter.quiesced)
+        self.assertEqual(len(self.fake_adapter.quiesce_calls), 1)
 
     def test_cancel_task_blocked_while_archived(self) -> None:
         self._start_running_task("t_cancel_guard")
@@ -467,6 +495,59 @@ class TaskArchiveResumeTests(unittest.TestCase):
         )
         # A SUCCEEDED instance cannot be cancelled; park it to release the process.
         self.supervisor.suspend_instance("t_succeeded", "i_image_1")
+
+    def test_resume_start_failure_marks_instance_failed_and_replay_is_stable(self) -> None:
+        self._start_running_task("t_resume_failure")
+        self.application.archive_task(
+            "t_resume_failure",
+            operation_id="archive_t_resume_failure",
+            envelope=envelope(
+                "archive-t-resume-failure", self._task_revision("t_resume_failure")
+            ),
+        )
+        revision = self._task_revision("t_resume_failure")
+        original_spec = self.fake_adapter.runtime_spec
+        self.assertIsNotNone(original_spec)
+        self.fake_adapter.runtime_spec = replace(
+            original_spec,
+            public_environment={
+                **original_spec.public_environment,
+                "FAKE_HEALTHY": "0",
+            },
+        )
+        try:
+            result = self.application.resume_task(
+                "t_resume_failure",
+                operation_id="resume_t_resume_failure",
+                envelope=envelope("resume-t-resume-failure", revision),
+            )
+        finally:
+            self.fake_adapter.runtime_spec = original_spec
+
+        self.assertEqual(result["task"]["status"], "RUNNING")
+        self.assertEqual(result["restored_instance_ids"], [])
+        self.assertEqual(result["failed_instances"][0]["code"], "PROCESS_START_FAILED")
+        instance = self.store.instance.get("t_resume_failure", "i_image_1")
+        self.assertEqual(instance["status"], "FAILED")
+        self.assertEqual(instance["process"]["state"], "EXITED")
+        self.assertFalse(self.fake_adapter.quiesced)
+
+        replay = self.application.resume_task(
+            "t_resume_failure",
+            operation_id="resume_t_resume_failure",
+            envelope=envelope("resume-t-resume-failure", revision),
+        )
+        self.assertEqual(replay, result)
+
+        restarted = self.application.restart_instance(
+            "t_resume_failure",
+            "i_image_1",
+            operation_id="restart_t_resume_failure",
+            envelope=envelope(
+                "restart-t-resume-failure", self._task_revision("t_resume_failure")
+            ),
+        )
+        self.assertEqual(restarted["state"], "QUEUED")
 
 
 if __name__ == "__main__":

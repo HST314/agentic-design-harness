@@ -893,12 +893,18 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         task_id = request["task_id"]
         operation_id = intent["operation_id"]
         if not request.get("force", False):
-            drain = self._drain_archive_targets(
+            drain = self._quiesce_and_drain_archive_targets(
                 task_id,
                 [item["instance_id"] for item in intent["target_instances"]],
                 float(request["drain_timeout_seconds"]),
+                operation_id,
             )
             if drain["busy"] or drain["unknown"]:
+                self._unquiesce_archive_targets(
+                    task_id,
+                    [item["instance_id"] for item in intent["target_instances"]],
+                    operation_id,
+                )
                 if drain["busy"]:
                     error = HarnessError(
                         "ARCHIVE_DRAIN_TIMEOUT",
@@ -933,6 +939,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 )
                 atomic_write_json(intent_path, intent)
                 raise error
+            if crash_hook:
+                crash_hook("after_archive_drain")
         for target in intent["target_instances"]:
             instance_id = target["instance_id"]
             progress = intent["instance_progress"][instance_id]
@@ -990,10 +998,14 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             crash_hook("after_archive_task_intent_commit")
         return deepcopy(result)
 
-    def _drain_archive_targets(
-        self, task_id: str, instance_ids: list[str], timeout_seconds: float
+    def _quiesce_and_drain_archive_targets(
+        self,
+        task_id: str,
+        instance_ids: list[str],
+        timeout_seconds: float,
+        operation_id: str,
     ) -> dict[str, list[str]]:
-        """Best-effort wait for in-flight Agent work.
+        """Close admission before waiting for in-flight Agent work.
 
         Returns the instances still ACTIVE at the deadline (``busy``) and the
         instances whose in-flight state could not be established (``unknown``).
@@ -1006,10 +1018,22 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         unknown: list[str] = []
         for instance_id in instance_ids:
             instance = self._instance(task_id, instance_id)
-            if instance["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+            process = instance.get("process")
+            if not isinstance(process, dict) or process.get("state") != "RUNNING":
                 continue
             adapter = self.adapters.get_optional(instance["agent_type"])
             if adapter is None or not adapter.available:
+                unknown.append(instance_id)
+                continue
+            try:
+                quiesced = adapter.quiesce(
+                    instance_id,
+                    self._derived_id("quiesce", operation_id, instance_id),
+                )
+            except Exception:
+                unknown.append(instance_id)
+                continue
+            if not quiesced.accepted or quiesced.details.get("quiesced") is not True:
                 unknown.append(instance_id)
                 continue
             while True:
@@ -1027,6 +1051,22 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     break
                 time.sleep(_ARCHIVE_DRAIN_POLL_SECONDS)
         return {"busy": busy, "unknown": unknown}
+
+    def _unquiesce_archive_targets(
+        self, task_id: str, instance_ids: list[str], operation_id: str
+    ) -> None:
+        for instance_id in instance_ids:
+            instance = self.store.instance.get(task_id, instance_id)
+            if instance is None:
+                continue
+            adapter = self.adapters.get_optional(instance["agent_type"])
+            if adapter is None or not adapter.available:
+                continue
+            with suppress(Exception):
+                adapter.unquiesce(
+                    instance_id,
+                    self._derived_id("unquiesce", operation_id, instance_id),
+                )
 
     def resume_task(
         self,
@@ -1155,9 +1195,9 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 progress.update({"state": "SKIPPED", "completed_at": utc_now()})
                 atomic_write_json(intent_path, intent)
                 continue
+            adapter = self.adapters.get(instance["agent_type"])
             try:
-                adapter, spec = self._prepare_instance(task_id, instance_id)
-                del adapter
+                _, spec = self._prepare_instance(task_id, instance_id)
                 launch = self.supervisor.resume_instance(
                     task_id,
                     instance_id,
@@ -1182,6 +1222,11 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     {"state": "FAILED", "error": failure, "completed_at": utc_now()}
                 )
                 atomic_write_json(intent_path, intent)
+                with suppress(Exception):
+                    adapter.unquiesce(
+                        instance_id,
+                        self._derived_id("unquiesce", operation_id, instance_id),
+                    )
                 continue
             except Exception as exc:
                 failure = {
@@ -1189,6 +1234,28 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     "code": "PROCESS_START_FAILED",
                     "message": "The instance restart failed unexpectedly.",
                     "details": {"failure_type": type(exc).__name__, "instance_id": instance_id},
+                }
+                progress.update(
+                    {"state": "FAILED", "error": failure, "completed_at": utc_now()}
+                )
+                atomic_write_json(intent_path, intent)
+                with suppress(Exception):
+                    adapter.unquiesce(
+                        instance_id,
+                        self._derived_id("unquiesce", operation_id, instance_id),
+                    )
+                continue
+            try:
+                adapter.unquiesce(
+                    instance_id,
+                    self._derived_id("unquiesce", operation_id, instance_id),
+                )
+            except Exception as exc:
+                failure = {
+                    "instance_id": instance_id,
+                    "code": "PROCESS_START_FAILED",
+                    "message": "The resumed instance did not reopen work admission.",
+                    "details": {"failure_type": type(exc).__name__},
                 }
                 progress.update(
                     {"state": "FAILED", "error": failure, "completed_at": utc_now()}
@@ -1205,9 +1272,12 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             restores: list[dict[str, str]] = []
             for instance_id in snapshot["stopped_instance_ids"]:
                 progress = intent["instance_progress"][instance_id]
-                if progress["state"] not in {"PROCESS_RUNNING", "RESTORED"}:
+                if progress["state"] in {"PROCESS_RUNNING", "RESTORED"}:
+                    target_status = instance_statuses.get(instance_id, "RUNNING")
+                elif progress["state"] == "FAILED":
+                    target_status = "FAILED"
+                else:
                     continue
-                target_status = instance_statuses.get(instance_id, "RUNNING")
                 if target_status == "STARTING":
                     # The wake pipeline waits for readiness, so an instance
                     # archived mid-start resumes as a truthful RUNNING.
@@ -1231,7 +1301,8 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 crash_hook("after_task_restore_commit")
             for item in restores:
                 progress = intent["instance_progress"][item["instance_id"]]
-                progress.update({"state": "RESTORED", "completed_at": utc_now()})
+                if progress["state"] != "FAILED":
+                    progress.update({"state": "RESTORED", "completed_at": utc_now()})
             intent["aggregate_restored"] = True
             atomic_write_json(intent_path, intent)
         self._sync_task_navigation(task_id, archived=False)

@@ -62,6 +62,7 @@ from .types import (
     TaskCard,
     UsageEvent,
 )
+from .work_admission import write_work_admission
 
 _PACKAGE_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
 _ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
@@ -263,6 +264,8 @@ class ImageAgentAdapter(ImageObservationMixin):
                 "schema_version": "1.0",
                 "instance_id": instance_id,
                 "request_key": secrets.token_urlsafe(32),
+                "quiesced": False,
+                "quiesce_operation_id": None,
             }
             atomic_write_json(control_path, control, mode=0o600)
         managed_request_key = control.get("request_key")
@@ -274,6 +277,15 @@ class ImageAgentAdapter(ImageObservationMixin):
             raise HarnessError(
                 "PROCESS_START_FAILED",
                 "The Image runtime managed control file is invalid.",
+                {"instance_id": instance_id},
+            )
+        if "quiesced" not in control:
+            control.update({"quiesced": False, "quiesce_operation_id": None})
+            atomic_write_json(control_path, control, mode=0o600)
+        elif not isinstance(control["quiesced"], bool):
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The Image runtime work-admission state is invalid.",
                 {"instance_id": instance_id},
             )
         expected_state = {
@@ -578,6 +590,42 @@ class ImageAgentAdapter(ImageObservationMixin):
             # A failed probe is not proof of idleness; report UNKNOWN so a
             # safe archive drain blocks instead of interrupting in-flight work.
             return AgentWorkState.UNKNOWN
+
+    def quiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        return self._set_work_admission(instance_id, operation_id, quiesced=True)
+
+    def unquiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        return self._set_work_admission(instance_id, operation_id, quiesced=False)
+
+    def _set_work_admission(
+        self, instance_id: str, operation_id: str, *, quiesced: bool
+    ) -> AdapterCommandResult:
+        validate_identifier(operation_id, "operation_id")
+        task_id = self._task_id_for_instance(instance_id)
+        control_path = (
+            self.store.layout.initialize_instance(task_id, instance_id)
+            / "runtime"
+            / "managed-control.json"
+        )
+        write_work_admission(
+            control_path, instance_id, operation_id, quiesced=quiesced
+        )
+        instance = self.store.instance.get(task_id, instance_id)
+        process = None if instance is None else instance.get("process")
+        if not isinstance(process, dict) or process.get("state") != "RUNNING":
+            return AdapterCommandResult(
+                True, operation_id, {"quiesced": quiesced, "verified": False}
+            )
+        observed = self._request(
+            self._base_url(task_id, instance_id),
+            "GET",
+            "/api/managed/work-admission",
+        )
+        if not isinstance(observed, dict) or observed.get("quiesced") is not quiesced:
+            self._protocol_error("Image Agent did not observe its work-admission gate.")
+        return AdapterCommandResult(
+            True, operation_id, {"quiesced": quiesced, "verified": True}
+        )
 
     def get_status(self, instance_id: str) -> AdapterObservation:
         if not self.available:

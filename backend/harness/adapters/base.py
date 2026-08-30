@@ -97,6 +97,14 @@ class UnavailableAgentAdapter:
         del instance_id
         return AgentWorkState.UNKNOWN
 
+    def quiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        del operation_id
+        self._raise(instance_id)
+
+    def unquiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        del operation_id
+        self._raise(instance_id)
+
     def request_advance(
         self,
         instance_id: str,
@@ -175,6 +183,14 @@ class AgentAdapter(Protocol):
         UNKNOWN means the probe could not answer authoritatively; callers
         must treat it as "not safe to stop" rather than as idle.
         """
+        ...
+
+    def quiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        """Durably reject new work and verify that the Agent observed the gate."""
+        ...
+
+    def unquiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        """Remove a previously established work-admission gate."""
         ...
 
     def request_advance(

@@ -196,7 +196,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                     launch_id=launch_id,
                     attempt_id=attempt_id,
                     preserve_business_state=True,
-                    preserve_failure_target=None,
+                    preserve_failure_target="FAILED",
                     pinned_artifact=pinned_artifact,
                 )
 
