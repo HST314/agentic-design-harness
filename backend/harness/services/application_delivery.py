@@ -686,9 +686,8 @@ class ApplicationDeliveryMixin:
     def observe_delivery_sources_throttled(self, task_id: str) -> None:
         """Sweep at most once per interval and task.
 
-        The workbench bridge polls delivery reads every 250ms after the human
-        clicks complete; an unthrottled sweep made every poll re-post candidate
-        finalization to every active agent and piled onto its project lock.
+        Repeated delivery-list refreshes must not re-post candidate finalization
+        to every active agent and pile onto their project locks.
         """
 
         now = time.monotonic()
@@ -699,6 +698,199 @@ class ApplicationDeliveryMixin:
             return
         swept_at[task_id] = now
         self.observe_delivery_sources(task_id)
+
+    def delivery_bundle_status(
+        self, task_id: str, instance_id: str, bundle_id: str
+    ) -> dict[str, Any]:
+        """Return one bundle's persisted state without polling any Agent."""
+
+        validate_identifier(task_id, "task_id")
+        validate_identifier(instance_id, "instance_id")
+        validate_identifier(bundle_id, "bundle_id")
+        candidate = next(
+            (
+                item
+                for item in self.list_delivery_bundle_candidates(
+                    task_id, instance_id=instance_id
+                )
+                if item["bundle_id"] == bundle_id
+            ),
+            None,
+        )
+        manifest = next(
+            (
+                item
+                for item in self.assets.list_bundle_manifests(task_id)
+                if item["bundle_id"] == bundle_id
+                and item["instance_id"] == instance_id
+            ),
+            None,
+        )
+        return {
+            "bundle_id": bundle_id,
+            "instance_id": instance_id,
+            "status": "UNKNOWN" if candidate is None else candidate["status"],
+            "candidate": deepcopy(candidate),
+            "bundle_manifest": deepcopy(manifest),
+        }
+
+    def complete_delivery_bundle(
+        self,
+        task_id: str,
+        instance_id: str,
+        bundle_id: str,
+        *,
+        operation_id: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Reconcile and publish one target bundle as a single idempotent command."""
+
+        validate_identifier(task_id, "task_id")
+        validate_identifier(instance_id, "instance_id")
+        validate_identifier(bundle_id, "bundle_id")
+        validate_identifier(operation_id, "operation_id")
+        if envelope.actor_type != "human":
+            raise HarnessError(
+                "VALIDATION_ERROR", "Only a human may complete a delivery bundle."
+            )
+
+        request = {
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "bundle_id": bundle_id,
+            "actor_type": envelope.actor_type,
+            "actor_id": envelope.actor_id,
+            "idempotency_key": envelope.idempotency_key,
+        }
+        request_sha256 = digest_json(request)
+        intent_path = self._intent_path(operation_id)
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
+        ):
+            if intent_path.exists():
+                intent = read_json(intent_path)
+                if (
+                    intent.get("kind") != "COMPLETE_DELIVERY_BUNDLE"
+                    or intent.get("request_sha256") != request_sha256
+                ):
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The application operation id was reused for another request.",
+                        {"operation_id": operation_id},
+                    )
+                if intent.get("result") is not None:
+                    return deepcopy(intent["result"])
+            else:
+                # Persist the operation binding before checking the terminal bundle
+                # state. A crash can leave result unset; an exact retry resumes safely.
+                intent = {
+                    "schema_version": "1.0",
+                    "kind": "COMPLETE_DELIVERY_BUNDLE",
+                    "operation_id": operation_id,
+                    "request_sha256": request_sha256,
+                    "request": request,
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "state": "BOUND",
+                    "bound_at": utc_now(),
+                    "result": None,
+                }
+                atomic_write_json(intent_path, intent)
+
+        status = self.delivery_bundle_status(task_id, instance_id, bundle_id)
+        if status["status"] == "PUBLISHED":
+            return self._commit_delivery_completion_result(intent_path, status)
+        if status["status"] == "UNKNOWN":
+            instance = self._instance(task_id, instance_id)
+            if instance["status"] in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+                # The click path targets only its owning instance. It does not fan out
+                # across every active Agent or rely on a read poll to drive writes.
+                self.observe_instance(task_id, instance_id)
+            status = self.delivery_bundle_status(task_id, instance_id, bundle_id)
+        if status["status"] == "UNKNOWN":
+            raise HarnessError(
+                "SAFE_CHECKPOINT_UNAVAILABLE",
+                "The requested delivery bundle is not ready for publication.",
+                {"bundle_id": bundle_id, "instance_id": instance_id},
+            )
+        if status["status"] != "PENDING_CONFIRMATION":
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "The delivery bundle can no longer be completed.",
+                {"bundle_id": bundle_id, "status": status["status"]},
+            )
+
+        approval_details = None
+        for approval in self.approvals.list_approvals(
+            task_id=task_id, instance_id=instance_id, status="PENDING"
+        ):
+            if approval["kind"] != "DELIVERY_REVIEW":
+                continue
+            details = self.approvals.get_approval(approval["approval_id"])
+            if details["payload"].get("bundle_id") == bundle_id:
+                approval_details = details
+                break
+        if approval_details is None:
+            raise HarnessError(
+                "SAFE_CHECKPOINT_UNAVAILABLE",
+                "The delivery review is not ready for publication.",
+                {"bundle_id": bundle_id, "instance_id": instance_id},
+            )
+
+        approval = approval_details["approval"]
+        approval_envelope = CommandEnvelope(
+            idempotency_key=envelope.idempotency_key,
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            expected_revision=approval_details["approval_revision"],
+        )
+        try:
+            result = self.resolve_approval(
+                approval["approval_id"],
+                decision="APPROVED",
+                action="publish_bundle",
+                payload={},
+                operation_id=self._derived_id(
+                    "complete-approval", operation_id, bundle_id
+                ),
+                envelope=approval_envelope,
+            )
+        except HarnessError as exc:
+            # A concurrent retry may have won the publication race. Published is the
+            # desired terminal state, so return it idempotently instead of surfacing a
+            # stale approval conflict to the user.
+            if exc.code not in {"INVALID_STATE_TRANSITION", "REVISION_CONFLICT"}:
+                raise
+            replay = self.delivery_bundle_status(task_id, instance_id, bundle_id)
+            if replay["status"] != "PUBLISHED":
+                raise
+            return self._commit_delivery_completion_result(intent_path, replay)
+        completed = {
+            "bundle_id": bundle_id,
+            "instance_id": instance_id,
+            "status": result["candidate"]["status"],
+            "candidate": deepcopy(result["candidate"]),
+            "bundle_manifest": deepcopy(result["bundle_manifest"]),
+        }
+        return self._commit_delivery_completion_result(intent_path, completed)
+
+    def _commit_delivery_completion_result(
+        self, intent_path: Path, result: dict[str, Any]
+    ) -> dict[str, Any]:
+        operation_id = intent_path.stem
+        with FileLock(
+            self._intent_lock(operation_id), self.store.lock_timeout_seconds
+        ):
+            intent = read_json(intent_path)
+            if intent.get("result") is None:
+                intent.update(
+                    state="COMMITTED",
+                    committed_at=utc_now(),
+                    result=deepcopy(result),
+                )
+                atomic_write_json(intent_path, intent)
+            return deepcopy(intent["result"])
 
     def observe_delivery_sources(self, task_id: str) -> None:
         """Reconcile active bundle-producing instances before a delivery read.

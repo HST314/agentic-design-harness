@@ -206,6 +206,10 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
             ):
                 intent = read_json(path)
+                if intent["kind"] == "COMPLETE_DELIVERY_BUNDLE":
+                    # Completion commands are synchronous. A bound command whose
+                    # response was interrupted resumes through the caller's exact retry.
+                    continue
                 if intent["state"] in {"COMMITTED", "ABORTED", "SUPERSEDED"}:
                     continue
                 try:
