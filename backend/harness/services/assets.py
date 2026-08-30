@@ -39,6 +39,7 @@ from .asset_browser import (
     verify_browser_event_path,
 )
 from .asset_files import (
+    decode_local_text,
     detect_mime,
     detect_mime_stream,
     file_digest,
@@ -947,7 +948,12 @@ class AssetService(AssetRecoveryMixin):
             if opened.mime_type not in SAFE_PREVIEW_MIME:
                 self._invalid("This file type is download-only.")
             try:
-                content = opened.stream.read().decode("utf-8")
+                raw_content = opened.stream.read()
+                content = (
+                    decode_local_text(raw_content)
+                    if opened.mime_type in {"text/plain", "text/markdown"}
+                    else raw_content.decode("utf-8")
+                )
                 if opened.mime_type == "application/json":
                     json.loads(content)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:

@@ -126,7 +126,7 @@ class AssetUnderstandingTests(unittest.TestCase):
                 assets,
                 "task_understanding",
                 "brief.md",
-                b"# Campaign\n\nUse restrained typography.",
+                "# 中文活动\n\n使用克制的字体设计。".encode("gb18030"),
                 "markdown-asset",
             )
             image = self._import(
@@ -165,6 +165,7 @@ class AssetUnderstandingTests(unittest.TestCase):
 
             self.assertEqual(text_result["blocks"][0]["extraction_method"], "utf8")
             self.assertEqual(markdown_result["blocks"][0]["kind"], "heading")
+            self.assertIn("中文活动", markdown_result["blocks"][0]["text"])
             self.assertEqual(image_result["blocks"][0]["extraction_method"], "vlm")
             self.assertTrue(
                 any(

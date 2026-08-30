@@ -15,6 +15,7 @@ from ..core.errors import HarnessError
 from ..storage.atomic import atomic_write_json, read_json
 from ..storage.layout import validate_identifier
 from ..storage.repository import utc_now
+from .asset_files import decode_local_text
 from .assets import AssetService
 from .model_clients import ModelClientFactory, ModelClientFailure, ModelResult
 from .task_config import TaskConfigService
@@ -260,10 +261,11 @@ class AssetUnderstandingService:
         self, source: bytes, *, markdown: bool, chunk_chars: int
     ) -> tuple[None, str, list[dict[str, Any]], list[dict[str, Any]]]:
         try:
-            text = source.decode("utf-8")
+            text = decode_local_text(source)
         except UnicodeDecodeError as exc:
             raise _AssetContentError(
-                "TEXT_NOT_UTF8", "该文本资料不是有效 UTF-8, 请转换编码后重新上传。"
+                "TEXT_ENCODING_UNSUPPORTED",
+                "该文本资料编码不受支持，请保存为 UTF-8 或 GB18030 后重新上传。",
             ) from exc
         blocks = self._text_blocks(text, chunk_chars, page=None, markdown=markdown)
         summary = self._summary(blocks)

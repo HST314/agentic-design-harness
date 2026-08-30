@@ -344,11 +344,11 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
     if (!intake.data || intake.data.intake.status !== "DRAFT") return;
     const active = uploads.some((item) => item.status === "queued" || item.status === "uploading");
     if (active) return;
-    if (intake.data.assets.length < expectedAutoAssets.current) return;
     if (uploads.some((item) => item.status === "failed")) {
       setAutoSubmit(false);
       return;
     }
+    if (intake.data.assets.length < expectedAutoAssets.current) return;
     autoSubmitFired.current = true;
     submit.mutate();
   }, [autoSubmit, intake.data, uploads, submit]);
