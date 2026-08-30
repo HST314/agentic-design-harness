@@ -1179,7 +1179,7 @@ def build_v1_router(container: Container) -> APIRouter:
     @router.get("/tasks/{task_id}/delivery-bundles", tags=["assets"])
     async def list_delivery_bundles(task_id: str) -> dict[str, Any]:
         await run_in_threadpool(
-            container.application.observe_delivery_sources, task_id
+            container.application.observe_delivery_sources_throttled, task_id
         )
         candidates = await run_in_threadpool(
             container.application.list_delivery_bundle_candidates, task_id
