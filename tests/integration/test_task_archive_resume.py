@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness.adapters import AdapterRegistry
+from harness.adapters import AdapterRegistry, AgentWorkState
 from harness.core.errors import HarnessError
 from harness.services.agent_config_materialization import ImageAgentConfigMaterializer
 from harness.services.application import HarnessApplicationService
@@ -245,7 +245,7 @@ class TaskArchiveResumeTests(unittest.TestCase):
 
     def test_archive_drain_timeout_aborts_before_stopping_anything(self) -> None:
         self._start_running_task("t_drain")
-        self.fake_adapter.active_work = True
+        self.fake_adapter.work_state = AgentWorkState.ACTIVE
         revision = self._task_revision("t_drain")
 
         with self.assertRaises(HarnessError) as drain_ctx:
@@ -289,6 +289,184 @@ class TaskArchiveResumeTests(unittest.TestCase):
             self.store.instance.get("t_drain", "i_image_1")["status"], "STOPPED"
         )
         self.assertEqual(self.fake_adapter.stop_calls[0][1], "harness_task_archived")
+
+    def test_archive_drain_unknown_blocks_safe_archive(self) -> None:
+        self._start_running_task("t_unknown")
+        self.fake_adapter.work_state = AgentWorkState.UNKNOWN
+        revision = self._task_revision("t_unknown")
+
+        with self.assertRaises(HarnessError) as unknown_ctx:
+            self.application.archive_task(
+                "t_unknown",
+                operation_id="archive_t_unknown",
+                envelope=envelope("archive-t-unknown", revision),
+                drain_timeout_seconds=1,
+            )
+        self.assertEqual(unknown_ctx.exception.code, "ARCHIVE_DRAIN_UNKNOWN")
+        self.assertEqual(
+            unknown_ctx.exception.details["unknown_instance_ids"], ["i_image_1"]
+        )
+        # Nothing was stopped: an unproven in-flight state is never idle.
+        self.assertEqual(self.fake_adapter.stop_calls, [])
+        self.assertEqual(
+            self.store.instance.get("t_unknown", "i_image_1")["status"], "RUNNING"
+        )
+        self.assertEqual(self.store.task.get("t_unknown", "t_unknown")["status"], "RUNNING")
+
+        # A failed probe (adapter reporting unavailable) is equally UNKNOWN.
+        self.fake_adapter.work_state = AgentWorkState.IDLE
+        self.fake_adapter.available = False
+        try:
+            with self.assertRaises(HarnessError) as unavailable_ctx:
+                self.application.archive_task(
+                    "t_unknown",
+                    operation_id="archive_t_unknown_adapter",
+                    envelope=envelope(
+                        "archive-t-unknown-adapter", self._task_revision("t_unknown")
+                    ),
+                    drain_timeout_seconds=1,
+                )
+            self.assertEqual(unavailable_ctx.exception.code, "ARCHIVE_DRAIN_UNKNOWN")
+            self.assertEqual(self.fake_adapter.stop_calls, [])
+        finally:
+            self.fake_adapter.available = True
+
+        # Force is the explicit escape hatch for an unproven drain.
+        forced = self.application.archive_task(
+            "t_unknown",
+            operation_id="archive_t_unknown_force",
+            envelope=envelope("archive-t-unknown-force", self._task_revision("t_unknown")),
+            force=True,
+        )
+        self.assertEqual(forced["task"]["status"], "ARCHIVED")
+        self.assertEqual(
+            self.store.instance.get("t_unknown", "i_image_1")["status"], "STOPPED"
+        )
+
+    def test_cancel_task_blocked_while_archived(self) -> None:
+        self._start_running_task("t_cancel_guard")
+        self.application.archive_task(
+            "t_cancel_guard",
+            operation_id="archive_t_cancel_guard",
+            envelope=envelope(
+                "archive-t-cancel-guard", self._task_revision("t_cancel_guard")
+            ),
+        )
+
+        with self.assertRaises(HarnessError) as cancel_ctx:
+            self.application.cancel_task(
+                "t_cancel_guard",
+                operation_id="cancel_t_cancel_guard",
+                envelope=envelope(
+                    "cancel-t-cancel-guard", self._task_revision("t_cancel_guard")
+                ),
+            )
+        self.assertEqual(cancel_ctx.exception.code, "TASK_ARCHIVED")
+        # The archive snapshot is untouched: the task and its instances stay
+        # resumable instead of being permanently cancelled.
+        self.assertEqual(
+            self.store.task.get("t_cancel_guard", "t_cancel_guard")["status"], "ARCHIVED"
+        )
+        self.assertEqual(
+            self.store.instance.get("t_cancel_guard", "i_image_1")["status"], "STOPPED"
+        )
+
+        resumed = self.application.resume_task(
+            "t_cancel_guard",
+            operation_id="resume_t_cancel_guard",
+            envelope=envelope(
+                "resume-t-cancel-guard", self._task_revision("t_cancel_guard")
+            ),
+        )
+        self.assertEqual(resumed["task"]["status"], "RUNNING")
+        self.assertEqual(resumed["restored_instance_ids"], ["i_image_1"])
+        self.application.cancel_instance("t_cancel_guard", "i_image_1")
+
+    def _archive_and_resume(self, task_id: str) -> dict:
+        archived = self.application.archive_task(
+            task_id,
+            operation_id=f"archive_{task_id}",
+            envelope=envelope(f"archive-{task_id}", self._task_revision(task_id)),
+        )
+        self.assertEqual(archived["task"]["status"], "ARCHIVED")
+        return self.application.resume_task(
+            task_id,
+            operation_id=f"resume_{task_id}",
+            envelope=envelope(f"resume-{task_id}", self._task_revision(task_id)),
+        )
+
+    def test_resume_restores_waiting_approval_snapshot(self) -> None:
+        self._start_running_task("t_wait")
+        self.commands.transition_instance(
+            "t_wait",
+            "i_image_1",
+            "WAITING_APPROVAL",
+            envelope("wait-t-wait", self._task_revision("t_wait")),
+        )
+        self.assertEqual(
+            self.store.task.get("t_wait", "t_wait")["status"], "WAITING_APPROVAL"
+        )
+
+        result = self._archive_and_resume("t_wait")
+
+        self.assertEqual(result["restored_status"], "WAITING_APPROVAL")
+        self.assertEqual(result["restored_instance_ids"], ["i_image_1"])
+        self.assertEqual(result["failed_instances"], [])
+        instance = self.store.instance.get("t_wait", "i_image_1")
+        self.assertEqual(instance["status"], "WAITING_APPROVAL")
+        self.assertEqual(instance["process"]["state"], "RUNNING")
+        self.assertEqual(
+            self.store.task.get("t_wait", "t_wait")["status"], "WAITING_APPROVAL"
+        )
+        self.application.cancel_instance("t_wait", "i_image_1")
+
+    def test_resume_restores_failed_snapshot(self) -> None:
+        self._start_running_task("t_failed")
+        self.commands.transition_instance(
+            "t_failed",
+            "i_image_1",
+            "FAILED",
+            envelope("fail-t-failed", self._task_revision("t_failed")),
+        )
+        self.assertEqual(self.store.task.get("t_failed", "t_failed")["status"], "FAILED")
+
+        result = self._archive_and_resume("t_failed")
+
+        self.assertEqual(result["restored_status"], "FAILED")
+        self.assertEqual(result["restored_instance_ids"], ["i_image_1"])
+        self.assertEqual(result["failed_instances"], [])
+        instance = self.store.instance.get("t_failed", "i_image_1")
+        self.assertEqual(instance["status"], "FAILED")
+        self.assertEqual(instance["process"]["state"], "RUNNING")
+        self.assertEqual(self.store.task.get("t_failed", "t_failed")["status"], "FAILED")
+        self.application.cancel_instance("t_failed", "i_image_1")
+
+    def test_resume_restores_succeeded_snapshot(self) -> None:
+        self._start_running_task("t_succeeded")
+        self.commands.transition_instance(
+            "t_succeeded",
+            "i_image_1",
+            "SUCCEEDED",
+            envelope("succeed-t-succeeded", self._task_revision("t_succeeded")),
+        )
+        task = self.store.task.get("t_succeeded", "t_succeeded")
+        self.assertEqual(task["status"], "SUCCEEDED")
+
+        result = self._archive_and_resume("t_succeeded")
+
+        self.assertEqual(result["restored_status"], "SUCCEEDED")
+        self.assertEqual(result["restored_instance_ids"], ["i_image_1"])
+        self.assertEqual(result["failed_instances"], [])
+        instance = self.store.instance.get("t_succeeded", "i_image_1")
+        self.assertEqual(instance["status"], "SUCCEEDED")
+        self.assertEqual(instance["process"]["state"], "RUNNING")
+        stage = self.store.stage.get("t_succeeded", "s_image")
+        self.assertEqual(stage["status"], "SUCCEEDED")
+        self.assertEqual(
+            self.store.task.get("t_succeeded", "t_succeeded")["status"], "SUCCEEDED"
+        )
+        # A SUCCEEDED instance cannot be cancelled; park it to release the process.
+        self.supervisor.suspend_instance("t_succeeded", "i_image_1")
 
 
 if __name__ == "__main__":

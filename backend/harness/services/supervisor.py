@@ -145,6 +145,61 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                     pinned_artifact=pinned_artifact,
                 )
 
+    def resume_instance(
+        self,
+        task_id: str,
+        instance_id: str,
+        spec: ProcessSpec,
+        *,
+        launch_id: str,
+        attempt_id: str,
+    ) -> dict[str, Any]:
+        """Wake the process of a STOPPED instance without touching its status.
+
+        The aggregate snapshot restore is owned by the application layer: this
+        method only guarantees a ready process and leaves the instance STOPPED
+        whether the wake succeeds or fails, so the later atomic restore is the
+        single place that moves business state.
+        """
+
+        with self._instance_thread_lock(task_id, instance_id):
+            instance = self._instance(task_id, instance_id)
+            if instance["status"] != "STOPPED":
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "Only a stopped instance may be resumed.",
+                    {"current": instance["status"]},
+                )
+            with pin_runtime_artifact(spec) as pinned_artifact:
+                self._enforce_code_identity(task_id, instance_id, pinned_artifact.identity.digest)
+                pinned_artifact.verify_current()
+                record_path = self._launch_path(launch_id)
+                if record_path.exists():
+                    existing = read_json(record_path)
+                    validate_launch_identity(
+                        existing,
+                        task_id,
+                        instance_id,
+                        attempt_id,
+                        spec,
+                        runtime_identity=pinned_artifact.identity,
+                    )
+                    return deepcopy(self._hydrate_launch_identity(existing))
+                current = self._active_launch_for_instance(task_id, instance_id)
+                if current is not None:
+                    self._interrupt_model_calls(task_id, instance_id, "resume_restart")
+                    self._stop_launch(current, "RESTARTED")
+                return self._start(
+                    task_id,
+                    instance_id,
+                    spec,
+                    launch_id=launch_id,
+                    attempt_id=attempt_id,
+                    preserve_business_state=True,
+                    preserve_failure_target=None,
+                    pinned_artifact=pinned_artifact,
+                )
+
     def _start(
         self,
         task_id: str,
@@ -156,6 +211,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
         preserve_business_state: bool,
         crash_hook=None,
         pinned_artifact: PinnedRuntimeArtifact | None = None,
+        preserve_failure_target: str | None = "FAILED",
     ) -> dict[str, Any]:
         validate_identifier(task_id, "task_id")
         validate_identifier(instance_id, "instance_id")
@@ -172,6 +228,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                     preserve_business_state=preserve_business_state,
                     crash_hook=crash_hook,
                     pinned_artifact=inspected_artifact,
+                    preserve_failure_target=preserve_failure_target,
                 )
         lock_path = (
             self.store.layout.control_root / "locks" / f"process-{task_id}-{instance_id}.lock"
@@ -390,8 +447,18 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 )
                 atomic_write_json(record_path, prepared)
                 self._write_process_projection(prepared, "EXITED")
-                target = "FAILED" if preserve_business_state else "FAILED_TO_START"
-                self._transition(task_id, instance_id, target, f"{launch_id}-failed")
+                if preserve_business_state:
+                    if preserve_failure_target is not None:
+                        self._transition(
+                            task_id,
+                            instance_id,
+                            preserve_failure_target,
+                            f"{launch_id}-failed",
+                        )
+                else:
+                    self._transition(
+                        task_id, instance_id, "FAILED_TO_START", f"{launch_id}-failed"
+                    )
                 self._append_process_event(task_id, "PROCESS_START_FAILED", prepared)
                 if isinstance(exc, HarnessError):
                     raise

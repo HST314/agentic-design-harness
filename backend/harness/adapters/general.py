@@ -22,6 +22,7 @@ from .base import (
     AdapterCommandResult,
     AdapterObservation,
     AdapterRecoveryResult,
+    AgentWorkState,
     PrepareRequest,
     ValidationResult,
 )
@@ -190,11 +191,31 @@ class GeneralAgentAdapter:
         self._task_id_for_instance(instance_id)
         return AdapterCommandResult(True, operation_id)
 
-    def has_active_work(self, instance_id: str) -> bool:
-        # Chat turns are short-lived and the process stop pipeline is already
-        # graceful, so the General Agent never blocks an archive drain.
-        del instance_id
-        return False
+    def probe_work_state(self, instance_id: str) -> AgentWorkState:
+        """Report the real chat in-flight state from the Agent process.
+
+        The General Agent runs its model loop in a background thread and
+        publishes the authoritative ``running`` flag on ``/api/messages``.
+        Any probe failure is UNKNOWN, never IDLE, so a safe archive drain
+        cannot interrupt an in-flight chat turn.
+        """
+
+        task_id = self._task_id_for_instance(instance_id)
+        instance = self.store.instance.get(task_id, instance_id)
+        process = None if instance is None else instance.get("process")
+        if not isinstance(process, dict) or process.get("state") != "RUNNING":
+            return AgentWorkState.UNKNOWN
+        try:
+            with urlopen(
+                f"http://{self.host}:{int(process['port'])}/api/messages", timeout=3
+            ) as response:
+                payload = json.loads(response.read(1024 * 1024))
+        except (OSError, ValueError):
+            return AgentWorkState.UNKNOWN
+        running = payload.get("running") if isinstance(payload, dict) else None
+        if not isinstance(running, bool):
+            return AgentWorkState.UNKNOWN
+        return AgentWorkState.ACTIVE if running else AgentWorkState.IDLE
 
     def get_status(self, instance_id: str) -> AdapterObservation:
         task_id = self._task_id_for_instance(instance_id)

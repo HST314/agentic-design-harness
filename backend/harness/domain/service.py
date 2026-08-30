@@ -710,28 +710,57 @@ class TaskCommandService:
         plan["task"]["updated_at"] = utc_now()
         return self._persist_aggregate(plan, envelope, "archive_task", request, actual)
 
-    def restore_task(
-        self, task_id: str, target_status: str, envelope: CommandEnvelope
+    def restore_archived(
+        self,
+        task_id: str,
+        *,
+        instance_restores: list[dict[str, str]],
+        target_status: str,
+        envelope: CommandEnvelope,
     ) -> dict[str, Any]:
-        request = {"task_id": task_id, "target_status": target_status}
+        """Atomically restore an archived aggregate to its pre-archive snapshot.
+
+        Each entry in ``instance_restores`` carries ``instance_id`` and
+        ``target_status``; only instances still parked in STOPPED are moved,
+        so a replay after a partial commit converges instead of failing.
+        """
+
+        request = {
+            "task_id": task_id,
+            "instance_restores": deepcopy(instance_restores),
+            "target_status": target_status,
+        }
         return self._idempotent(
             task_id,
-            "restore_task",
+            "restore_archived",
             request,
             envelope,
-            lambda: self._restore_task(request, envelope),
+            lambda: self._restore_archived(request, envelope),
         )
 
-    def _restore_task(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
+    def _restore_archived(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
         task_id = request["task_id"]
         target_status = request["target_status"]
         task = self._task(task_id)
         actual = self.store.task.revision(task_id, task_id)
         if envelope.expected_revision != actual:
             self._raise_revision(envelope.expected_revision, actual, "task", task_id)
-        self.machine.transition("main_task", task["status"], target_status)
+        if task["status"] == "ARCHIVED":
+            self.machine.transition("main_task", task["status"], target_status)
+        elif task["status"] != target_status:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "The task is no longer archived and cannot be restored.",
+                {"current": task["status"], "target": target_status},
+            )
         plan = self.store.plan.get(task_id, task_id)
         if plan is None:
+            if request["instance_restores"]:
+                raise HarnessError(
+                    "INSTANCE_NOT_FOUND", "The requested instance does not exist."
+                )
             task = {**task, "status": target_status, "updated_at": utc_now()}
             result = {"task": deepcopy(task), "revision": actual + 1}
             self.store.task.put(
@@ -740,16 +769,31 @@ class TaskCommandService:
                 task,
                 expected_revision=actual,
                 actor=self._actor(envelope),
-                command="restore_task",
+                command="restore_archived",
                 idempotency_key=envelope.idempotency_key,
                 command_result=result,
-                request_sha256=self._request_digest("restore_task", request),
+                request_sha256=self._request_digest("restore_archived", request),
             )
             return result
         plan = deepcopy(plan)
+        now = utc_now()
+        instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
+        for restore in request["instance_restores"]:
+            instance = instance_by_id.get(restore["instance_id"])
+            if instance is None:
+                raise HarnessError(
+                    "INSTANCE_NOT_FOUND", "The requested instance does not exist."
+                )
+            if instance["status"] != "STOPPED":
+                continue
+            self.machine.transition("agent_instance", "STOPPED", restore["target_status"])
+            instance["status"] = restore["target_status"]
+            if instance["status"] in {"STARTING", "RUNNING"}:
+                self._activate_lifecycle(instance, now)
+        self._refresh_stages(plan, now)
         plan["task"]["status"] = target_status
-        plan["task"]["updated_at"] = utc_now()
-        return self._persist_aggregate(plan, envelope, "restore_task", request, actual)
+        plan["task"]["updated_at"] = now
+        return self._persist_aggregate(plan, envelope, "restore_archived", request, actual)
 
     def cancel_task(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
         request = {"task_id": task_id}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, runtime_checkable
@@ -9,6 +10,18 @@ from typing import Any, NoReturn, Protocol, runtime_checkable
 from ..core.errors import HarnessError
 from ..services.process_runtime import ProcessSpec
 from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
+
+
+class AgentWorkState(str, enum.Enum):
+    """Tri-state answer to whether an Agent has in-flight work.
+
+    UNKNOWN is distinct from IDLE: a probe that could not produce an
+    authoritative answer must never be read as "safe to stop".
+    """
+
+    ACTIVE = "ACTIVE"
+    IDLE = "IDLE"
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,9 +93,9 @@ class UnavailableAgentAdapter:
     def get_status(self, instance_id: str) -> AdapterObservation:
         self._raise(instance_id)
 
-    def has_active_work(self, instance_id: str) -> bool:
+    def probe_work_state(self, instance_id: str) -> AgentWorkState:
         del instance_id
-        return False
+        return AgentWorkState.UNKNOWN
 
     def request_advance(
         self,
@@ -156,8 +169,12 @@ class AgentAdapter(Protocol):
 
     def get_status(self, instance_id: str) -> AdapterObservation: ...
 
-    def has_active_work(self, instance_id: str) -> bool:
-        """Report whether the Agent has in-flight work a drain should wait for."""
+    def probe_work_state(self, instance_id: str) -> AgentWorkState:
+        """Report the Agent in-flight state a drain should wait for.
+
+        UNKNOWN means the probe could not answer authoritatively; callers
+        must treat it as "not safe to stop" rather than as idle.
+        """
         ...
 
     def request_advance(

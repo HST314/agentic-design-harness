@@ -41,6 +41,7 @@
             "IDEMPOTENCY_CONFLICT",
             "INVALID_STATE_TRANSITION",
             "ARCHIVE_DRAIN_TIMEOUT",
+            "ARCHIVE_DRAIN_UNKNOWN",
             "TASK_ARCHIVED",
             "ADAPTER_UNAVAILABLE",
             "UI_LINK_REJECTED",

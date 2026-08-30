@@ -33,6 +33,7 @@ from .base import (
     AdapterCommandResult,
     AdapterObservation,
     AdapterRecoveryResult,
+    AgentWorkState,
     PrepareRequest,
     ValidationResult,
 )
@@ -557,22 +558,26 @@ class ImageAgentAdapter(ImageObservationMixin):
             details={"job_id": job_id, "job_status": job_status},
         )
 
-    def has_active_work(self, instance_id: str) -> bool:
+    def probe_work_state(self, instance_id: str) -> AgentWorkState:
         if not self.available:
-            return False
+            return AgentWorkState.UNKNOWN
         try:
             task_id = self._task_id_for_instance(instance_id)
             state = self._state(task_id, instance_id)
             job_id = state.get("job_id")
             if not isinstance(job_id, str):
-                return False
+                return AgentWorkState.IDLE
             job = self._request(
                 self._base_url(task_id, instance_id), "GET", f"/api/jobs/{job_id}"
             )
             job = self._require_job(job)
-            return job["status"] in _ACTIVE_JOB_STATES
-        except HarnessError:
-            return False
+            if job["status"] in _ACTIVE_JOB_STATES:
+                return AgentWorkState.ACTIVE
+            return AgentWorkState.IDLE
+        except Exception:
+            # A failed probe is not proof of idleness; report UNKNOWN so a
+            # safe archive drain blocks instead of interrupting in-flight work.
+            return AgentWorkState.UNKNOWN
 
     def get_status(self, instance_id: str) -> AdapterObservation:
         if not self.available:

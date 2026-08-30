@@ -17,6 +17,7 @@ from harness.adapters import (
     AdapterObservation,
     AdapterRecoveryResult,
     AdapterRegistry,
+    AgentWorkState,
     ValidationResult,
 )
 from harness.adapters.image import ImageAgentAdapter
@@ -64,7 +65,7 @@ class FakeImageAdapter:
         self.prepare_error = None
         self.start_error = None
         self.prepare_calls = []
-        self.active_work = False
+        self.work_state = AgentWorkState.IDLE
 
     def validate_task_card(self, card):
         if self.validation_delegate is not None:
@@ -95,8 +96,8 @@ class FakeImageAdapter:
             time.sleep(self.observation_delay)
         return self.observation
 
-    def has_active_work(self, instance_id):
-        return self.active_work
+    def probe_work_state(self, instance_id):
+        return self.work_state
 
     def request_advance(self, instance_id, action, payload, operation_id):
         if self.advance_delay:

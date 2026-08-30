@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import AdapterRegistry, PrepareRequest
+from ..adapters.base import AgentWorkState
 from ..adapters.types import AgentInstanceSnapshot, StageSnapshot, TaskCard
 from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
@@ -646,6 +647,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         validate_identifier(operation_id, "operation_id")
         if envelope.actor_type not in {"human", "master"}:
             raise HarnessError("VALIDATION_ERROR", "Only a human or Master may cancel a task.")
+        self._require_task_not_archived(task_id)
         command_request = {"task_id": task_id}
         request = {
             "task_id": task_id,
@@ -865,6 +867,9 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 "snapshot": {
                     "pre_archive_status": task_status,
                     "stopped_instance_ids": [item["instance_id"] for item in targets],
+                    "instance_statuses": {
+                        item["instance_id"]: item["initial_status"] for item in targets
+                    },
                 },
                 "target_instances": targets,
                 "instance_progress": {
@@ -888,18 +893,33 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         task_id = request["task_id"]
         operation_id = intent["operation_id"]
         if not request.get("force", False):
-            busy = self._drain_archive_targets(
+            drain = self._drain_archive_targets(
                 task_id,
                 [item["instance_id"] for item in intent["target_instances"]],
                 float(request["drain_timeout_seconds"]),
             )
-            if busy:
-                error = HarnessError(
-                    "ARCHIVE_DRAIN_TIMEOUT",
-                    "Agents are still finishing in-flight work; "
-                    "retry to keep waiting or archive with force.",
-                    {"busy_instance_ids": busy, "operation_id": operation_id},
-                )
+            if drain["busy"] or drain["unknown"]:
+                if drain["busy"]:
+                    error = HarnessError(
+                        "ARCHIVE_DRAIN_TIMEOUT",
+                        "Agents are still finishing in-flight work; "
+                        "retry to keep waiting or archive with force.",
+                        {
+                            "busy_instance_ids": drain["busy"],
+                            "unknown_instance_ids": drain["unknown"],
+                            "operation_id": operation_id,
+                        },
+                    )
+                else:
+                    error = HarnessError(
+                        "ARCHIVE_DRAIN_UNKNOWN",
+                        "The in-flight state of an Agent could not be established; "
+                        "retry the probe or archive with force.",
+                        {
+                            "unknown_instance_ids": drain["unknown"],
+                            "operation_id": operation_id,
+                        },
+                    )
                 intent.update(
                     {
                         "state": "ABORTED",
@@ -972,30 +992,41 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
 
     def _drain_archive_targets(
         self, task_id: str, instance_ids: list[str], timeout_seconds: float
-    ) -> list[str]:
-        """Best-effort wait for in-flight Agent work; returns still-busy instances."""
+    ) -> dict[str, list[str]]:
+        """Best-effort wait for in-flight Agent work.
+
+        Returns the instances still ACTIVE at the deadline (``busy``) and the
+        instances whose in-flight state could not be established (``unknown``).
+        UNKNOWN is never treated as idle: a safe archive must not stop an
+        Agent whose work state cannot be proven.
+        """
 
         deadline = time.monotonic() + timeout_seconds
         busy: list[str] = []
+        unknown: list[str] = []
         for instance_id in instance_ids:
             instance = self._instance(task_id, instance_id)
             if instance["status"] not in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
                 continue
             adapter = self.adapters.get_optional(instance["agent_type"])
             if adapter is None or not adapter.available:
+                unknown.append(instance_id)
                 continue
             while True:
                 try:
-                    active = adapter.has_active_work(instance_id)
+                    work_state = adapter.probe_work_state(instance_id)
                 except Exception:
-                    active = False
-                if not active:
+                    work_state = AgentWorkState.UNKNOWN
+                if work_state is AgentWorkState.IDLE:
                     break
                 if time.monotonic() >= deadline:
-                    busy.append(instance_id)
+                    if work_state is AgentWorkState.ACTIVE:
+                        busy.append(instance_id)
+                    else:
+                        unknown.append(instance_id)
                     break
                 time.sleep(_ARCHIVE_DRAIN_POLL_SECONDS)
-        return busy
+        return {"busy": busy, "unknown": unknown}
 
     def resume_task(
         self,
@@ -1051,13 +1082,17 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 )
             snapshot = self._latest_archive_snapshot(task_id)
             if snapshot is None:
+                stopped_instance_ids = [
+                    instance["instance_id"]
+                    for instance in ([] if plan is None else plan["instances"])
+                    if instance["status"] == "STOPPED"
+                ]
                 snapshot = {
                     "pre_archive_status": "RUNNING" if plan is not None else "DRAFT",
-                    "stopped_instance_ids": [
-                        instance["instance_id"]
-                        for instance in ([] if plan is None else plan["instances"])
-                        if instance["status"] == "STOPPED"
-                    ],
+                    "stopped_instance_ids": stopped_instance_ids,
+                    "instance_statuses": {
+                        instance_id: "RUNNING" for instance_id in stopped_instance_ids
+                    },
                 }
             intent = {
                 "schema_version": "1.0",
@@ -1070,7 +1105,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     instance_id: {"state": "PENDING"}
                     for instance_id in snapshot["stopped_instance_ids"]
                 },
-                "task_restored": False,
+                "aggregate_restored": False,
                 "state": "PREPARED",
                 "prepared_at": utc_now(),
                 "result": None,
@@ -1089,38 +1124,26 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         task_id = request["task_id"]
         operation_id = intent["operation_id"]
         snapshot = intent["snapshot"]
-        if not intent.get("task_restored"):
-            if crash_hook:
-                crash_hook("before_task_restore_commit")
-            current_revision = self.store.task.revision(task_id, task_id)
-            self.commands.restore_task(
-                task_id,
-                snapshot["pre_archive_status"],
-                CommandEnvelope(
-                    idempotency_key=envelope.idempotency_key,
-                    actor_type=envelope.actor_type,
-                    actor_id=envelope.actor_id,
-                    expected_revision=current_revision,
-                ),
-            )
-            if crash_hook:
-                crash_hook("after_task_restore_commit")
-            self._sync_task_navigation(task_id, archived=False)
-            intent["task_restored"] = True
-            atomic_write_json(intent_path, intent)
-        restored: list[str] = []
-        failed: list[dict[str, Any]] = []
+        instance_statuses = snapshot.get("instance_statuses")
+        if not isinstance(instance_statuses, dict):
+            instance_statuses = {}
+        # Resume first wakes every stopped process while the instance keeps its
+        # STOPPED business status, then restores the instance/stage/task
+        # snapshot in one atomic aggregate commit. Intents written by the
+        # previous resume pipeline are migrated on read.
+        aggregate_restored = bool(
+            intent.get("aggregate_restored", intent.get("task_restored", False))
+        )
         for instance_id in snapshot["stopped_instance_ids"]:
             progress = intent["instance_progress"][instance_id]
-            if progress["state"] in {"RUNNING", "SKIPPED", "FAILED"}:
-                if progress["state"] == "RUNNING":
-                    restored.append(instance_id)
-                if progress["state"] == "FAILED":
-                    failed.append(deepcopy(progress["error"]))
+            if progress["state"] == "RUNNING":
+                progress["state"] = "PROCESS_RUNNING"
+                atomic_write_json(intent_path, intent)
+            if progress["state"] in {"PROCESS_RUNNING", "RESTORED", "SKIPPED", "FAILED"}:
                 continue
             progress.update(
                 {
-                    "state": "RESTARTING",
+                    "state": "WAKING",
                     "started_at": progress.get("started_at") or utc_now(),
                 }
             )
@@ -1135,7 +1158,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             try:
                 adapter, spec = self._prepare_instance(task_id, instance_id)
                 del adapter
-                launch = self.supervisor.restart_instance(
+                launch = self.supervisor.resume_instance(
                     task_id,
                     instance_id,
                     spec,
@@ -1159,7 +1182,6 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     {"state": "FAILED", "error": failure, "completed_at": utc_now()}
                 )
                 atomic_write_json(intent_path, intent)
-                failed.append(failure)
                 continue
             except Exception as exc:
                 failure = {
@@ -1172,13 +1194,55 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     {"state": "FAILED", "error": failure, "completed_at": utc_now()}
                 )
                 atomic_write_json(intent_path, intent)
-                failed.append(failure)
                 continue
             if crash_hook:
                 crash_hook(f"after_instance_resume_effect:{instance_id}")
-            progress.update({"state": "RUNNING", "completed_at": utc_now()})
+            progress.update({"state": "PROCESS_RUNNING", "completed_at": utc_now()})
             atomic_write_json(intent_path, intent)
-            restored.append(instance_id)
+        if not aggregate_restored:
+            if crash_hook:
+                crash_hook("before_task_restore_commit")
+            restores: list[dict[str, str]] = []
+            for instance_id in snapshot["stopped_instance_ids"]:
+                progress = intent["instance_progress"][instance_id]
+                if progress["state"] not in {"PROCESS_RUNNING", "RESTORED"}:
+                    continue
+                target_status = instance_statuses.get(instance_id, "RUNNING")
+                if target_status == "STARTING":
+                    # The wake pipeline waits for readiness, so an instance
+                    # archived mid-start resumes as a truthful RUNNING.
+                    target_status = "RUNNING"
+                restores.append(
+                    {"instance_id": instance_id, "target_status": target_status}
+                )
+            current_revision = self.store.task.revision(task_id, task_id)
+            self.commands.restore_archived(
+                task_id,
+                instance_restores=restores,
+                target_status=snapshot["pre_archive_status"],
+                envelope=CommandEnvelope(
+                    idempotency_key=f"resume-restore-{operation_id}",
+                    actor_type=envelope.actor_type,
+                    actor_id=envelope.actor_id,
+                    expected_revision=current_revision,
+                ),
+            )
+            if crash_hook:
+                crash_hook("after_task_restore_commit")
+            for item in restores:
+                progress = intent["instance_progress"][item["instance_id"]]
+                progress.update({"state": "RESTORED", "completed_at": utc_now()})
+            intent["aggregate_restored"] = True
+            atomic_write_json(intent_path, intent)
+        self._sync_task_navigation(task_id, archived=False)
+        restored: list[str] = []
+        failed: list[dict[str, Any]] = []
+        for instance_id in snapshot["stopped_instance_ids"]:
+            progress = intent["instance_progress"][instance_id]
+            if progress["state"] == "RESTORED":
+                restored.append(instance_id)
+            elif progress["state"] == "FAILED":
+                failed.append(deepcopy(progress["error"]))
         task = self.store.task.get(task_id, task_id)
         result = {
             "task": deepcopy(task),
@@ -1206,7 +1270,17 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         if not candidates:
             return None
         latest = max(candidates, key=lambda item: str(item.get("committed_at") or ""))
-        return deepcopy(latest["snapshot"])
+        snapshot = deepcopy(latest["snapshot"])
+        if not isinstance(snapshot.get("instance_statuses"), dict):
+            # Snapshots written before per-instance statuses were recorded can
+            # be rebuilt from the frozen target list of the same intent.
+            snapshot["instance_statuses"] = {
+                item["instance_id"]: item["initial_status"]
+                for item in latest.get("target_instances", [])
+                if isinstance(item.get("instance_id"), str)
+                and isinstance(item.get("initial_status"), str)
+            }
+        return snapshot
 
     def _require_task_not_archived(self, task_id: str) -> None:
         task = self.store.task.get(task_id, task_id)
