@@ -54,62 +54,39 @@ export async function executeBridgeRequest(
   }
   if (request.action === "delivery.status") {
     const bundleId = String(request.payload.bundle_id);
-    const bundles = await api.deliveryBundles(scope.taskId);
-    const candidate = bundles.candidates.find((item) => (
-      item.bundle_id === bundleId && item.instance_id === instanceId
-    ));
-    return { bundle_id: bundleId, status: candidate?.status ?? "UNKNOWN" };
+    const result = await api.deliveryBundleStatus(scope.taskId, instanceId, bundleId);
+    return { bundle_id: bundleId, status: result.status };
   }
   if (request.action === "delivery.complete") {
     const bundleId = String(request.payload.bundle_id);
-    // Poll on a fixed deadline so the loop can never outrun the child's
-    // 30 second bridge timeout, no matter how slow a single read gets.
-    // Every read is bound to the same deadline via AbortController: a slow
-    // in-flight GET started just before the deadline is aborted instead of
-    // hanging past the bridge timeout.
-    const deadline = Date.now() + 25_000;
-    while (Date.now() < deadline) {
-      const controller = new AbortController();
-      const abortAt = setTimeout(() => controller.abort(), deadline - Date.now());
-      let bundles: Awaited<ReturnType<typeof api.deliveryBundles>>;
-      try {
-        bundles = await api.deliveryBundles(scope.taskId, controller.signal);
-      } catch (error) {
-        if (controller.signal.aborted) break;
-        throw error;
-      } finally {
-        clearTimeout(abortAt);
-      }
-      const candidate = bundles.candidates.find((item) => (
-        item.bundle_id === bundleId && item.instance_id === instanceId
-      ));
-      if (candidate?.status === "PUBLISHED") {
-        return { bundle_id: bundleId, status: "PUBLISHED" };
-      }
-      if (candidate && candidate.status !== "PENDING_CONFIRMATION") {
-        throw new Error("当前交付候选已经处理，无法再次完成入库。");
-      }
-      const review = bundles.reviews.find((item) => (
-        item.bundle_id === bundleId && item.approval.status === "PENDING"
-      ));
-      if (candidate && review) {
-        const operationId = bridgeIdempotencyKey(request.action, request.request_id);
-        return api.resolveApproval(review.approval.approval_id, {
-          decision: "APPROVED",
-          action: "publish_bundle",
-          payload: {},
+    const operationId = bridgeIdempotencyKey(request.action, request.request_id);
+    const controller = new AbortController();
+    const abortAt = globalThis.setTimeout(() => controller.abort(), 25_000);
+    try {
+      const result = await api.completeDeliveryBundle(
+        scope.taskId,
+        bundleId,
+        {
+          instance_id: instanceId,
           operation_id: operationId,
           envelope: {
             idempotency_key: operationId,
             actor_type: "human",
             actor_id: "human_operator",
-            expected_revision: review.approval_revision,
+            expected_revision: taskRevision ?? 0,
           },
-        });
+        },
+        controller.signal,
+      );
+      return { bundle_id: bundleId, status: result.status };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error("交付确认超时，请稍后重试；重复点击不会重复发布。");
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      throw error;
+    } finally {
+      globalThis.clearTimeout(abortAt);
     }
-    throw new Error("主系统尚未完成交付候选对账，请稍后再点击完成。");
   }
   if (!Number.isInteger(taskRevision)) {
     throw new Error("当前任务版本已变化，请刷新专业工作台后重试。");
