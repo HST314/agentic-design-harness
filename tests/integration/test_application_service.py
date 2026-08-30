@@ -707,6 +707,67 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
         self.application.cancel_instance("t_ppt_manual_gate_start", "i_ppt_1")
 
+    def test_waiting_approval_task_still_allows_ready_instance_start(self) -> None:
+        self._configure_runtime_artifact("waiting-approval-start-fake-agent")
+        task_id = "t_waiting_approval_start"
+        created = create_task(self.commands, task_id)
+        draft = image_plan(task_id, count=2)
+        saved = self.application.save_plan_and_create_instances(
+            task_id,
+            stages=draft["stages"],
+            instances=draft["instances"],
+            task_cards=draft["task_cards"],
+            operation_id="save_waiting_approval_start",
+            envelope=envelope("save-waiting-approval-start", created["revision"]),
+        )
+        confirmed = self.commands.confirm_start(
+            task_id,
+            envelope("confirm-waiting-approval-start", saved["task_revision"]),
+        )
+        starting = self.commands.transition_instance(
+            task_id,
+            "i_image_1",
+            "STARTING",
+            envelope("gate-starting", confirmed["task_revision"], "adapter"),
+        )
+        running = self.commands.transition_instance(
+            task_id,
+            "i_image_1",
+            "RUNNING",
+            envelope("gate-running", starting["task_revision"], "adapter"),
+        )
+        self.fake_adapter.observation = AdapterObservation(
+            "WAITING_APPROVAL",
+            step_id="waiting_human_approval",
+            capabilities=("approve_taskbook",),
+            details={"job_id": "job_waiting_approval_start"},
+        )
+        gated = self.application.observe_instance(task_id, "i_image_1")
+        self.assertEqual(gated["instance"]["status"], "WAITING_APPROVAL")
+        plan = self.store.plan.get(task_id, task_id)
+        self.assertEqual(plan["task"]["status"], "WAITING_APPROVAL")
+
+        queued = self.application.start_instance(
+            task_id,
+            "i_image_2",
+            operation_id="start_waiting_approval_sibling",
+            envelope=envelope(
+                "start-waiting-approval-sibling",
+                self.store.task.revision(task_id, task_id),
+            ),
+        )
+        self.assertEqual(queued["state"], "QUEUED")
+        completed = self.application._resume_instance_operation(
+            self.application._intent_path("start_waiting_approval_sibling")
+        )
+
+        self.assertEqual(completed["state"], "COMMITTED")
+        self.assertEqual(
+            self.store.instance.get(task_id, "i_image_2")["status"],
+            "RUNNING",
+        )
+        self.application.cancel_instance(task_id, "i_image_2")
+
     def test_prior_ppt_gate_failure_can_be_recovered_without_recreating_task(self) -> None:
         created = create_task(self.commands, "t_recover_ppt_gate")
         draft = image_to_ppt_plan("t_recover_ppt_gate")
