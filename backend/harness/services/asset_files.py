@@ -11,7 +11,6 @@ from typing import BinaryIO
 
 from ..storage.safe_open import open_regular_readonly
 
-
 _LOCAL_TEXT_ENCODINGS = ("utf-8-sig", "gb18030")
 
 

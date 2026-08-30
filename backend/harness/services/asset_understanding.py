@@ -265,7 +265,7 @@ class AssetUnderstandingService:
         except UnicodeDecodeError as exc:
             raise _AssetContentError(
                 "TEXT_ENCODING_UNSUPPORTED",
-                "该文本资料编码不受支持，请保存为 UTF-8 或 GB18030 后重新上传。",
+                "该文本资料编码不受支持，请保存为 UTF-8 或 GB18030 后重新上传。",  # noqa: RUF001
             ) from exc
         blocks = self._text_blocks(text, chunk_chars, page=None, markdown=markdown)
         summary = self._summary(blocks)

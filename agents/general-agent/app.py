@@ -22,7 +22,20 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_MODEL_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_HISTORY_MESSAGES = 200
 MAX_TOOL_CALLS_PER_ROUND = 16
+MAX_LISTED_FILES = 1000
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List readable files in the current task shared folder.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -70,11 +83,30 @@ class SharedFolderTools:
             raise RuntimeError("The shared workspace is not a safe directory.")
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == "list_files":
+            return self.list_files(arguments)
         if name == "read_file":
             return self.read_file(arguments)
         if name == "write_file":
             return self.write_file(arguments)
-        raise ValueError("Only read_file and write_file are available.")
+        raise ValueError("Only list_files, read_file and write_file are available.")
+
+    def list_files(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._keys(arguments, set())
+        files = []
+        for path in sorted(self.root.rglob("*")):
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or any(part.startswith(".") for part in path.relative_to(self.root).parts)
+            ):
+                continue
+            resolved = path.resolve(strict=True)
+            if resolved.is_relative_to(self.root):
+                files.append(resolved.relative_to(self.root).as_posix())
+                if len(files) >= MAX_LISTED_FILES:
+                    break
+        return {"files": files}
 
     def read_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
         self._keys(arguments, {"path"})
@@ -175,10 +207,18 @@ class GeneralAgent:
             instruction += "\n\n" + "\n".join(f"- {item}" for item in details)
         system = (
             "You are a general-purpose task Agent. Complete the user's request autonomously. "
-            "Your only tools are read_file and write_file, both scoped to the current task shared "
-            "folder. Use an iterative tool loop when files must be inspected or produced. Never "
+            "Your tools are list_files, read_file and write_file, all scoped to the current task "
+            "shared folder. Use an iterative tool loop when files must be inspected or produced. "
+            "Never "
             "claim a file change unless the tool succeeded. Keep the final response concise."
         )
+        materialized = self.task_card.get("materialized_inputs", [])
+        if materialized:
+            lines = [
+                f"- {item['asset_id']} -> {item['path']} ({item['mime_type']})"
+                for item in materialized
+            ]
+            system += "\nAuthorized input asset paths:\n" + "\n".join(lines)
         if self.state_path.exists():
             loaded = json.loads(self.state_path.read_text(encoding="utf-8"))
             if loaded.get("task_card_id") != self.task_card["card_id"]:
@@ -247,11 +287,17 @@ class GeneralAgent:
     def _execute(self) -> None:
         try:
             answer = self._run_loop()
-        except Exception:
+        except Exception as exc:
+            message = (
+                "输入资料读取或工具调用未能完成, 请检查任务资料后重试。"
+                if isinstance(exc, RuntimeError)
+                and "tool-round limit" in str(exc)
+                else "模型暂时未能完成本轮任务; 请稍后重试。"
+            )
             with self.lock:
                 self.state["messages"].append(
                     self._message(
-                        "assistant", "模型暂时未能完成本轮任务; 请稍后重试。", status="error"
+                        "assistant", message, status="error"
                     )
                 )
                 self._persist(self.state)
@@ -286,6 +332,8 @@ class GeneralAgent:
                 if not isinstance(call_id, str) or not isinstance(function, dict):
                     raise RuntimeError("The model returned an invalid tool call.")
                 name = function.get("name")
+                if not isinstance(name, str):
+                    raise RuntimeError("The model returned an invalid tool name.")
                 try:
                     arguments = json.loads(function.get("arguments", "{}"))
                     result = {"ok": True, "result": self.tools.execute(name, arguments)}

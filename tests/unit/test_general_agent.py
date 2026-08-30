@@ -233,6 +233,22 @@ class GeneralAgentRuntimeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tools.read_file({"path": ".general-agent-state/state_secret.json"})
 
+    def test_list_files_exposes_materialized_inputs_but_not_managed_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "inputs" / "a_brief").mkdir(parents=True)
+            (root / "inputs" / "a_brief" / "brief.md").write_text(
+                "# brief", encoding="utf-8"
+            )
+            (root / ".general-agent-state").mkdir()
+            (root / ".general-agent-state" / "state.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            tools = MODULE.SharedFolderTools(root)
+            self.assertEqual(
+                tools.list_files({}), {"files": ["inputs/a_brief/brief.md"]}
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

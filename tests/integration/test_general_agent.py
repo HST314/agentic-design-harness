@@ -50,6 +50,18 @@ class GeneralAgentIntegrationTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(created.status_code, 200, created.text)
+                imported = app.state.container.assets.import_bytes(
+                    task_id,
+                    filename="本地说明.md",
+                    content="# 中文说明\n请使用克制的版式。\n".encode("gb18030"),
+                    description="中文本地任务资料",
+                    source="user_upload",
+                    idempotency_key="general-gb18030-input",
+                )
+                app.state.container.assets.select_inputs(
+                    task_id, [imported["asset_id"]], manifest_id="selected_general"
+                )
+                app.state.container.asset_understanding.prepare(task_id, [imported["asset_id"]])
                 planned = client.put(
                     f"/api/v1/tasks/{task_id}/plan",
                     json={
@@ -88,7 +100,14 @@ class GeneralAgentIntegrationTests(unittest.TestCase):
                                 "agent_type": "general",
                                 "objective": "Summarize the files in the shared folder.",
                                 "instructions": ["Write results only when requested."],
-                                "input_assets": [],
+                                "input_assets": [
+                                    {
+                                        "asset_id": imported["asset_id"],
+                                        "manifest_relpath": (
+                                            f"inputs/manifests/{imported['asset_id']}.json"
+                                        ),
+                                    }
+                                ],
                                 "expected_deliveries": [
                                     {
                                         "kind": "document",
@@ -139,6 +158,39 @@ class GeneralAgentIntegrationTests(unittest.TestCase):
                     self.assertEqual(payload["messages"][0]["role"], "user")
                     self.assertIn(
                         "Summarize the files", payload["messages"][0]["content"]
+                    )
+                    materialized = (
+                        root
+                        / "workspace"
+                        / "tasks"
+                        / task_id
+                        / "resources"
+                        / "shared"
+                        / "inputs"
+                        / imported["asset_id"]
+                        / "本地说明.md"
+                    )
+                    self.assertEqual(
+                        materialized.read_text(encoding="utf-8"),
+                        "# 中文说明\n请使用克制的版式。\n",
+                    )
+                    runtime_card = json.loads(
+                        (
+                            root
+                            / "workspace"
+                            / "tasks"
+                            / task_id
+                            / "instances"
+                            / instance_id
+                            / "runtime"
+                            / "general-task-card.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                    self.assertTrue(
+                        any(
+                            item["path"].endswith("本地说明.md")
+                            for item in runtime_card["materialized_inputs"]
+                        )
                     )
                     projection = client.get(f"/api/v1/tasks/{task_id}/work-items").json()
                     self.assertEqual(projection["items"][0]["agent_type"], "general")

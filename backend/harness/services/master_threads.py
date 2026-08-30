@@ -514,10 +514,8 @@ class MasterThreadService:
                     "expected_card_revisions": deepcopy(expected_card_revisions),
                     "task_expected_revision": task_expected_revision,
                     "instance_ids": start_subset,
-                    "plan_mode": (
-                        "merge"
-                        if self.store.plan.get(task_id, task_id) is not None
-                        else "replace"
+                    "plan_mode": self._confirmation_plan_mode(
+                        self.store.plan.get(task_id, task_id), proposal
                     ),
                     "actor": {
                         "actor_type": envelope.actor_type,
@@ -537,6 +535,40 @@ class MasterThreadService:
                 )
                 atomic_write_json(intent_path, intent)
             return self._resume_confirm(intent_path)
+
+    @staticmethod
+    def _confirmation_plan_mode(
+        landed_plan: dict[str, Any] | None, proposal: dict[str, Any]
+    ) -> str:
+        """Select the command mode without weakening landed-work protections.
+
+        A later Master run normally proposes a self-contained batch with fresh
+        identifiers. That is an append, not a merge: merge is intentionally
+        reserved for revising the exact topology already on the board.
+        Partially overlapping proposals still go through merge so its strict
+        validation rejects ambiguous attempts instead of mutating landed work.
+        """
+
+        if landed_plan is None:
+            return "replace"
+        identifier_groups = (
+            ("stages", "stage_id"),
+            ("instances", "instance_id"),
+            ("task_cards", "card_id"),
+        )
+        incoming_groups = (
+            proposal["stages"],
+            proposal["execution_cards"],
+            proposal["execution_cards"],
+        )
+        for (landed_key, identifier), incoming in zip(
+            identifier_groups, incoming_groups, strict=True
+        ):
+            landed_ids = {item[identifier] for item in landed_plan[landed_key]}
+            incoming_ids = {item[identifier] for item in incoming}
+            if landed_ids & incoming_ids:
+                return "merge"
+        return "append"
 
     def _resume_confirm(self, intent_path: Path) -> dict[str, Any]:
         intent = read_json(intent_path)
