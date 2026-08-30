@@ -425,6 +425,21 @@ class ImageAgentAdapter(ImageObservationMixin):
                     "verified": True,
                 }
             )
+        known_facts = {
+            "harness_instructions": instructions,
+            "harness_parameters": image_parameters,
+            "harness_output_contract": {
+                "expected_deliveries": deepcopy(card["expected_deliveries"]),
+                "aspect_ratio": card["parameters"].get("aspect_ratio"),
+            },
+        }
+        aspect_ratio = card["parameters"].get("aspect_ratio")
+        if aspect_ratio:
+            # Image Agent turns top-level known facts into TaskSpecification facts.
+            # Its paid-render boundary recognizes output_spec, so publish the
+            # approved ratio there instead of relying on a reasoning model to
+            # rediscover it inside Harness-specific audit metadata.
+            known_facts["output_spec"] = aspect_ratio
         mapped = {
             "task_id": card["instance_id"],
             "project_id": card["instance_id"],
@@ -433,14 +448,7 @@ class ImageAgentAdapter(ImageObservationMixin):
             "deliverable_goal": card["objective"],
             "usage_context": card["parameters"]["usage_context"],
             "category_ref": category_ref,
-            "known_facts": {
-                "harness_instructions": instructions,
-                "harness_parameters": image_parameters,
-                "harness_output_contract": {
-                    "expected_deliveries": deepcopy(card["expected_deliveries"]),
-                    "aspect_ratio": card["parameters"].get("aspect_ratio"),
-                },
-            },
+            "known_facts": known_facts,
             "unknowns": {},
             "asset_inputs": asset_inputs,
             "status": "draft",

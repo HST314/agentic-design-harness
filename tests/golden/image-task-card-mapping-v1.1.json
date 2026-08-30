@@ -70,7 +70,8 @@
           }
         ],
         "aspect_ratio": "16:9"
-      }
+      },
+      "output_spec": "16:9"
     },
     "unknowns": {},
     "asset_inputs": [

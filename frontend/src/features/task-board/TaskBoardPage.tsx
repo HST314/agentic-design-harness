@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import type { WorkItemStageProjection } from "../../api/client";
 import { api, workItemDetailQuery, workItemsQuery } from "../../api/queries";
 import type { ContractWorkItemProjection } from "../../api/generated-contracts";
 import { Icon } from "../../components/Icon";
@@ -75,9 +74,67 @@ export function workbenchPath(item: ContractWorkItemProjection): string {
 }
 
 export function canEnterWorkbench(item: ContractWorkItemProjection): boolean {
-  if (item.agent_type !== "ppt") return true;
-  return ["STARTING", "RUNNING", "WAITING_APPROVAL", "SUCCEEDED"].includes(
+  return ["RUNNING", "WAITING_APPROVAL", "SUCCEEDED"].includes(
     item.current_instance?.status ?? "",
+  );
+}
+
+export function workbenchGateMessage(item: ContractWorkItemProjection): string {
+  const label = agentLabel(item.agent_type);
+  const status = item.current_instance?.status;
+  if (status === "STARTING") {
+    return `「${item.title}」的${label}工作台正在启动，请稍候片刻，待 Master 页显示「已就绪」后再进入。`;
+  }
+  if (status === "FAILED_TO_START" || status === "CRASHED" || status === "FAILED") {
+    return `「${item.title}」的${label}工作台启动未完成。请在 Master 页重试启动，待显示「已就绪」后再进入。`;
+  }
+  if (status === "UNAVAILABLE") {
+    return `「${item.title}」需要的${label}创作能力暂不可用，请返回 Master 页调整计划。`;
+  }
+  return `「${item.title}」的${label}工作台尚未启动。请在 Master 页启动该任务，待显示「已就绪」后再进入。`;
+}
+
+export function WorkbenchGateDialog({ item, open, onClose }: {
+  item: ContractWorkItemProjection;
+  open: boolean;
+  onClose: () => void;
+}): React.JSX.Element | null {
+  const ref = useRef<HTMLDialogElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (open && !dialog.open) {
+      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      dialog.showModal();
+    }
+    if (!open && dialog.open) {
+      dialog.close();
+      requestAnimationFrame(() => returnFocusRef.current?.focus());
+    }
+  }, [open]);
+
+  if (!open) return null;
+  return (
+    <dialog
+      ref={ref}
+      className="master-card-detail task-gate"
+      aria-labelledby="task-gate-title"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+    >
+      <header className="workbench-drawer__header">
+        <div><p className="workbench-eyebrow">专业工作台</p><h2 id="task-gate-title">工作台未就绪</h2></div>
+        <button type="button" className="workbench-icon-button" aria-label="关闭未就绪提示" onClick={onClose}><Icon name="close" /></button>
+      </header>
+      <div className="master-card-detail__body">
+        <p className="task-gate__message">{workbenchGateMessage(item)}</p>
+      </div>
+      <footer className="workbench-dialog-actions task-gate__actions">
+        <button type="button" className="workbench-secondary-button" onClick={onClose}>知道了</button>
+        <Link className="workbench-primary-button" to={`/tasks/${encodeURIComponent(item.task_id)}/master`}>前往 Master</Link>
+      </footer>
+    </dialog>
   );
 }
 
@@ -103,6 +160,7 @@ function WorkItemCard({
     ? `${item.pending_approvals.length} 项待审批`
     : item.alerts[0]?.message;
   const canEnter = canEnterWorkbench(item);
+  const [gateOpen, setGateOpen] = useState(false);
   const statusValue: EditableBusinessStatus = item.business_status === "EXCEPTION"
     ? "TODO"
     : item.business_status;
@@ -118,7 +176,6 @@ function WorkItemCard({
         <div><dt>重试</dt><dd>{item.attempts.length}</dd></div>
       </dl>
       {attention ? <p className="task-card__attention"><Icon name="status" />{attention}</p> : null}
-      {!canEnter ? <p className="task-card__entry-hint">请从 Master 启动，启动成功后可进入 PPT 工作台</p> : null}
     </>
   );
   return (
@@ -153,10 +210,16 @@ function WorkItemCard({
           {cardBody}
         </Link>
       ) : (
-        <div className="task-card__entry task-card__entry--disabled" aria-label={`${item.title}，PPT 工作台尚未启动`}>
+        <button
+          type="button"
+          className="task-card__entry"
+          aria-label={`${item.title}，${businessStatusLabel[item.business_status]}，${agentLabel(item.agent_type)}工作台未就绪，打开提示`}
+          onClick={() => setGateOpen(true)}
+        >
           {cardBody}
-        </div>
+        </button>
       )}
+      <WorkbenchGateDialog item={item} open={gateOpen} onClose={() => setGateOpen(false)} />
       <footer>
         <span>{item.delivery_count ? `${item.delivery_count} 个交付物` : "暂无交付"}</span>
         <time dateTime={item.updated_at}>{formatTime(item.updated_at)}</time>
@@ -217,60 +280,55 @@ export function BoardView({ items, ...cardActions }: {
   );
 }
 
-function StageDependency({ stage, stages }: {
-  stage: WorkItemStageProjection;
-  stages: WorkItemStageProjection[];
-}): React.JSX.Element {
-  const stageById = new Map(stages.map((item) => [item.stage_id, item]));
-  if (!stage.depends_on.length) return <span>起始阶段 · 无前置依赖</span>;
-  return (
-    <span>
-      依赖 {stage.depends_on.map((stageId) => {
-        const dependency = stageById.get(stageId);
-        return dependency ? `第 ${dependency.position} 阶段 · ${agentLabel(dependency.type)}` : "前置阶段";
-      }).join("、")}
-    </span>
-  );
-}
+const planColumns: Array<{ id: "image" | "ppt" | "general"; label: string }> = [
+  { id: "image", label: "Image" },
+  { id: "ppt", label: "PPT" },
+  { id: "general", label: "方案" },
+];
 
-function PlanView({ stages, items, ...cardActions }: {
-  stages: WorkItemStageProjection[];
+export function PlanView({ items, allItems, ...cardActions }: {
   items: ContractWorkItemProjection[];
+  allItems?: ContractWorkItemProjection[];
   statusPendingId?: string;
   statusErrorId?: string;
   statusError?: string;
   onStatusChange?: (item: ContractWorkItemProjection, status: EditableBusinessStatus) => void;
 }): React.JSX.Element {
+  // Cards keep the projection's plan order: it is immutable across status
+  // updates, unlike updated_at which shifts whenever a card changes state.
+  const columns = planColumns.map((column) => ({
+    ...column,
+    cards: items.filter((item) => item.agent_type === column.id),
+  }));
+  // The current stage reflects the whole plan, not the filtered subset —
+  // otherwise hiding a column would fake a later stage.
+  const stageSource = allItems ?? items;
+  const activeColumns = planColumns
+    .map((column) => ({
+      id: column.id,
+      cards: stageSource.filter((item) => item.agent_type === column.id),
+    }))
+    .filter((column) => column.cards.length > 0);
+  const currentColumn = activeColumns.find((column) => (
+    column.cards.some((item) => item.business_status !== "COMPLETED")
+  )) ?? activeColumns[activeColumns.length - 1];
   return (
-    <div className="task-plan-flow" aria-label="阶段依赖计划">
-      {stages.map((stage, index) => {
-        const stageItems = items.filter((item) => item.stage.stage_id === stage.stage_id);
+    <div className="task-board task-board--plan" aria-label="任务计划看板">
+      {columns.map((column) => {
+        const isCurrent = currentColumn?.id === column.id;
         return (
-          <section className="task-plan-stage" aria-labelledby={`plan-stage-${stage.stage_id}`} key={stage.stage_id}>
-            {index > 0 ? <div className="task-plan-stage__connector" aria-hidden="true"><span /></div> : null}
+          <section
+            className={`task-board__column${isCurrent ? " task-board__column--current" : ""}`}
+            aria-labelledby={`plan-column-${column.id}`}
+            key={column.id}
+          >
             <header>
-              <div className="task-plan-stage__marker" aria-hidden="true">{stage.position}</div>
-              <div>
-                <p className="workbench-eyebrow">第 {stage.position} 阶段</p>
-                <h2 id={`plan-stage-${stage.stage_id}`}>{agentLabel(stage.type)} 设计阶段</h2>
-              </div>
-              <span className={`task-stage-status${stage.available ? "" : " task-stage-status--unavailable"}`}>
-                {stage.available ? rawStatusLabel[stage.status] ?? stage.status : "能力未接入"}
-              </span>
+              <div><h2 id={`plan-column-${column.id}`}>{column.label}</h2><span>{column.cards.length}</span></div>
+              {isCurrent ? <span className="task-board__current-badge">当前阶段</span> : null}
             </header>
-            <div className="task-plan-stage__meta">
-              <strong>{stage.required ? "必需阶段" : "可选阶段"}</strong>
-              <StageDependency stage={stage} stages={stages} />
-            </div>
-            {!stage.available ? (
-              <div className="task-plan-stage__boundary" role="note">
-                <Icon name="status" /><span><strong>{agentLabel(stage.type)} 能力未接入</strong>该阶段保留真实占位，不会进入伪工作台或被标记成功。</span>
-              </div>
-            ) : null}
-            <div className="task-plan-stage__items">
-              {stageItems.length ? stageItems.map((item) => (
+            <div className="task-board__cards">
+              {column.cards.length ? column.cards.map((item) => (
                 <WorkItemCard
-                  compact
                   item={item}
                   key={item.work_item_id}
                   statusPending={cardActions.statusPendingId === item.work_item_id}
@@ -278,7 +336,7 @@ function PlanView({ stages, items, ...cardActions }: {
                   statusError={cardActions.statusErrorId === item.work_item_id ? cardActions.statusError : undefined}
                   onStatusChange={cardActions.onStatusChange}
                 />
-              )) : <EmptyColumn text="该阶段暂无逻辑子任务" />}
+              )) : <EmptyColumn text="当前没有子任务" />}
             </div>
           </section>
         );
@@ -354,7 +412,7 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
           ) : view === "board" ? (
             <BoardView items={filteredItems} {...cardActions} />
           ) : (
-            <PlanView stages={projection.data.stages.filter((stage) => stageId === "all" || stage.stage_id === stageId)} items={filteredItems} {...cardActions} />
+            <PlanView items={filteredItems} allItems={projection.data.items} {...cardActions} />
           )}
         </>
       ) : null}

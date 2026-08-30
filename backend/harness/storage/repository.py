@@ -172,6 +172,62 @@ class SnapshotRepository(Generic[Payload]):
                 crash_hook("after_index_update")
             return wrapper
 
+    def delete(
+        self,
+        task_id: str,
+        object_id: str,
+        *,
+        expected_revision: int,
+        actor: Actor,
+        command: str,
+        idempotency_key: str,
+    ) -> bool:
+        """Remove one snapshot under the task lock, keeping an audit event.
+
+        Returns False when the object is already gone so bulk removals stay
+        idempotent; events retain who removed what and when.
+        """
+
+        self.layout.initialize_task(task_id)
+        lock = FileLock(
+            self.layout.control_root / "locks" / f"task-{task_id}.lock",
+            self.lock_timeout_seconds,
+        )
+        with lock:
+            current = self.read_wrapper(task_id, object_id)
+            if current is None:
+                return False
+            actual_revision = int(current["revision"])
+            if expected_revision != actual_revision:
+                raise HarnessError(
+                    "REVISION_CONFLICT",
+                    "The object revision changed before this command committed.",
+                    {
+                        "object_type": self.object_type,
+                        "object_id": object_id,
+                        "expected_revision": expected_revision,
+                        "actual_revision": actual_revision,
+                    },
+                )
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "event_type": "OBJECT_REMOVED",
+                "object_type": self.object_type,
+                "object_id": object_id,
+                "revision": actual_revision,
+                "payload_sha256": digest_json(current["payload"]),
+                "actor": actor.as_dict(),
+                "command": command,
+                "idempotency_key": idempotency_key,
+                "occurred_at": utc_now(),
+            }
+            event_path = self.layout.control_root / "tasks" / task_id / "events.ndjson"
+            append_record(event_path, event)
+            self.path(task_id, object_id).unlink()
+            if self.after_commit:
+                self.after_commit(task_id)
+            return True
+
 
 class TaskRepository(SnapshotRepository[dict[str, Any]]):
     pass

@@ -235,5 +235,58 @@ class ApprovalInboxServiceTests(unittest.TestCase):
         self.assertEqual(len(self.approvals.list_inbox(owner="human", limit=50)), 50)
         self.assertEqual(self.approvals.unread_count(owner="human"), 55)
 
+    def test_clear_read_notifications_removes_only_read_items(self) -> None:
+        for index in range(4):
+            self.approvals.ensure_notification(
+                "t_approvals",
+                kind="INSTANCE_SUCCEEDED",
+                owner="human",
+                title="子任务完成",
+                message=f"第 {index + 1} 个子任务通知。",
+                deep_link="instances/i_image_1",
+                dedupe_key=f"clear-{index}",
+                instance_id="i_image_1",
+            )
+        items = self.approvals.list_inbox(owner="human", limit=None)
+        self.assertEqual(len(items), 4)
+
+        self.approvals.update_inbox_status(
+            items[0]["inbox_id"],
+            "READ",
+            envelope("clear-read-0", items[0]["store_revision"]),
+        )
+        read_second = self.approvals.update_inbox_status(
+            items[1]["inbox_id"],
+            "READ",
+            envelope("clear-read-1", items[1]["store_revision"]),
+        )
+        self.approvals.update_inbox_status(
+            items[1]["inbox_id"],
+            "HANDLED",
+            envelope("clear-handled-1", read_second["inbox_revision"]),
+        )
+
+        cleared = self.approvals.clear_read_notifications(owner="human")
+
+        self.assertEqual(cleared["removed_count"], 1)
+        self.assertEqual(cleared["removed"], [items[0]["inbox_id"]])
+        self.assertFalse(
+            self.store.inbox.path("t_approvals", items[0]["inbox_id"]).exists()
+        )
+        remaining = self.approvals.list_inbox(owner="human", limit=None)
+        self.assertEqual(len(remaining), 3)
+        self.assertEqual(
+            {item["status"] for item in remaining},
+            {"UNREAD", "HANDLED"},
+        )
+        self.assertNotIn(
+            items[0]["inbox_id"],
+            [item["inbox_id"] for item in remaining],
+        )
+        self.assertEqual(self.approvals.unread_count(owner="human"), 2)
+
+        again = self.approvals.clear_read_notifications(owner="human")
+        self.assertEqual(again, {"removed": [], "removed_count": 0})
+
 if __name__ == "__main__":
     unittest.main()

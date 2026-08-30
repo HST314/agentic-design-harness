@@ -497,7 +497,7 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                 )
         if (
             planned_instance is None
-            or plan["task"]["status"] not in {"RUNNING", "FAILED"}
+            or plan["task"]["status"] not in {"RUNNING", "FAILED", "WAITING_APPROVAL"}
             or instance["status"] not in {"READY", "FAILED_TO_START", "FAILED", "CRASHED"}
             or not stage_authorized
         ):
