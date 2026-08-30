@@ -559,7 +559,6 @@
 .workbench-upload-section__heading h2 { margin: 0 0 var(--space-1); font-size: 18px; }
 .workbench-upload-section__heading p:last-child { margin: 0; color: var(--color-muted-foreground); font-size: 13px; }
 
-.workbench-file-picker,
 .workbench-primary-button,
 .workbench-secondary-button {
   min-height: 44px;
@@ -578,19 +577,14 @@
 .workbench-primary-button:active:not(:disabled),
 .workbench-secondary-button:active:not(:disabled) { transform: scale(.98); }
 
-.workbench-file-picker {
+.task-asset-file-picker {
   position: relative;
-  border: 1px solid var(--color-primary);
-  color: var(--color-primary-strong);
-  background: var(--color-primary-softer);
   cursor: pointer;
-  white-space: nowrap;
 }
 
-.workbench-file-picker:hover { border-color: var(--color-primary-strong); background: var(--color-primary-soft); }
-.workbench-file-picker svg { width: 20px; height: 20px; }
-.workbench-file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.workbench-file-picker--disabled { opacity: 0.55; cursor: not-allowed; }
+.task-asset-file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.task-asset-file-picker:has(input:focus-visible) { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.task-asset-file-picker--disabled { opacity: 0.55; cursor: not-allowed; }
 
 .workbench-primary-button {
   border: 1px solid var(--color-primary);
@@ -1103,9 +1097,6 @@
 .intake-chat__thread { min-height: 0; align-content: end; overflow: auto; }
 .intake-chat__thread--sent { align-content: start; }
 .intake-chat__composer { position: static; }
-.intake-chat__attach { cursor: pointer; }
-.intake-chat__attach input { display: none; }
-.intake-chat__attach svg { width: 20px; height: 20px; }
 .intake-chat__files {
   display: flex;
   flex-wrap: wrap;
