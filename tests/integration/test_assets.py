@@ -108,6 +108,24 @@ class AssetServiceTests(unittest.TestCase):
         self.assertEqual(download["stream"].read(), b"# Registered brief\n")
         download["stream"].close()
 
+    def test_gb18030_markdown_is_accepted_and_previewed(self) -> None:
+        content = (
+            "# 中文本地文件\n这是来自 Windows 的设计说明。\n".encode("gb18030")
+        )
+        imported = self.assets.import_bytes(
+            "t_assets",
+            filename="中文说明.md",
+            content=content,
+            description="GB18030 brief",
+            source="user_upload",
+            idempotency_key="import-gb18030-brief",
+        )
+
+        self.assertEqual(imported["mime_type"], "text/markdown")
+        preview = self.assets.preview("t_assets", imported["relative_path"])
+        self.assertIn("中文本地文件", preview["content"])
+        self.assertIn("Windows", preview["content"])
+
     def test_shared_archive_zips_every_regular_file(self) -> None:
         task_root = self.store.layout.workspace_root / "tasks" / "t_assets"
         shared = task_root / "resources" / "shared"

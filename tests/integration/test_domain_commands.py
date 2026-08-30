@@ -465,7 +465,7 @@ class PlanAppendGateTests(unittest.TestCase):
     @staticmethod
     def _append_draft(task_id: str) -> dict[str, list[dict]]:
         return {
-            "stages": [stage(task_id, "s_image_2", "image", 2, [], True, ["i_image_2"])],
+            "stages": [stage(task_id, "s_image_2", "image", 1, [], True, ["i_image_2"])],
             "instances": [instance(task_id, "i_image_2", "s_image_2", "image", True)],
             "task_cards": [card(task_id, "i_image_2", "s_image_2", "image")],
         }
@@ -496,6 +496,7 @@ class PlanAppendGateTests(unittest.TestCase):
         self.assertEqual(landed_instance["status"], "RUNNING")
         appended_stage = plan["stages"][1]
         self.assertEqual(appended_stage["stage_id"], "s_image_2")
+        self.assertEqual(appended_stage["position"], 2)
         self.assertEqual(appended_stage["status"], "READY")
         self.assertEqual(appended_stage["depends_on"], [])
         appended_instance = plan["instances"][1]
@@ -528,7 +529,7 @@ class PlanAppendGateTests(unittest.TestCase):
         revision = self.store.task.revision("t_append_collision", "t_append_collision")
         payload = {
             "stages": [
-                stage("t_append_collision", "s_image", "image", 2, [], True, ["i_image_2"])
+                stage("t_append_collision", "s_image", "image", 1, [], True, ["i_image_2"])
             ],
             "instances": [instance("t_append_collision", "i_image_2", "s_image", "image", True)],
             "task_cards": [card("t_append_collision", "i_image_2", "s_image", "image")],
@@ -594,7 +595,7 @@ class PlanAppendGateTests(unittest.TestCase):
         self._running_task("t_append_ppt")
         revision = self.store.task.revision("t_append_ppt", "t_append_ppt")
         payload = {
-            "stages": [stage("t_append_ppt", "s_ppt", "ppt", 2, ["s_image"], True, ["i_ppt_1"])],
+            "stages": [stage("t_append_ppt", "s_ppt", "ppt", 1, ["s_image"], True, ["i_ppt_1"])],
             "instances": [instance("t_append_ppt", "i_ppt_1", "s_ppt", "ppt", True)],
             "task_cards": [card("t_append_ppt", "i_ppt_1", "s_ppt", "ppt")],
         }
@@ -613,6 +614,57 @@ class PlanAppendGateTests(unittest.TestCase):
         self.assertEqual(appended_stage["type"], "ppt")
         self.assertEqual(appended_stage["depends_on"], ["s_image"])
         self.assertEqual(appended_stage["status"], "PENDING")
+
+    def test_append_offsets_multiple_batch_local_stage_positions(self) -> None:
+        task_id = "t_append_multiple"
+        self._running_task(task_id)
+        revision = self.store.task.revision(task_id, task_id)
+        payload = {
+            "stages": [
+                stage(task_id, "s_image_2", "image", 1, [], True, ["i_image_2"]),
+                stage(task_id, "s_ppt_2", "ppt", 2, ["s_image_2"], True, ["i_ppt_2"]),
+            ],
+            "instances": [
+                instance(task_id, "i_image_2", "s_image_2", "image", True),
+                instance(task_id, "i_ppt_2", "s_ppt_2", "ppt", True),
+            ],
+            "task_cards": [
+                card(task_id, "i_image_2", "s_image_2", "image"),
+                card(task_id, "i_ppt_2", "s_ppt_2", "ppt"),
+            ],
+        }
+
+        result = self._save(
+            task_id,
+            payload,
+            expected=revision,
+            key="append-multiple",
+            mode="append",
+        )
+
+        self.assertEqual([item["position"] for item in result["plan"]["stages"]], [1, 2, 3])
+
+    def test_append_rejects_non_contiguous_batch_local_positions(self) -> None:
+        task_id = "t_append_position_gap"
+        self._running_task(task_id)
+        revision = self.store.task.revision(task_id, task_id)
+        payload = self._append_draft(task_id)
+        payload["stages"][0]["position"] = 2
+
+        with self.assertRaises(HarnessError) as captured:
+            self._save(
+                task_id,
+                payload,
+                expected=revision,
+                key="append-position-gap",
+                mode="append",
+            )
+
+        self.assertEqual(captured.exception.code, "VALIDATION_ERROR")
+        self.assertEqual(
+            captured.exception.message,
+            "Appended stage positions must be contiguous from one within the new batch.",
+        )
 
     def test_merge_updates_only_unstarted_cards_and_preserves_started_instances(self) -> None:
         task_id = "t_merge_cards"

@@ -419,6 +419,29 @@ class MasterOrchestratorIntegrationTests(unittest.TestCase):
             self.assertEqual(session["thread"]["last_error"]["code"], "MASTER_ASSET_TOOL_FAILED")
             self.assertIn("素材", session["thread"]["last_error"]["message"])
 
+    def test_tool_round_limit_is_not_reported_as_plan_schema_failure(self) -> None:
+        calls = [
+            {
+                "output": None,
+                "tool_calls": (ToolCall(f"call_{index}", "list_assets", {}),),
+            }
+            for index in range(5)
+        ]
+        factory = ScriptedModelFactory(calls)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(self._settings(root), model_clients=factory)
+            with TestClient(app) as client:
+                body = self._create_task(client, "create-tool-round-limit")
+                task_id = body["task"]["task_id"]
+                self._upload_brief(client, task_id)
+                self._submit_task(client, body, "submit-tool-round-limit", intake_revision=2)
+                session = self._wait_for_master_session(client, task_id)
+
+            error = session["thread"]["last_error"]
+            self.assertEqual(error["code"], "MASTER_TOOL_ROUND_LIMIT")
+            self.assertNotIn("结构校验", error["message"])
+
     def test_model_provider_failure_keeps_provider_error_code(self) -> None:
         factory = ScriptedModelFactory(
             [

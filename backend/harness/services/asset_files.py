@@ -11,6 +11,28 @@ from typing import BinaryIO
 
 from ..storage.safe_open import open_regular_readonly
 
+_LOCAL_TEXT_ENCODINGS = ("utf-8-sig", "gb18030")
+
+
+def decode_local_text(content: bytes) -> str:
+    """Decode common Chinese local text without accepting arbitrary binary."""
+
+    for encoding in _LOCAL_TEXT_ENCODINGS:
+        try:
+            text = content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if "\x00" in text:
+            continue
+        controls = sum(
+            ord(character) < 32 and character not in "\t\n\r\f" for character in text
+        )
+        if controls <= max(2, len(text) // 100):
+            return text
+    raise UnicodeDecodeError(
+        "local-text", content, 0, len(content), "unsupported text encoding"
+    )
+
 
 def file_digest(path: Path) -> tuple[int, str]:
     descriptor = (
@@ -72,10 +94,6 @@ def detect_mime_stream(handle: BinaryIO, filename: str) -> str:
             except (OSError, zipfile.BadZipFile):
                 return "application/octet-stream"
             return "application/octet-stream"
-        try:
-            text = header.decode("utf-8")
-        except UnicodeDecodeError:
-            return "application/octet-stream"
         suffix = Path(filename).suffix.lower()
         if suffix == ".json":
             try:
@@ -85,7 +103,16 @@ def detect_mime_stream(handle: BinaryIO, filename: str) -> str:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 return "application/octet-stream"
         if suffix in {".md", ".markdown"}:
-            return "text/markdown"
+            try:
+                handle.seek(0)
+                decode_local_text(handle.read())
+                return "text/markdown"
+            except UnicodeDecodeError:
+                return "application/octet-stream"
+        try:
+            text = decode_local_text(header)
+        except UnicodeDecodeError:
+            return "application/octet-stream"
         if "\x00" not in text:
             return "text/plain"
         return "application/octet-stream"

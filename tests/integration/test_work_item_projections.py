@@ -4,17 +4,47 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.core.config import HarnessSettings
 from harness.domain.commands import CommandEnvelope
+from harness.services.work_item_projections import logical_work_items
 from harness.storage.repository import Actor, utc_now
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class WorkItemProjectionApiTests(unittest.TestCase):
+    def test_append_proposals_preserve_work_items_from_prior_revisions(self) -> None:
+        proposals = [
+            {
+                "status": "CONFIRMED",
+                "revision": revision,
+                "updated_at": f"2026-08-30T00:00:0{revision}Z",
+                "work_items": [
+                    {
+                        "work_item_id": f"work_{revision}",
+                        "stage_id": f"stage_{revision}",
+                    }
+                ],
+            }
+            for revision in (1, 2)
+        ]
+        store = SimpleNamespace(
+            plan_proposal=SimpleNamespace(list=lambda _task_id: proposals)
+        )
+
+        items = logical_work_items(
+            store,
+            "task_append_projection",
+            {"task": {"plan_revision": 2}, "task_cards": [], "instances": []},
+            [{"stage_id": "stage_1"}, {"stage_id": "stage_2"}],
+        )
+
+        self.assertEqual([item["work_item_id"] for item in items], ["work_1", "work_2"])
+
     def test_active_instance_wins_over_parallel_approval_and_etag_is_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = self._app(Path(temporary))

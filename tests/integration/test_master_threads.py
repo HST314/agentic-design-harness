@@ -13,12 +13,48 @@ from harness.core.config import HarnessSettings
 from harness.core.errors import HarnessError
 from harness.domain.commands import CommandEnvelope
 from harness.services.master_orchestrator import MasterRunObservation
+from harness.services.master_threads import MasterThreadService
 from harness.storage.atomic import atomic_write_json, read_json
 from harness.storage.locks import FileLock
 from harness.storage.repository import Actor, utc_now
 from runtime_helpers import build_config_snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class MasterPlanModeTests(unittest.TestCase):
+    def test_fresh_second_batch_appends_without_touching_landed_topology(self) -> None:
+        landed = {
+            "stages": [{"stage_id": "stage_first"}],
+            "instances": [{"instance_id": "instance_first"}],
+            "task_cards": [{"card_id": "card_first"}],
+        }
+        second_batch = {
+            "stages": [{"stage_id": "stage_second"}],
+            "execution_cards": [
+                {"instance_id": "instance_second", "card_id": "card_second"}
+            ],
+        }
+        self.assertEqual(
+            MasterThreadService._confirmation_plan_mode(landed, second_batch),
+            "append",
+        )
+
+    def test_overlapping_batch_keeps_strict_merge_validation(self) -> None:
+        landed = {
+            "stages": [{"stage_id": "stage_first"}],
+            "instances": [{"instance_id": "instance_first"}],
+            "task_cards": [{"card_id": "card_first"}],
+        }
+        revision = {
+            "stages": [{"stage_id": "stage_first"}],
+            "execution_cards": [
+                {"instance_id": "instance_first", "card_id": "card_first"}
+            ],
+        }
+        self.assertEqual(
+            MasterThreadService._confirmation_plan_mode(landed, revision), "merge"
+        )
 
 
 class RecordingOrchestrator:

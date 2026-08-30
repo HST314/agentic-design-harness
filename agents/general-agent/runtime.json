@@ -2,5 +2,5 @@
   "name": "general-agent",
   "version": "1.0.0",
   "entrypoint": "app.py",
-  "tools": ["read_file", "write_file"]
+  "tools": ["list_files", "read_file", "write_file"]
 }

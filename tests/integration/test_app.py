@@ -640,7 +640,7 @@ class ApplicationTests(unittest.TestCase):
 
                 appended = put_plan(
                     "two",
-                    2,
+                    1,
                     "append",
                     current_revision,
                     mode="append",
