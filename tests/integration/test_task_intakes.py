@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -195,7 +196,7 @@ class TaskIntakeApiTests(unittest.TestCase):
                 )
                 self.assertEqual(closed.status_code, 409, closed.text)
                 late = client.post(
-                    f"/api/v1/tasks/{task_id}/assets",
+                    f"/api/v1/tasks/{task_id}/asset-uploads",
                     files={"file": ("late.txt", b"late", "text/plain")},
                     data={
                         "declared_mime_type": "text/plain",
@@ -279,6 +280,60 @@ class TaskIntakeApiTests(unittest.TestCase):
             self.assertEqual(created.status_code, 200, created.text)
             self.assertEqual(created.json()["intake"]["prompt"], prompt)
             self.assertEqual(created.json()["task"]["goal"], prompt)
+
+    def test_late_upload_route_does_not_shadow_the_json_import_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(
+                HarnessSettings(
+                    control_root=root / "control-data",
+                    workspace_root=root / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                    config_snapshot=build_config_snapshot(),
+                )
+            )
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/task-intakes",
+                    json={
+                        "prompt": "Create a launch visual.",
+                        "start_policy": "manual",
+                        "envelope": self._envelope("create-for-route-split", 0),
+                    },
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                task_id = created.json()["task"]["task_id"]
+
+                revision = app.state.container.store.task.revision(task_id, task_id)
+                imported = client.post(
+                    f"/api/v1/tasks/{task_id}/assets",
+                    json={
+                        "filename": "imported.md",
+                        "content_base64": base64.b64encode(b"# imported\n").decode("ascii"),
+                        "description": "JSON import stays on the original route",
+                        "operation_id": "import_after_route_split",
+                        "envelope": self._envelope("import-via-json", revision),
+                    },
+                )
+                self.assertEqual(imported.status_code, 200, imported.text)
+                self.assertTrue(
+                    imported.json()["manifest"]["relative_path"].endswith("/imported.md")
+                )
+
+                revision = app.state.container.store.task.revision(task_id, task_id)
+                uploaded = client.post(
+                    f"/api/v1/tasks/{task_id}/asset-uploads",
+                    files={"file": ("uploaded.md", b"# uploaded\n", "text/markdown")},
+                    data={
+                        "declared_mime_type": "text/markdown",
+                        "description": "Multipart upload on its own route",
+                        "idempotency_key": "upload-after-json-import",
+                        "actor_id": "human_operator",
+                        "expected_revision": str(revision),
+                    },
+                )
+                self.assertEqual(uploaded.status_code, 200, uploaded.text)
+                self.assertEqual(uploaded.json()["asset"]["filename"], "uploaded.md")
 
     @staticmethod
     def _upload(

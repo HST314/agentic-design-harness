@@ -310,7 +310,7 @@ class MasterThreadApiTests(unittest.TestCase):
                 self.assertEqual(application.saved, [])
 
                 late_upload = client.post(
-                    f"/api/v1/tasks/{task_id}/assets",
+                    f"/api/v1/tasks/{task_id}/asset-uploads",
                     files={"file": ("late.md", b"# late brief\n", "text/markdown")},
                     data={
                         "declared_mime_type": "text/markdown",

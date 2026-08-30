@@ -1051,7 +1051,7 @@ export class ApiClient {
     signal: AbortSignal,
   ): Promise<TaskIntakeMutationResponse> {
     return this.uploadAssetToPath(
-      `/api/v1/tasks/${encodeURIComponent(taskId)}/assets`,
+      `/api/v1/tasks/${encodeURIComponent(taskId)}/asset-uploads`,
       input,
       onProgress,
       signal,

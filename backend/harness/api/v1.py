@@ -386,7 +386,7 @@ def build_v1_router(container: Container) -> APIRouter:
         finally:
             await file.close()
 
-    @router.post("/tasks/{task_id}/assets", tags=["assets"])
+    @router.post("/tasks/{task_id}/asset-uploads", tags=["assets"])
     async def upload_task_asset(
         task_id: str,
         file: Annotated[UploadFile, File()],
