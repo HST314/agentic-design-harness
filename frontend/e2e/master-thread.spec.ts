@@ -373,7 +373,7 @@ test("shows plan cards inside the message flow and sends revision feedback with 
 
 test("uploads and selects a new task resource after intake submission", async ({ page }) => {
   await page.goto("/tasks/task_master_e2e/master");
-  await page.getByLabel("添加图片 / PDF / TXT / MD").setInputFiles({
+  await page.getByLabel("添加附件（图片 / PDF / TXT / MD）").setInputFiles({
     name: "late.md",
     mimeType: "text/markdown",
     buffer: Buffer.from("# late brief"),
@@ -384,7 +384,7 @@ test("uploads and selects a new task resource after intake submission", async ({
 
 test("clears task-scoped upload state when navigating between tasks", async ({ page }) => {
   await page.goto("/tasks/task_master_e2e/master");
-  await page.getByLabel("添加图片 / PDF / TXT / MD").setInputFiles({
+  await page.getByLabel("添加附件（图片 / PDF / TXT / MD）").setInputFiles({
     name: "failed-a.md",
     mimeType: "text/markdown",
     buffer: Buffer.from("# task A only"),
