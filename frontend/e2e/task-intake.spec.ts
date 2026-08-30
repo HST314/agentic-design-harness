@@ -356,9 +356,10 @@ test("validates files locally and manages rename, pin and archive presentation s
 
   await page.getByLabel("打开 品牌规范 2026 的任务操作").click();
   await page.getByRole("menuitem", { name: "归档" }).click();
-  await expect(page.getByRole("link", { name: /品牌规范 2026/ })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "已归档" })).toContainText("品牌规范 2026");
+  await expect(page.getByRole("link", { name: /品牌规范 2026/ })).toContainText("已归档");
   await page.getByRole("searchbox", { name: "搜索主任务" }).fill("品牌规范");
-  await expect(page.getByRole("region", { name: "归档搜索结果" })).toContainText("品牌规范 2026");
+  await expect(page.getByRole("region", { name: "已归档" })).toContainText("品牌规范 2026");
   await page.getByLabel("打开 品牌规范 2026 的任务操作").click();
   await page.getByRole("menuitem", { name: "恢复" }).click();
   await expect(page.getByRole("link", { name: /品牌规范 2026/ })).toBeVisible();

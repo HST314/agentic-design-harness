@@ -59,10 +59,9 @@ function disabledAdapterLabel(readiness: ReadyResponse | undefined): string {
 
 function historyGroups(tasks: TaskSummary[], search: string): Array<{ label: string; items: TaskSummary[] }> {
   const needle = search.trim().toLocaleLowerCase("zh-CN");
-  const visible = tasks.filter((task) => {
-    const matches = !needle || `${task.title} ${task.task_id}`.toLocaleLowerCase("zh-CN").includes(needle);
-    return matches && (needle || !task.archived_at);
-  });
+  const visible = tasks.filter((task) => (
+    !needle || `${task.title} ${task.task_id}`.toLocaleLowerCase("zh-CN").includes(needle)
+  ));
   const now = new Date();
   const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const startSevenDays = startToday - 6 * 24 * 60 * 60 * 1000;
@@ -77,7 +76,7 @@ function historyGroups(tasks: TaskSummary[], search: string): Array<{ label: str
       return value < startToday && value >= startSevenDays;
     }) },
     { label: "更早", items: unpinned.filter((task) => new Date(task.updated_at).getTime() < startSevenDays) },
-    { label: "归档搜索结果", items: archived },
+    { label: "已归档", items: archived },
   ];
   return groups.filter((group) => group.items.length > 0);
 }
@@ -108,7 +107,7 @@ function TaskHistoryRow({
       >
         <span className="workbench-history-item__title">{task.title}</span>
         <span className="workbench-history-item__meta">
-          <span>{task.archived_at ? "已归档 · " : ""}{taskLabel(task)}</span>
+          <span>{task.archived_at ? "已归档" : taskLabel(task)}</span>
           <time dateTime={task.updated_at}>{new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(task.updated_at))}</time>
         </span>
       </NavLink>
