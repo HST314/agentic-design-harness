@@ -138,10 +138,10 @@ function planWorkItem(
   };
 }
 
-function renderPlan(items: ContractWorkItemProjection[]): string {
+function renderPlan(items: ContractWorkItemProjection[], allItems?: ContractWorkItemProjection[]): string {
   return renderToStaticMarkup(
     <MemoryRouter>
-      <PlanView items={items} />
+      <PlanView items={items} allItems={allItems} />
     </MemoryRouter>,
   );
 }
@@ -152,7 +152,7 @@ function currentColumnLabel(markup: string): string | null {
 }
 
 describe("PlanView", () => {
-  test("groups every work item into the Image / PPT / 方案 columns in time order", () => {
+  test("groups every work item into the Image / PPT / 方案 columns in plan order", () => {
     const markup = renderPlan([
       planWorkItem("img_new", "image", "TODO", "2026-08-28T00:00:00Z"),
       planWorkItem("ppt_1", "ppt", "RUNNING", "2026-08-27T00:00:00Z"),
@@ -163,8 +163,9 @@ describe("PlanView", () => {
     expect(markup).toContain('id="plan-column-image">Image</h2><span>2</span>');
     expect(markup).toContain('id="plan-column-ppt">PPT</h2><span>1</span>');
     expect(markup).toContain('id="plan-column-general">方案</h2><span>1</span>');
-    // Image cards stay in chronological order inside their column.
-    expect(markup.indexOf("image 任务 img_old")).toBeLessThan(markup.indexOf("image 任务 img_new"));
+    // Cards keep the projection's plan order even when updated_at disagrees,
+    // so a status change never reshuffles a column.
+    expect(markup.indexOf("image 任务 img_new")).toBeLessThan(markup.indexOf("image 任务 img_old"));
   });
 
   test("highlights the Image column while any image task is incomplete", () => {
@@ -223,5 +224,19 @@ describe("PlanView", () => {
 
     expect(currentColumnLabel(markup)).toBeNull();
     expect(markup.match(/当前没有子任务/g)).toHaveLength(3);
+  });
+
+  test("derives the current stage from the unfiltered plan, not the visible subset", () => {
+    const allItems = [
+      planWorkItem("img_1", "image", "RUNNING", "2026-08-26T00:00:00Z"),
+      planWorkItem("ppt_1", "ppt", "TODO", "2026-08-27T00:00:00Z"),
+      planWorkItem("gen_1", "general", "TODO", "2026-08-28T00:00:00Z"),
+    ];
+    // Filtering down to only PPT cards must not move the badge to the PPT column.
+    const markup = renderPlan(allItems.filter((item) => item.agent_type === "ppt"), allItems);
+
+    expect(currentColumnLabel(markup)).toBe("image");
+    expect(markup).toContain('id="plan-column-image">Image</h2><span>0</span>');
+    expect(markup).toContain('id="plan-column-ppt">PPT</h2><span>1</span>');
   });
 });

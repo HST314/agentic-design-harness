@@ -222,20 +222,29 @@ const planColumns: Array<{ id: "image" | "ppt" | "general"; label: string }> = [
   { id: "general", label: "方案" },
 ];
 
-export function PlanView({ items, ...cardActions }: {
+export function PlanView({ items, allItems, ...cardActions }: {
   items: ContractWorkItemProjection[];
+  allItems?: ContractWorkItemProjection[];
   statusPendingId?: string;
   statusErrorId?: string;
   statusError?: string;
   onStatusChange?: (item: ContractWorkItemProjection, status: EditableBusinessStatus) => void;
 }): React.JSX.Element {
+  // Cards keep the projection's plan order: it is immutable across status
+  // updates, unlike updated_at which shifts whenever a card changes state.
   const columns = planColumns.map((column) => ({
     ...column,
-    cards: items
-      .filter((item) => item.agent_type === column.id)
-      .sort((a, b) => a.updated_at.localeCompare(b.updated_at)),
+    cards: items.filter((item) => item.agent_type === column.id),
   }));
-  const activeColumns = columns.filter((column) => column.cards.length > 0);
+  // The current stage reflects the whole plan, not the filtered subset —
+  // otherwise hiding a column would fake a later stage.
+  const stageSource = allItems ?? items;
+  const activeColumns = planColumns
+    .map((column) => ({
+      id: column.id,
+      cards: stageSource.filter((item) => item.agent_type === column.id),
+    }))
+    .filter((column) => column.cards.length > 0);
   const currentColumn = activeColumns.find((column) => (
     column.cards.some((item) => item.business_status !== "COMPLETED")
   )) ?? activeColumns[activeColumns.length - 1];
@@ -339,7 +348,7 @@ function TaskProjectionPage({ view }: { view: View }): React.JSX.Element {
           ) : view === "board" ? (
             <BoardView items={filteredItems} {...cardActions} />
           ) : (
-            <PlanView items={filteredItems} {...cardActions} />
+            <PlanView items={filteredItems} allItems={projection.data.items} {...cardActions} />
           )}
         </>
       ) : null}

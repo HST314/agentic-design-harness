@@ -65,6 +65,12 @@ const items = [
   item("work_complete", "KV 方向 D", "COMPLETED", "SUCCEEDED", 1),
   item("work_ppt", "整合演示文稿", "EXCEPTION", "UNAVAILABLE", 2),
 ];
+// Plan order (array order) intentionally disagrees with updated_at order so
+// tests can prove the board renders the immutable plan order instead.
+items[0].updated_at = "2026-08-22T10:09:00Z";
+items[1].updated_at = "2026-08-22T10:05:00Z";
+items[2].updated_at = "2026-08-22T10:07:00Z";
+items[3].updated_at = "2026-08-22T10:01:00Z";
 
 const projection = {
   schema_version: "1.0",
@@ -94,7 +100,7 @@ test.beforeEach(async ({ page }) => {
     const workItemId = decodeURIComponent(segments.at(-2) ?? "");
     const body = route.request().postDataJSON() as { business_status: typeof items[number]["business_status"] };
     const updatedItems = items.map((candidate) => candidate.work_item_id === workItemId
-      ? { ...candidate, business_status: body.business_status }
+      ? { ...candidate, business_status: body.business_status, updated_at: "2026-08-22T10:30:00Z" }
       : candidate);
     const summary = {
       TODO: updatedItems.filter((candidate) => candidate.business_status === "TODO").length,
@@ -151,13 +157,58 @@ test("opens a refresh-safe task drawer with designer-facing status and attempt h
   await expect(page).not.toHaveURL(/drawer=/);
 });
 
-test("renders ordered Stage dependencies and a truthful PPT boundary", async ({ page }) => {
+test("renders the plan as a three-column board with a truthful current-stage highlight", async ({ page }) => {
   await page.goto("/tasks/task_board_e2e/plan");
-  await expect(page.getByRole("heading", { name: "图片 设计阶段" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "PPT 设计阶段" })).toBeVisible();
-  await expect(page.getByText("依赖 第 1 阶段 · 图片")).toBeVisible();
-  await expect(page.getByText("PPT 能力未接入", { exact: true })).toBeVisible();
-  await expect(page.getByText(/不会进入伪工作台/)).toBeVisible();
+
+  const imageColumn = page.getByRole("region", { name: "Image" });
+  const pptColumn = page.getByRole("region", { name: "PPT" });
+  const generalColumn = page.getByRole("region", { name: "方案" });
+  await expect(imageColumn).toBeVisible();
+  await expect(pptColumn).toBeVisible();
+  await expect(generalColumn).toBeVisible();
+
+  // Cards land in their fixed columns following the immutable plan order.
+  await expect(imageColumn.locator("article.task-card")).toHaveCount(4);
+  await expect(pptColumn.locator("article.task-card")).toHaveCount(1);
+  await expect(generalColumn.locator("article.task-card")).toHaveCount(0);
+  await expect(imageColumn.locator("article.task-card h3")).toHaveText([
+    "KV 方向 B", "KV 方向 A", "KV 方向 C", "KV 方向 D",
+  ]);
+
+  // Image still has unfinished work, so it carries the current-stage badge.
+  await expect(imageColumn.getByText("当前阶段")).toBeVisible();
+  await expect(pptColumn.getByText("当前阶段")).toHaveCount(0);
+  await expect(generalColumn.getByText("当前阶段")).toHaveCount(0);
+
+  // The highlight must reach the computed style in both color schemes: the
+  // current column's background differs from the plain columns.
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    const backgrounds = await page.evaluate(() => {
+      const current = document.querySelector(".task-board__column--current");
+      const plain = document.querySelector(".task-board--plan .task-board__column:not(.task-board__column--current)");
+      return {
+        current: current ? getComputedStyle(current).backgroundColor : null,
+        plain: plain ? getComputedStyle(plain).backgroundColor : null,
+      };
+    });
+    expect(backgrounds.current).not.toBeNull();
+    expect(backgrounds.current).not.toBe(backgrounds.plain);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+
+  // Filtering only hides cards; it never fakes a later global stage.
+  await page.getByLabel("创作类型").selectOption("ppt");
+  await expect(imageColumn.locator("article.task-card")).toHaveCount(0);
+  await expect(imageColumn.getByText("当前阶段")).toBeVisible();
+  await page.getByLabel("创作类型").selectOption("all");
+
+  // Status changes update state without reshuffling the plan order, even
+  // though the backend bumps the card's updated_at.
+  await page.getByLabel("设置 KV 方向 B 状态").selectOption("COMPLETED");
+  await expect(imageColumn.locator("article.task-card h3")).toHaveText([
+    "KV 方向 B", "KV 方向 A", "KV 方向 C", "KV 方向 D",
+  ]);
 
   for (const width of [1280, 1440, 1920]) {
     await page.setViewportSize({ width, height: 900 });

@@ -1353,22 +1353,6 @@
 
 .task-board--plan { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
-.task-board__column--current {
-  background: var(--color-primary-softer);
-  box-shadow: 0 0 0 1px var(--color-primary-muted);
-}
-
-.task-board__column--current > header { border-bottom-color: var(--color-primary-muted); }
-
-.task-board__current-badge {
-  padding: 2px 8px;
-  border-radius: 999px;
-  color: var(--color-on-primary);
-  background: var(--color-primary-strong);
-  font-size: 11px;
-  font-weight: 800;
-}
-
 .task-board__column {
   min-width: 0;
   display: grid;
@@ -1395,6 +1379,24 @@
 .task-board__column > header > div > span { min-width: 24px; padding: 2px 6px; border-radius: 999px; color: var(--color-muted-foreground); background: var(--color-surface); font-size: 12px; font-weight: 800; text-align: center; }
 .task-board__cards { display: grid; align-content: start; gap: var(--space-2); padding: var(--space-2); }
 .task-board__empty { margin: 0; padding: var(--space-6) var(--space-3); border: 1px dashed var(--color-border); border-radius: var(--radius-md); color: var(--color-muted-foreground); font-size: 12px; text-align: center; }
+
+/* Modifier rules stay after the base column rules so the same-specificity
+   highlight actually wins the cascade. */
+.task-board__column--current {
+  background: var(--color-primary-softer);
+  box-shadow: 0 0 0 1px var(--color-primary-muted);
+}
+
+.task-board__column--current > header { border-bottom-color: var(--color-primary-muted); }
+
+.task-board__current-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--color-on-primary);
+  background: var(--color-primary-strong);
+  font-size: 11px;
+  font-weight: 800;
+}
 
 .task-card {
   min-width: 0;
