@@ -144,7 +144,7 @@ class MasterThreadService:
         if envelope.actor_type != "human":
             raise HarnessError("VALIDATION_ERROR", "Only a human may add a Master message.")
         normalized = content.strip()
-        if not normalized or len(normalized) > 20_000:
+        if not normalized:
             raise HarnessError("VALIDATION_ERROR", "The Master message is invalid.")
         refs = self._validate_asset_refs(task_id, asset_refs)
         message_id = self._identifier("message", task_id, envelope.idempotency_key)
@@ -1234,6 +1234,8 @@ class MasterThreadService:
                         "asset_id": asset_id,
                         "filename": Path(manifest["relative_path"]).name,
                         "description": manifest["description"],
+                        "mime_type": manifest["mime_type"],
+                        "size_bytes": manifest["size_bytes"],
                         "manifest_relpath": f"inputs/manifests/{asset_id}.json",
                     }
                 )

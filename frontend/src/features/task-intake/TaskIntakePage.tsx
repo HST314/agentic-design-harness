@@ -11,43 +11,18 @@ import { ApiError } from "../../api/client";
 import { api, masterSessionQuery, taskHistoryQuery, taskIntakeQuery } from "../../api/queries";
 import { ExpandableComposerTextarea } from "../../components/ExpandableComposerTextarea";
 import { Icon } from "../../components/Icon";
+import {
+  LocalUploadList,
+  MAX_TASK_FILES,
+  TaskAssetFilePicker,
+  formatBytes,
+  validateTaskAssetFiles,
+  type LocalUpload,
+} from "../../components/TaskAssetUploads";
 import { MasterChatBridge, PendingThinking, PendingUserMessage } from "../master-thread/MasterChatBridge";
 import { FoundationPage } from "../workbench/FoundationPage";
 
 const ACTOR_ID = "human_operator";
-const MAX_FILES = 20;
-const MAX_TOTAL_BYTES = 200 * 1024 * 1024;
-const MIME_BY_EXTENSION: Record<string, string> = {
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  png: "image/png",
-  webp: "image/webp",
-  pdf: "application/pdf",
-  txt: "text/plain",
-  md: "text/markdown",
-  markdown: "text/markdown",
-};
-const LIMIT_BY_MIME: Record<string, number> = {
-  "image/jpeg": 20 * 1024 * 1024,
-  "image/png": 20 * 1024 * 1024,
-  "image/webp": 20 * 1024 * 1024,
-  "application/pdf": 50 * 1024 * 1024,
-  "text/plain": 5 * 1024 * 1024,
-  "text/markdown": 5 * 1024 * 1024,
-};
-
-type UploadStatus = "queued" | "uploading" | "failed";
-
-interface LocalUpload {
-  id: string;
-  file: File;
-  declaredMimeType: string;
-  description: string;
-  progress: number;
-  status: UploadStatus;
-  error: string | null;
-}
-
 interface IntakeLocationState {
   pendingUploads?: LocalUpload[];
   autoSubmit?: boolean;
@@ -67,136 +42,6 @@ function envelope(key: string, expectedRevision: number): CommandEnvelope {
     actor_id: ACTOR_ID,
     expected_revision: expectedRevision,
   };
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-function validateFiles(
-  files: File[],
-  currentCount: number,
-  currentBytes: number,
-): { uploads: LocalUpload[]; error: string | null } {
-  if (currentCount + files.length > MAX_FILES) {
-    return { uploads: [], error: "每个任务最多上传 20 个文件。" };
-  }
-  let total = currentBytes;
-  const uploads: LocalUpload[] = [];
-  for (const file of files) {
-    const extension = file.name.split(".").at(-1)?.toLowerCase() ?? "";
-    const mime = MIME_BY_EXTENSION[extension];
-    if (!mime) {
-      return { uploads: [], error: `${file.name}：仅支持图片、PDF、TXT 和 MD。` };
-    }
-    if (file.type && file.type !== mime && !(mime === "text/markdown" && file.type === "text/plain")) {
-      return { uploads: [], error: `${file.name}：文件声明类型与扩展名不一致。` };
-    }
-    const limit = LIMIT_BY_MIME[mime];
-    if (limit === undefined) {
-      return { uploads: [], error: `${file.name}：无法确认文件大小限制。` };
-    }
-    if (file.size > limit) {
-      return {
-        uploads: [],
-        error: `${file.name}：超过该类型 ${formatBytes(limit)} 的单文件限制。`,
-      };
-    }
-    total += file.size;
-    if (total > MAX_TOTAL_BYTES) {
-      return { uploads: [], error: "本任务附件总量不能超过 200 MiB。" };
-    }
-    uploads.push({
-      id: operationId("upload"),
-      file,
-      declaredMimeType: mime,
-      description: "",
-      progress: 0,
-      status: "queued",
-      error: null,
-    });
-  }
-  return { uploads, error: null };
-}
-
-function FilePicker({
-  disabled,
-  onFiles,
-}: {
-  disabled?: boolean;
-  onFiles: (files: File[]) => void;
-}): React.JSX.Element {
-  return (
-    <label className={`workbench-file-picker${disabled ? " workbench-file-picker--disabled" : ""}`}>
-      <Icon name="upload" />
-      <span>添加图片 / PDF / TXT / MD</span>
-      <input
-        type="file"
-        multiple
-        disabled={disabled}
-        accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.md,.markdown,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown"
-        onChange={(event) => {
-          onFiles(Array.from(event.currentTarget.files ?? []));
-          event.currentTarget.value = "";
-        }}
-      />
-    </label>
-  );
-}
-
-function LocalUploadList({
-  items,
-  onDescription,
-  onCancel,
-  onRetry,
-}: {
-  items: LocalUpload[];
-  onDescription: (id: string, value: string) => void;
-  onCancel: (id: string) => void;
-  onRetry: (id: string) => void;
-}): React.JSX.Element | null {
-  if (items.length === 0) return null;
-  return (
-    <div className="workbench-upload-list" aria-label="待上传文件">
-      {items.map((item) => (
-        <article className="workbench-upload-item" key={item.id}>
-          <div className="workbench-upload-item__icon"><Icon name="file" /></div>
-          <div className="workbench-upload-item__body">
-            <div className="workbench-upload-item__heading">
-              <strong>{item.file.name}</strong>
-              <span>{formatBytes(item.file.size)}</span>
-            </div>
-            <label>
-              <span>文件说明（可选）</span>
-              <input
-                value={item.description}
-                maxLength={4_000}
-                disabled={item.status === "uploading"}
-                placeholder="说明这份材料的用途"
-                onChange={(event) => onDescription(item.id, event.currentTarget.value)}
-              />
-            </label>
-            {item.status === "uploading" ? (
-              <div className="workbench-upload-progress">
-                <progress value={item.progress} max={100} aria-label={`${item.file.name} 上传进度`} />
-                <span>{item.progress}%</span>
-              </div>
-            ) : null}
-            {item.status === "queued" ? <p className="workbench-file-status">等待上传</p> : null}
-            {item.error ? <p className="workbench-inline-error" role="alert">{item.error}</p> : null}
-          </div>
-          <div className="workbench-upload-item__actions">
-            {item.status === "failed" ? (
-              <button type="button" className="workbench-icon-button" aria-label={`重试 ${item.file.name}`} onClick={() => onRetry(item.id)}><Icon name="retry" /></button>
-            ) : null}
-            <button type="button" className="workbench-icon-button" aria-label={`${item.status === "uploading" ? "取消上传" : "移除"} ${item.file.name}`} onClick={() => onCancel(item.id)}><Icon name="trash" /></button>
-          </div>
-        </article>
-      ))}
-    </div>
-  );
 }
 
 function ServerAssetList({
@@ -265,7 +110,7 @@ function NewTaskIntakePage(): React.JSX.Element {
   const localBytes = uploads.reduce((sum, item) => sum + item.file.size, 0);
 
   const addFiles = (files: File[]): void => {
-    const result = validateFiles(files, uploads.length, localBytes);
+    const result = validateTaskAssetFiles(files, uploads.length, localBytes);
     setFileError(result.error);
     if (result.uploads.length) setUploads((current) => [...current, ...result.uploads]);
   };
@@ -300,7 +145,6 @@ function NewTaskIntakePage(): React.JSX.Element {
           label="发送给 Master"
           aria-label="发送给 Master 的首条消息"
           value={prompt}
-          maxLength={20_000}
           placeholder="描述你的设计任务，例如：为秋季发布会生成三套主视觉方向…"
           disabled={sent}
           onChange={(event) => setPrompt(event.currentTarget.value)}
@@ -348,7 +192,7 @@ function NewTaskIntakePage(): React.JSX.Element {
                 />
               </label>
             ) : null}
-            <span>{prompt.length.toLocaleString("zh-CN")} / 20,000{uploads.length ? ` · ${uploads.length} 个附件将随首条消息上传` : " · 附件仅可在创建时添加"}</span>
+            <span>已输入 {prompt.length.toLocaleString("zh-CN")} 字{uploads.length ? ` · ${uploads.length} 个附件将随首条消息上传` : " · 后续对话仍可添加附件"}</span>
           </div>
           <button type="submit" className="workbench-primary-button" aria-label="发送并创建任务" disabled={!prompt.trim() || sent}>
             {create.isPending ? "正在创建…" : "发送消息"}
@@ -539,7 +383,7 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
   const serverBytes = data.assets.reduce((sum, asset) => sum + asset.size_bytes, 0);
   const localBytes = uploads.reduce((sum, item) => sum + item.file.size, 0);
   const addFiles = (files: File[]): void => {
-    const result = validateFiles(files, data.assets.length + uploads.length, serverBytes + localBytes);
+    const result = validateTaskAssetFiles(files, data.assets.length + uploads.length, serverBytes + localBytes);
     setFileError(result.error);
     if (result.uploads.length) setUploads((current) => [...current, ...result.uploads]);
   };
@@ -556,7 +400,7 @@ function ExistingTaskIntakePage({ taskId }: { taskId: string }): React.JSX.Eleme
         <section className="workbench-upload-section" aria-labelledby="draft-upload-title">
           <div className="workbench-upload-section__heading">
             <div><p className="workbench-eyebrow">首次材料</p><h2 id="draft-upload-title">{locked ? "已提交附件" : "上传队列"}</h2><p>{data.assets.length} / 20 个 · {formatBytes(serverBytes)} / 200 MiB · 最多 3 个并发</p></div>
-            {!locked ? <FilePicker onFiles={addFiles} disabled={data.assets.length + uploads.length >= MAX_FILES} /> : null}
+            {!locked ? <TaskAssetFilePicker onFiles={addFiles} disabled={data.assets.length + uploads.length >= MAX_TASK_FILES} /> : null}
           </div>
           {fileError ? <p className="workbench-inline-error" role="alert">{fileError}</p> : null}
           <ServerAssetList assets={data.assets} locked={locked} removingId={removingId} onRemove={(asset) => remove.mutate(asset)} />

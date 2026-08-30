@@ -26,8 +26,7 @@
     },
     "prompt": {
       "$ref": "common.schema.json#/$defs/credentialSafeText",
-      "minLength": 1,
-      "maxLength": 20000
+      "minLength": 1
     },
     "upload_session": {
       "type": "object",
