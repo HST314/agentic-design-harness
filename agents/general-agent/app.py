@@ -186,6 +186,10 @@ class AgentBusyError(RuntimeError):
     """Raised when a chat message arrives while the Agent is still running."""
 
 
+class AgentQuiescedError(RuntimeError):
+    """Raised when a managed archive gate has closed work admission."""
+
+
 class GeneralAgent:
     def __init__(self, task_card: dict[str, Any], shared_root: Path, state_path: Path) -> None:
         self.task_card = task_card
@@ -198,7 +202,23 @@ class GeneralAgent:
         self.timeout = int(os.environ.get("GENERAL_AGENT_TIMEOUT_SECONDS", "180"))
         self.max_rounds = int(os.environ.get("GENERAL_AGENT_MAX_TOOL_ROUNDS", "8"))
         self.running = False
+        admission_file = os.environ.get("HARNESS_WORK_ADMISSION_FILE")
+        self.work_admission_path: Path | None = (
+            Path(admission_file) if admission_file else None
+        )
         self.state = self._load_or_initialize()
+
+    def is_quiesced(self) -> bool:
+        # Legacy and direct construction paths are not managed by the Harness
+        # admission gate. Managed launches always provide the file explicitly
+        # and continue to fail closed if it becomes unreadable or corrupt.
+        if self.work_admission_path is None:
+            return False
+        try:
+            value = json.loads(self.work_admission_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return True
+        return not isinstance(value, dict) or value.get("quiesced") is not False
 
     def _load_or_initialize(self) -> dict[str, Any]:
         instruction = self.task_card["objective"]
@@ -249,6 +269,10 @@ class GeneralAgent:
         if not isinstance(content, str) or not content.strip() or len(content) > 20_000:
             raise ValueError("Message content must contain 1 to 20000 characters.")
         with self.lock:
+            if self.is_quiesced():
+                raise AgentQuiescedError(
+                    "The Agent is quiesced and cannot accept a new message."
+                )
             if self.running:
                 raise AgentBusyError(
                     "The Agent is still processing the previous message."
@@ -490,6 +514,10 @@ class Handler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {"events": list(self.server.agent.state.get("usage", []))},
                 )
+        elif self.path == "/api/work-admission":
+            self._json(
+                HTTPStatus.OK, {"quiesced": self.server.agent.is_quiesced()}
+            )
         elif self.path == "/":
             html = (Path(__file__).with_name("index.html")).read_bytes()
             self._send(HTTPStatus.OK, html, "text/html; charset=utf-8")
@@ -513,6 +541,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         except AgentBusyError as exc:
             self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
+        except AgentQuiescedError as exc:
+            self._json(HTTPStatus.CONFLICT, {"error": str(exc), "retryable": True})
         except ValueError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception:

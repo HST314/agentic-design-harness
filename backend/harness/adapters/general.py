@@ -25,11 +25,13 @@ from .base import (
     AdapterCommandResult,
     AdapterObservation,
     AdapterRecoveryResult,
+    AgentWorkState,
     PrepareRequest,
     ValidationResult,
 )
 from .image_runtime import content_tree_sha256
 from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
+from .work_admission import initialize_work_admission, write_work_admission
 
 _GENERAL_INPUT_MAX_BYTES = 2 * 1024 * 1024
 
@@ -108,6 +110,8 @@ class GeneralAgentAdapter:
         runtime_card = {**dict(request.task_card), "materialized_inputs": materialized_inputs}
         atomic_write_json(card_path, runtime_card, mode=0o640)
         state_path = self._state_path(task_id, instance_id)
+        admission_path = instance_root / "runtime" / "work-admission.json"
+        initialize_work_admission(admission_path, instance_id)
         expected = {
             "schema_version": "1.0",
             "task_id": task_id,
@@ -178,6 +182,7 @@ class GeneralAgentAdapter:
                 "GENERAL_AGENT_MAX_TOOL_ROUNDS": str(snapshot.runtime.master.max_tool_rounds),
                 "GENERAL_AGENT_RUNTIME_CONFIG": str(runtime_config),
                 "GENERAL_AGENT_MODEL_CONFIG": str(runtime_config),
+                "HARNESS_WORK_ADMISSION_FILE": str(admission_path),
             },
             writable_roots=(shared_root.resolve(), managed_state_root.resolve()),
             health_path="/healthz",
@@ -340,6 +345,74 @@ class GeneralAgentAdapter:
         validate_identifier(operation_id, "operation_id")
         self._task_id_for_instance(instance_id)
         return AdapterCommandResult(True, operation_id)
+
+    def probe_work_state(self, instance_id: str) -> AgentWorkState:
+        """Report the real chat in-flight state from the Agent process.
+
+        The General Agent runs its model loop in a background thread and
+        publishes the authoritative ``running`` flag on ``/api/messages``.
+        Any probe failure is UNKNOWN, never IDLE, so a safe archive drain
+        cannot interrupt an in-flight chat turn.
+        """
+
+        task_id = self._task_id_for_instance(instance_id)
+        instance = self.store.instance.get(task_id, instance_id)
+        process = None if instance is None else instance.get("process")
+        if not isinstance(process, dict) or process.get("state") != "RUNNING":
+            return AgentWorkState.UNKNOWN
+        try:
+            with urlopen(
+                f"http://{self.host}:{int(process['port'])}/api/messages", timeout=3
+            ) as response:
+                payload = json.loads(response.read(1024 * 1024))
+        except (OSError, ValueError):
+            return AgentWorkState.UNKNOWN
+        running = payload.get("running") if isinstance(payload, dict) else None
+        if not isinstance(running, bool):
+            return AgentWorkState.UNKNOWN
+        return AgentWorkState.ACTIVE if running else AgentWorkState.IDLE
+
+    def quiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        return self._set_work_admission(instance_id, operation_id, quiesced=True)
+
+    def unquiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        return self._set_work_admission(instance_id, operation_id, quiesced=False)
+
+    def _set_work_admission(
+        self, instance_id: str, operation_id: str, *, quiesced: bool
+    ) -> AdapterCommandResult:
+        validate_identifier(operation_id, "operation_id")
+        task_id = self._task_id_for_instance(instance_id)
+        path = (
+            self.store.layout.initialize_instance(task_id, instance_id)
+            / "runtime"
+            / "work-admission.json"
+        )
+        write_work_admission(path, instance_id, operation_id, quiesced=quiesced)
+        instance = self.store.instance.get(task_id, instance_id)
+        process = None if instance is None else instance.get("process")
+        if not isinstance(process, dict) or process.get("state") != "RUNNING":
+            return AdapterCommandResult(
+                True, operation_id, {"quiesced": quiesced, "verified": False}
+            )
+        try:
+            with urlopen(
+                f"http://{self.host}:{int(process['port'])}/api/work-admission", timeout=3
+            ) as response:
+                observed = json.loads(response.read(1024 * 1024))
+        except (OSError, ValueError) as exc:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "General Agent did not expose its work-admission gate.",
+            ) from exc
+        if not isinstance(observed, dict) or observed.get("quiesced") is not quiesced:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "General Agent did not observe its work-admission gate.",
+            )
+        return AdapterCommandResult(
+            True, operation_id, {"quiesced": quiesced, "verified": True}
+        )
 
     def get_status(self, instance_id: str) -> AdapterObservation:
         task_id = self._task_id_for_instance(instance_id)

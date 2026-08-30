@@ -370,6 +370,7 @@ class ApplicationPlanningMixin:
             raise HarnessError(
                 "VALIDATION_ERROR", "Only a human or Master may control an instance."
             )
+        self._require_task_not_archived(task_id)
         request = {
             "task_id": task_id,
             "instance_id": instance_id,
@@ -401,7 +402,13 @@ class ApplicationPlanningMixin:
             )
             if active is not None:
                 return self._start_operation_summary(active)
-            self.commands.validate_task_revision(task_id, envelope.expected_revision)
+            # A sibling instance start advances the aggregate task revision. That
+            # revision is therefore not a valid compare-and-swap boundary for an
+            # independently startable card. The task lock plus the instance state
+            # checks below protect the actual start boundary; restarts retain their
+            # aggregate revision guard because they replace an active process.
+            if kind == "RESTART_INSTANCE":
+                self.commands.validate_task_revision(task_id, envelope.expected_revision)
             plan = self._plan(task_id)
             instance = self._instance(task_id, instance_id)
             if kind == "START_INSTANCE":
@@ -418,6 +425,7 @@ class ApplicationPlanningMixin:
                     "FAILED_TO_START",
                     "FAILED",
                     "CRASHED",
+                    "STOPPED",
                 }
             if instance["status"] not in allowed:
                 raise HarnessError(

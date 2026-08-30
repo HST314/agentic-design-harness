@@ -95,13 +95,17 @@ export function TaskAssetFilePicker({
   onFiles: (files: File[]) => void;
 }): React.JSX.Element {
   return (
-    <label className={`workbench-file-picker${disabled ? " workbench-file-picker--disabled" : ""}`}>
+    <label
+      className={`workbench-icon-button task-asset-file-picker${disabled ? " task-asset-file-picker--disabled" : ""}`}
+      title="图片 20 MiB、PDF 50 MiB、文本 5 MiB"
+      aria-disabled={disabled || undefined}
+    >
       <Icon name="upload" />
-      <span>添加图片 / PDF / TXT / MD</span>
       <input
         type="file"
         multiple
         disabled={disabled}
+        aria-label="添加附件（图片 / PDF / TXT / MD）"
         accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.md,.markdown,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown"
         onChange={(event) => {
           onFiles(Array.from(event.currentTarget.files ?? []));

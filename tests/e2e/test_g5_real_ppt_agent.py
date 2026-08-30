@@ -82,6 +82,80 @@ class RealPptAdapterG5Tests(unittest.TestCase):
                 self.assertEqual(project["state"], "acceptance")
                 app.state.container.application.cancel_instance("t_ppt_smoke", "i_ppt_smoke")
 
+    def test_running_real_agent_survives_task_archive_and_resume(self) -> None:
+        dependency_root = ROOT / ".runtime" / "ppt-agent-deps"
+        if not (dependency_root / "html5lib").is_dir():
+            self.skipTest("PPT Agent dependencies are not installed; run make test.")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime_path, model_path = self._mock_configuration(root)
+            app = create_app(
+                HarnessSettings(
+                    control_root=root / "control",
+                    workspace_root=root / "workspace",
+                    contracts_root=ROOT / "contracts" / "v1",
+                    image_agent_dependency_root=root / "missing-image-deps",
+                    ppt_agent_root=ROOT / "agents" / "ppt-agent",
+                    ppt_agent_lock_path=ROOT / "agents" / "ppt-agent.lock.json",
+                    ppt_agent_python=Path(__import__("sys").executable).resolve(),
+                    ppt_agent_dependency_root=dependency_root,
+                    ppt_agent_runtime_policy=runtime_path,
+                    ppt_agent_model_config=model_path,
+                    config_snapshot=build_config_snapshot(
+                        supervisor_port_start=19200,
+                        supervisor_port_end=19220,
+                        supervisor_startup_timeout=20,
+                    ),
+                )
+            )
+            with TestClient(app) as client:
+                self._create_and_start(client, root)
+                before = self._wait_for_instance(client, app)
+                revision = app.state.container.store.task.revision(
+                    "t_ppt_smoke", "t_ppt_smoke"
+                )
+                archived = client.post(
+                    "/api/v1/tasks/t_ppt_smoke/archive",
+                    json={
+                        "operation_id": "archive-ppt-smoke",
+                        "envelope": self._envelope("archive-ppt-smoke", revision),
+                    },
+                )
+                self.assertEqual(archived.status_code, 200, archived.text)
+                self.assertEqual(archived.json()["task"]["status"], "ARCHIVED")
+                self.assertEqual(
+                    archived.json()["archive_snapshot"]["pre_archive_status"],
+                    "RUNNING",
+                )
+
+                revision = app.state.container.store.task.revision(
+                    "t_ppt_smoke", "t_ppt_smoke"
+                )
+                resumed = client.post(
+                    "/api/v1/tasks/t_ppt_smoke/resume",
+                    json={
+                        "operation_id": "resume-ppt-smoke",
+                        "envelope": self._envelope("resume-ppt-smoke", revision),
+                    },
+                )
+                self.assertEqual(resumed.status_code, 200, resumed.text)
+                self.assertEqual(resumed.json()["failed_instances"], [])
+                self.assertEqual(resumed.json()["task"]["status"], "RUNNING")
+                after = self._wait_for_instance(client, app)
+                self.assertNotEqual(
+                    after["process"]["launch_id"], before["process"]["launch_id"]
+                )
+                status, project, _ = self._call(
+                    after["ui_url"].rstrip("/"),
+                    "GET",
+                    "/api/projects/i_ppt_smoke",
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(project["project_id"], "i_ppt_smoke")
+                app.state.container.application.cancel_instance(
+                    "t_ppt_smoke", "i_ppt_smoke"
+                )
+
     @staticmethod
     def _mock_configuration(root: Path) -> tuple[Path, Path]:
         config_root = root / "ppt-config"

@@ -123,6 +123,8 @@ test("root enters the accessible task-intake application shell", async ({ page }
   await expect(page.getByRole("heading", { name: "创建新的设计任务" })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "主任务历史" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "任务历史" })).toContainText("秋季发布会主视觉");
+  await expect(page.getByRole("region", { name: "已归档" })).toContainText("品牌资料归档");
+  await expect(page.getByRole("link", { name: /品牌资料归档/ })).toContainText("已归档");
   await expect(page.getByRole("status").filter({ hasText: "服务就绪" })).toBeVisible();
 
   const skipLink = page.getByRole("link", { name: "跳到主要内容" });

@@ -883,7 +883,11 @@ class DevelopmentLauncher:
                 selected_python,
             ],
             cwd=self.root,
-            environment=self.backend_environment(),
+            environment=_pythonpath(
+                self.backend_environment(),
+                dependency_root,
+                self.root / ".test-deps",
+            ),
         )
 
     def frontend_input_digest(self) -> str:

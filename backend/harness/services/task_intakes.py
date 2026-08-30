@@ -13,6 +13,7 @@ from ..domain.service import TaskCommandService
 from ..storage.atomic import atomic_write_json
 from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
+from .application import HarnessApplicationService
 from .assets import AssetService
 from .task_config import TaskConfigService
 
@@ -55,11 +56,13 @@ class TaskIntakeService:
         commands: TaskCommandService,
         assets: AssetService,
         task_config: TaskConfigService,
+        application: HarnessApplicationService,
     ) -> None:
         self.store = store
         self.commands = commands
         self.assets = assets
         self.task_config = task_config
+        self.application = application
 
     def create(
         self,
@@ -431,6 +434,7 @@ class TaskIntakeService:
         envelope: CommandEnvelope,
     ) -> dict[str, Any]:
         self._require_human(envelope)
+        self._require_task_not_archived(task_id)
         request = {"task_id": task_id, "task_expected_revision": task_expected_revision}
         with self.commands.task_guard(task_id):
             replay = self._lookup(task_id, "submit_task_intake", request, envelope)
@@ -518,6 +522,7 @@ class TaskIntakeService:
                 "VALIDATION_ERROR", "Change exactly one presentation field at a time."
             )
         if title is not None:
+            self._require_task_not_archived(task_id)
             renamed = self.commands.rename_task(task_id, title, envelope)
             revision = int(renamed.get("task_revision", renamed.get("revision", 0)))
             return {
@@ -533,6 +538,16 @@ class TaskIntakeService:
             }
         request = {"pinned": pinned, "archived": archived}
         command = "pin_task" if pinned is not None else "archive_task"
+        if archived is not None:
+            task = self.store.task.get(task_id, task_id)
+            if task is None:
+                raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
+            if (task.get("status") == "ARCHIVED") != archived:
+                return self._archive_lifecycle_binding(
+                    task_id, archived=archived, command=command, request=request, envelope=envelope
+                )
+        if pinned:
+            self._require_task_not_archived(task_id)
         with self.commands.task_guard(task_id):
             replay = self._lookup(task_id, command, request, envelope)
             if replay is not None:
@@ -594,6 +609,82 @@ class TaskIntakeService:
                 command,
                 request_sha256,
                 result,
+            )
+
+    def _archive_lifecycle_binding(
+        self,
+        task_id: str,
+        *,
+        archived: bool,
+        command: str,
+        request: dict[str, Any],
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Bind the sidebar archived toggle to the task archive/resume lifecycle.
+
+        The delegation must run outside ``task_guard``: the application layer
+        takes its own task/intent locks and then re-enters domain commands, so
+        nesting it inside the domain command lock would invert the lock order.
+        """
+
+        replay = self._lookup(task_id, command, request, envelope)
+        if replay is not None:
+            return replay
+        navigation_revision = self.store.task_navigation.revision(task_id, task_id)
+        if envelope.expected_revision != navigation_revision:
+            self._raise_revision(
+                "task_navigation", task_id, envelope.expected_revision, navigation_revision
+            )
+        digest = hashlib.sha256(
+            f"presentation-archive\0{envelope.idempotency_key}".encode()
+        ).hexdigest()
+        derived_envelope = CommandEnvelope(
+            idempotency_key=f"presentation-archive-{digest[:24]}",
+            actor_type=envelope.actor_type,
+            actor_id=envelope.actor_id,
+            expected_revision=self.store.task.revision(task_id, task_id),
+        )
+        if archived:
+            self.application.archive_task(
+                task_id,
+                operation_id=f"presentation_archive_{digest[:24]}",
+                envelope=derived_envelope,
+            )
+        else:
+            self.application.resume_task(
+                task_id,
+                operation_id=f"presentation_resume_{digest[:24]}",
+                envelope=derived_envelope,
+            )
+        with self.commands.task_guard(task_id):
+            replay = self._lookup(task_id, command, request, envelope)
+            if replay is not None:
+                return replay
+            result = self._presentation_result(task_id)
+            return self.store.idempotency.remember_digest(
+                task_id,
+                envelope.idempotency_key,
+                command,
+                self._request_digest(command, request),
+                result,
+            )
+
+    def _presentation_result(self, task_id: str) -> dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "task": deepcopy(self.store.task.get(task_id, task_id)),
+            "task_revision": self.store.task.revision(task_id, task_id),
+            "navigation": deepcopy(self.store.task_navigation.get(task_id, task_id)),
+            "presentation_revision": self.store.task_navigation.revision(task_id, task_id),
+        }
+
+    def _require_task_not_archived(self, task_id: str) -> None:
+        task = self.store.task.get(task_id, task_id)
+        if task is not None and task.get("status") == "ARCHIVED":
+            raise HarnessError(
+                "TASK_ARCHIVED",
+                "The task is archived and read-only; resume it before issuing changes.",
+                {"task_id": task_id},
             )
 
     def _draft(self, task_id: str) -> dict[str, Any]:

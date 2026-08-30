@@ -100,6 +100,11 @@ class StateMachine:
     ) -> str:
         if task["status"] in TASK_TERMINAL:
             return task["status"]
+        # ARCHIVED is a reversible suspension entered and left only through the
+        # explicit archive/resume commands. Instance transitions (for example a
+        # reconciled leftover launch) must never reaggregate the task out of it.
+        if task["status"] == "ARCHIVED":
+            return task["status"]
         if preserve_start_confirmation and task["status"] == "AWAITING_START_CONFIRMATION":
             return task["status"]
         if any(item["required"] and item["status"] == "WAITING_APPROVAL" for item in instances):

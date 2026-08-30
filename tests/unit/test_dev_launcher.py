@@ -232,6 +232,32 @@ class DevelopmentLauncherTests(unittest.TestCase):
             self.assertIn("--cache-root", command)
             self.assertIn(str(launcher.image_runtime_root), command)
 
+    def test_ppt_attestation_imports_harness_from_the_isolated_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dependency_root = root / ".runtime" / "ppt-agent-deps"
+            dependency_root.mkdir(parents=True)
+            launcher = DevelopmentLauncher(root=root)
+
+            with patch("scripts.dev.command_succeeds", return_value=True) as succeeds:
+                self.assertTrue(
+                    launcher.ppt_runtime_is_attested(
+                        dependency_root,
+                        interpreter=Path(sys.executable),
+                    )
+                )
+
+            environment = succeeds.call_args.kwargs["environment"]
+            python_path = environment["PYTHONPATH"].split(os.pathsep)
+            self.assertEqual(
+                python_path[:3],
+                [
+                    str(dependency_root),
+                    str(root / ".test-deps"),
+                    str(root / "backend"),
+                ],
+            )
+
     def test_doctor_can_continue_with_an_actionable_image_degradation(self) -> None:
         launcher = DevelopmentLauncher(root=Path("workspace"))
         with (

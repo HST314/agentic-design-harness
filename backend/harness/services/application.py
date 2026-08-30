@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from collections.abc import Callable, Collection
 from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from ..adapters import AdapterRegistry, PrepareRequest
+from ..adapters import AdapterRegistry, AgentAdapter, PrepareRequest
+from ..adapters.base import AgentWorkState
 from ..adapters.types import AgentInstanceSnapshot, StageSnapshot, TaskCard
 from ..core.errors import HarnessError
 from ..domain.commands import CommandEnvelope
@@ -18,7 +20,7 @@ from ..domain.service import TaskCommandService
 from ..storage.atomic import atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
 from ..storage.locks import FileLock
-from ..storage.repository import utc_now
+from ..storage.repository import Actor, utc_now
 from ..storage.store import FileStateStore
 from .application_delivery import ApplicationDeliveryMixin
 from .application_planning import ApplicationPlanningMixin
@@ -30,6 +32,12 @@ from .supervisor import ProcessSupervisor
 from .task_config import TaskConfigService
 
 CrashHook = Callable[[str], None]
+
+_ARCHIVE_TARGET_STATUSES = frozenset(
+    {"STARTING", "RUNNING", "WAITING_APPROVAL", "SUCCEEDED", "FAILED"}
+)
+_ARCHIVE_DRAIN_POLL_SECONDS = 2.0
+_DEFAULT_ARCHIVE_DRAIN_TIMEOUT_SECONDS = 60.0
 
 
 class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMixin):
@@ -146,6 +154,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
     ) -> dict[str, Any]:
         validate_identifier(task_id, "task_id")
         validate_identifier(operation_id, "operation_id")
+        self._require_task_not_archived(task_id)
         request = {
             "task_id": task_id,
             "mode": mode,
@@ -240,6 +249,10 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                         continue
                     elif intent["kind"] == "CANCEL_TASK":
                         result = self._resume_cancel_task(path, None)
+                    elif intent["kind"] == "ARCHIVE_TASK":
+                        result = self._resume_archive_task(path, None)
+                    elif intent["kind"] == "RESUME_TASK":
+                        result = self._resume_resume_task(path, None)
                     elif intent["kind"] == "RESOLVE_APPROVAL":
                         result = self._resume_approval(path, None)
                     else:
@@ -271,6 +284,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         only_instance_ids: Collection[str] | None = None,
     ) -> dict[str, Any]:
         validate_identifier(operation_id, "operation_id")
+        self._require_task_not_archived(task_id)
         only = None if only_instance_ids is None else sorted(set(only_instance_ids))
         request = {
             "task_id": task_id,
@@ -552,8 +566,15 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     ),
                 ):
                     latest = read_json(path)
-                    if latest["state"] in {"QUEUED", "RUNNING"}:
-                        self._resume_start(path, None)
+                    if latest["state"] not in {"QUEUED", "RUNNING"}:
+                        continue
+                    if latest["state"] == "QUEUED":
+                        latest.update({"state": "RUNNING", "updated_at": utc_now()})
+                        atomic_write_json(path, latest)
+                # Runtime preparation and process/adapter startup are intentionally
+                # outside the task lock. Sibling cards must remain enqueueable while
+                # this legacy batch-shaped operation performs slow external I/O.
+                self._resume_start(path, None)
                 continue
             with (
                 FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
@@ -583,6 +604,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 raise HarnessError(
                     "VALIDATION_ERROR", "Only a human or Master may cancel an instance."
                 )
+            self._require_task_not_archived(task_id)
             with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds):
                 replayed = self._replayed_instance_transition(
                     task_id, instance_id, "CANCELLED", envelope.idempotency_key
@@ -637,6 +659,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         validate_identifier(operation_id, "operation_id")
         if envelope.actor_type not in {"human", "master"}:
             raise HarnessError("VALIDATION_ERROR", "Only a human or Master may cancel a task.")
+        self._require_task_not_archived(task_id)
         command_request = {"task_id": task_id}
         request = {
             "task_id": task_id,
@@ -764,6 +787,718 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
             crash_hook("after_cancel_task_intent_commit")
         return deepcopy(result)
 
+    def archive_task(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        envelope: CommandEnvelope,
+        drain_timeout_seconds: float | None = None,
+        force: bool = False,
+        crash_hook: CrashHook | None = None,
+    ) -> dict[str, Any]:
+        """Drain and park every live child process, then mark the task ARCHIVED.
+
+        Archiving is reversible: the per-instance and pre-archive task statuses
+        are snapshotted into the intent so a later resume can restore them.
+        """
+
+        validate_identifier(operation_id, "operation_id")
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError("VALIDATION_ERROR", "Only a human or Master may archive a task.")
+        drain_timeout = (
+            _DEFAULT_ARCHIVE_DRAIN_TIMEOUT_SECONDS
+            if drain_timeout_seconds is None
+            else float(drain_timeout_seconds)
+        )
+        if not 0 <= drain_timeout <= 3600:
+            raise HarnessError("VALIDATION_ERROR", "The archive drain timeout is invalid.")
+        request = {
+            "task_id": task_id,
+            "envelope": envelope.model_dump(mode="json"),
+            "drain_timeout_seconds": drain_timeout,
+            "force": bool(force),
+        }
+        request_sha256 = digest_json(request)
+        intent_path = self._intent_path(operation_id)
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
+        ):
+            if intent_path.exists():
+                intent = read_json(intent_path)
+                if (
+                    intent.get("kind") != "ARCHIVE_TASK"
+                    or intent.get("request_sha256") != request_sha256
+                ):
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The application operation id was reused for another request.",
+                        {"operation_id": operation_id},
+                    )
+                if intent["state"] == "COMMITTED":
+                    return deepcopy(intent["result"])
+                if intent["state"] == "ABORTED":
+                    self._raise_terminal_intent(intent)
+                return self._resume_archive_task(intent_path, crash_hook)
+            replayed = self.store.idempotency.lookup(
+                task_id,
+                envelope.idempotency_key,
+                "archive_task",
+                {"task_id": task_id},
+            )
+            if replayed is not None:
+                return replayed
+            self.commands.validate_task_revision(task_id, envelope.expected_revision)
+            plan = self.store.plan.get(task_id, task_id)
+            task_status = (
+                plan["task"]["status"]
+                if plan is not None
+                else self.commands._task(task_id)["status"]
+            )
+            if task_status == "ARCHIVED":
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "The task is already archived.",
+                    {"task_id": task_id},
+                )
+            targets = [
+                {
+                    "instance_id": instance["instance_id"],
+                    "initial_status": instance["status"],
+                }
+                for instance in ([] if plan is None else plan["instances"])
+                if instance["status"] in _ARCHIVE_TARGET_STATUSES
+            ]
+            intent = {
+                "schema_version": "1.0",
+                "kind": "ARCHIVE_TASK",
+                "operation_id": operation_id,
+                "request_sha256": request_sha256,
+                "request": request,
+                "snapshot": {
+                    "pre_archive_status": task_status,
+                    "stopped_instance_ids": [item["instance_id"] for item in targets],
+                    "instance_statuses": {
+                        item["instance_id"]: item["initial_status"] for item in targets
+                    },
+                },
+                "target_instances": targets,
+                "instance_progress": {
+                    item["instance_id"]: {"state": "PENDING"} for item in targets
+                },
+                "state": "PREPARED",
+                "prepared_at": utc_now(),
+                "result": None,
+            }
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook("after_archive_task_intent")
+            return self._resume_archive_task(intent_path, crash_hook)
+
+    def _resume_archive_task(
+        self, intent_path: Path, crash_hook: CrashHook | None
+    ) -> dict[str, Any]:
+        intent = read_json(intent_path)
+        request = intent["request"]
+        envelope = CommandEnvelope.model_validate(request["envelope"])
+        task_id = request["task_id"]
+        operation_id = intent["operation_id"]
+        if not request.get("force", False):
+            drain = self._quiesce_and_drain_archive_targets(
+                task_id,
+                [item["instance_id"] for item in intent["target_instances"]],
+                float(request["drain_timeout_seconds"]),
+                operation_id,
+            )
+            if drain["busy"] or drain["unknown"]:
+                self._unquiesce_archive_targets(
+                    task_id,
+                    [item["instance_id"] for item in intent["target_instances"]],
+                    operation_id,
+                )
+                if drain["busy"]:
+                    error = HarnessError(
+                        "ARCHIVE_DRAIN_TIMEOUT",
+                        "Agents are still finishing in-flight work; "
+                        "retry to keep waiting or archive with force.",
+                        {
+                            "busy_instance_ids": drain["busy"],
+                            "unknown_instance_ids": drain["unknown"],
+                            "operation_id": operation_id,
+                        },
+                    )
+                else:
+                    error = HarnessError(
+                        "ARCHIVE_DRAIN_UNKNOWN",
+                        "The in-flight state of an Agent could not be established; "
+                        "retry the probe or archive with force.",
+                        {
+                            "unknown_instance_ids": drain["unknown"],
+                            "operation_id": operation_id,
+                        },
+                    )
+                intent.update(
+                    {
+                        "state": "ABORTED",
+                        "aborted_at": utc_now(),
+                        "error": {
+                            "code": error.code,
+                            "message": error.message,
+                            "details": deepcopy(error.details),
+                        },
+                    }
+                )
+                atomic_write_json(intent_path, intent)
+                raise error
+            if crash_hook:
+                crash_hook("after_archive_drain")
+        for target in intent["target_instances"]:
+            instance_id = target["instance_id"]
+            progress = intent["instance_progress"][instance_id]
+            if progress["state"] == "STOPPED":
+                continue
+            progress.update(
+                {
+                    "state": "STOPPING",
+                    "started_at": progress.get("started_at") or utc_now(),
+                }
+            )
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook(f"before_instance_suspend:{instance_id}")
+            instance = self._instance(task_id, instance_id)
+            if instance["status"] != "STOPPED":
+                if instance["status"] in {"STARTING", "RUNNING", "WAITING_APPROVAL"}:
+                    adapter = self.adapters.get(instance["agent_type"])
+                    with suppress(HarnessError):
+                        adapter.stop(
+                            instance_id,
+                            "harness_task_archived",
+                            self._derived_id("stop", operation_id, instance_id),
+                        )
+                self.supervisor.suspend_instance(
+                    task_id,
+                    instance_id,
+                    idempotency_key=f"archive-{operation_id}-{instance_id}",
+                )
+            if crash_hook:
+                crash_hook(f"after_instance_suspend_effect:{instance_id}")
+            progress.update({"state": "STOPPED", "completed_at": utc_now()})
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook(f"after_instance_suspend:{instance_id}")
+        if crash_hook:
+            crash_hook("before_task_archive_commit")
+        current_revision = self.store.task.revision(task_id, task_id)
+        result = self.commands.archive_task(
+            task_id,
+            CommandEnvelope(
+                idempotency_key=envelope.idempotency_key,
+                actor_type=envelope.actor_type,
+                actor_id=envelope.actor_id,
+                expected_revision=current_revision,
+            ),
+        )
+        if crash_hook:
+            crash_hook("after_task_archive_commit")
+        self._sync_task_navigation(task_id, archived=True)
+        result = {**deepcopy(result), "archive_snapshot": deepcopy(intent["snapshot"])}
+        intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
+        atomic_write_json(intent_path, intent)
+        if crash_hook:
+            crash_hook("after_archive_task_intent_commit")
+        return deepcopy(result)
+
+    def _quiesce_and_drain_archive_targets(
+        self,
+        task_id: str,
+        instance_ids: list[str],
+        timeout_seconds: float,
+        operation_id: str,
+    ) -> dict[str, list[str]]:
+        """Close admission before waiting for in-flight Agent work.
+
+        Returns the instances still ACTIVE at the deadline (``busy``) and the
+        instances whose in-flight state could not be established (``unknown``).
+        UNKNOWN is never treated as idle: a safe archive must not stop an
+        Agent whose work state cannot be proven.
+        """
+
+        deadline = time.monotonic() + timeout_seconds
+        busy: list[str] = []
+        unknown: list[str] = []
+        for instance_id in instance_ids:
+            instance = self._instance(task_id, instance_id)
+            process = instance.get("process")
+            if not isinstance(process, dict) or process.get("state") != "RUNNING":
+                continue
+            adapter = self.adapters.get_optional(instance["agent_type"])
+            if adapter is None or not adapter.available:
+                unknown.append(instance_id)
+                continue
+            try:
+                quiesced = adapter.quiesce(
+                    instance_id,
+                    self._derived_id("quiesce", operation_id, instance_id),
+                )
+            except Exception:
+                unknown.append(instance_id)
+                continue
+            if not quiesced.accepted or quiesced.details.get("quiesced") is not True:
+                unknown.append(instance_id)
+                continue
+            while True:
+                try:
+                    work_state = adapter.probe_work_state(instance_id)
+                except Exception:
+                    work_state = AgentWorkState.UNKNOWN
+                if work_state is AgentWorkState.IDLE:
+                    break
+                if time.monotonic() >= deadline:
+                    if work_state is AgentWorkState.ACTIVE:
+                        busy.append(instance_id)
+                    else:
+                        unknown.append(instance_id)
+                    break
+                time.sleep(_ARCHIVE_DRAIN_POLL_SECONDS)
+        return {"busy": busy, "unknown": unknown}
+
+    def _unquiesce_archive_targets(
+        self, task_id: str, instance_ids: list[str], operation_id: str
+    ) -> None:
+        for instance_id in instance_ids:
+            instance = self.store.instance.get(task_id, instance_id)
+            if instance is None:
+                continue
+            adapter = self.adapters.get_optional(instance["agent_type"])
+            if adapter is None or not adapter.available:
+                continue
+            with suppress(Exception):
+                adapter.unquiesce(
+                    instance_id,
+                    self._derived_id("unquiesce", operation_id, instance_id),
+                )
+
+    def resume_task(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        envelope: CommandEnvelope,
+        crash_hook: CrashHook | None = None,
+    ) -> dict[str, Any]:
+        """Restore an archived task and restart the instances its archive stopped."""
+
+        validate_identifier(operation_id, "operation_id")
+        if envelope.actor_type not in {"human", "master"}:
+            raise HarnessError("VALIDATION_ERROR", "Only a human or Master may resume a task.")
+        request = {
+            "task_id": task_id,
+            "envelope": envelope.model_dump(mode="json"),
+        }
+        request_sha256 = digest_json(request)
+        intent_path = self._intent_path(operation_id)
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            FileLock(self._intent_lock(operation_id), self.store.lock_timeout_seconds),
+        ):
+            if intent_path.exists():
+                intent = read_json(intent_path)
+                if (
+                    intent.get("kind") != "RESUME_TASK"
+                    or intent.get("request_sha256") != request_sha256
+                ):
+                    raise HarnessError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "The application operation id was reused for another request.",
+                        {"operation_id": operation_id},
+                    )
+                if intent["state"] == "COMMITTED":
+                    return deepcopy(intent["result"])
+                if intent["state"] == "ABORTED":
+                    self._raise_terminal_intent(intent)
+                return self._resume_resume_task(intent_path, crash_hook)
+            self.commands.validate_task_revision(task_id, envelope.expected_revision)
+            plan = self.store.plan.get(task_id, task_id)
+            task_status = (
+                plan["task"]["status"]
+                if plan is not None
+                else self.commands._task(task_id)["status"]
+            )
+            if task_status != "ARCHIVED":
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "Only an archived task may be resumed.",
+                    {"task_id": task_id, "current": task_status},
+                )
+            snapshot = self._latest_archive_snapshot(task_id)
+            if snapshot is None:
+                stopped_instance_ids = [
+                    instance["instance_id"]
+                    for instance in ([] if plan is None else plan["instances"])
+                    if instance["status"] == "STOPPED"
+                ]
+                snapshot = {
+                    "pre_archive_status": "RUNNING" if plan is not None else "DRAFT",
+                    "stopped_instance_ids": stopped_instance_ids,
+                    "instance_statuses": {
+                        instance_id: "RUNNING" for instance_id in stopped_instance_ids
+                    },
+                }
+            intent = {
+                "schema_version": "1.0",
+                "kind": "RESUME_TASK",
+                "operation_id": operation_id,
+                "request_sha256": request_sha256,
+                "request": request,
+                "snapshot": deepcopy(snapshot),
+                "instance_progress": {
+                    instance_id: {"state": "PENDING"}
+                    for instance_id in snapshot["stopped_instance_ids"]
+                },
+                "aggregate_restored": False,
+                "state": "PREPARED",
+                "prepared_at": utc_now(),
+                "result": None,
+            }
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook("after_resume_task_intent")
+            return self._resume_resume_task(intent_path, crash_hook)
+
+    def _resume_resume_task(
+        self, intent_path: Path, crash_hook: CrashHook | None
+    ) -> dict[str, Any]:
+        intent = read_json(intent_path)
+        request = intent["request"]
+        envelope = CommandEnvelope.model_validate(request["envelope"])
+        task_id = request["task_id"]
+        operation_id = intent["operation_id"]
+        snapshot = intent["snapshot"]
+        instance_statuses = snapshot.get("instance_statuses")
+        if not isinstance(instance_statuses, dict):
+            instance_statuses = {}
+        # Resume first wakes every stopped process while the instance keeps its
+        # STOPPED business status, then restores the instance/stage/task
+        # snapshot in one atomic aggregate commit. Intents written by the
+        # previous resume pipeline are migrated on read.
+        aggregate_restored = bool(
+            intent.get("aggregate_restored", intent.get("task_restored", False))
+        )
+        for instance_id in snapshot["stopped_instance_ids"]:
+            progress = intent["instance_progress"][instance_id]
+            if progress["state"] == "RUNNING":
+                progress["state"] = "PROCESS_RUNNING"
+                atomic_write_json(intent_path, intent)
+            if progress["state"] in {"PROCESS_RUNNING", "RESTORED", "SKIPPED", "FAILED"}:
+                continue
+            if progress["state"] == "COMPENSATING":
+                instance = self._instance(task_id, instance_id)
+                admission_reclosed = self._compensate_failed_resume(
+                    task_id,
+                    instance_id,
+                    operation_id,
+                    self.adapters.get(instance["agent_type"]),
+                )
+                progress["error"].setdefault("details", {})[
+                    "admission_reclosed"
+                ] = admission_reclosed
+                progress.update({"state": "FAILED", "completed_at": utc_now()})
+                progress.pop("compensation_error", None)
+                atomic_write_json(intent_path, intent)
+                continue
+            progress.update(
+                {
+                    "state": "WAKING",
+                    "started_at": progress.get("started_at") or utc_now(),
+                }
+            )
+            atomic_write_json(intent_path, intent)
+            if crash_hook:
+                crash_hook(f"before_instance_resume:{instance_id}")
+            instance = self._instance(task_id, instance_id)
+            if instance["status"] != "STOPPED":
+                progress.update({"state": "SKIPPED", "completed_at": utc_now()})
+                atomic_write_json(intent_path, intent)
+                continue
+            adapter = self.adapters.get(instance["agent_type"])
+            try:
+                _, spec = self._prepare_instance(task_id, instance_id)
+                launch = self.supervisor.resume_instance(
+                    task_id,
+                    instance_id,
+                    spec,
+                    launch_id=self._derived_id("launch", operation_id, instance_id),
+                    attempt_id=self._derived_id("attempt", operation_id, instance_id),
+                )
+                if launch["state"] != "RUNNING":
+                    raise HarnessError(
+                        "PROCESS_START_FAILED",
+                        "A resumed instance cannot reuse a non-running launch.",
+                        {"instance_id": instance_id, "launch_state": launch["state"]},
+                    )
+            except HarnessError as exc:
+                failure = {
+                    "instance_id": instance_id,
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": deepcopy(exc.details),
+                }
+                progress.update(
+                    {"state": "FAILED", "error": failure, "completed_at": utc_now()}
+                )
+                atomic_write_json(intent_path, intent)
+                with suppress(Exception):
+                    adapter.unquiesce(
+                        instance_id,
+                        self._derived_id("unquiesce", operation_id, instance_id),
+                    )
+                continue
+            except Exception as exc:
+                failure = {
+                    "instance_id": instance_id,
+                    "code": "PROCESS_START_FAILED",
+                    "message": "The instance restart failed unexpectedly.",
+                    "details": {"failure_type": type(exc).__name__, "instance_id": instance_id},
+                }
+                progress.update(
+                    {"state": "FAILED", "error": failure, "completed_at": utc_now()}
+                )
+                atomic_write_json(intent_path, intent)
+                with suppress(Exception):
+                    adapter.unquiesce(
+                        instance_id,
+                        self._derived_id("unquiesce", operation_id, instance_id),
+                    )
+                continue
+            try:
+                adapter.unquiesce(
+                    instance_id,
+                    self._derived_id("unquiesce", operation_id, instance_id),
+                )
+            except Exception as exc:
+                failure = {
+                    "instance_id": instance_id,
+                    "code": "PROCESS_START_FAILED",
+                    "message": "The resumed instance did not reopen work admission.",
+                    "details": {"failure_type": type(exc).__name__},
+                }
+                progress.update({"state": "COMPENSATING", "error": failure})
+                atomic_write_json(intent_path, intent)
+                try:
+                    admission_reclosed = self._compensate_failed_resume(
+                        task_id, instance_id, operation_id, adapter
+                    )
+                except HarnessError as compensation_error:
+                    progress["compensation_error"] = {
+                        "code": compensation_error.code,
+                        "message": compensation_error.message,
+                        "details": deepcopy(compensation_error.details),
+                    }
+                    atomic_write_json(intent_path, intent)
+                    raise
+                failure["details"]["admission_reclosed"] = admission_reclosed
+                progress.update({"state": "FAILED", "completed_at": utc_now()})
+                atomic_write_json(intent_path, intent)
+                continue
+            if crash_hook:
+                crash_hook(f"after_instance_resume_effect:{instance_id}")
+            progress.update({"state": "PROCESS_RUNNING", "completed_at": utc_now()})
+            atomic_write_json(intent_path, intent)
+        if not aggregate_restored:
+            if crash_hook:
+                crash_hook("before_task_restore_commit")
+            restores: list[dict[str, str]] = []
+            for instance_id in snapshot["stopped_instance_ids"]:
+                progress = intent["instance_progress"][instance_id]
+                if progress["state"] in {"PROCESS_RUNNING", "RESTORED"}:
+                    target_status = instance_statuses.get(instance_id, "RUNNING")
+                elif progress["state"] == "FAILED":
+                    target_status = "FAILED"
+                else:
+                    continue
+                if target_status == "STARTING":
+                    # The wake pipeline waits for readiness, so an instance
+                    # archived mid-start resumes as a truthful RUNNING.
+                    target_status = "RUNNING"
+                restores.append(
+                    {"instance_id": instance_id, "target_status": target_status}
+                )
+            current_revision = self.store.task.revision(task_id, task_id)
+            self.commands.restore_archived(
+                task_id,
+                instance_restores=restores,
+                target_status=snapshot["pre_archive_status"],
+                envelope=CommandEnvelope(
+                    idempotency_key=f"resume-restore-{operation_id}",
+                    actor_type=envelope.actor_type,
+                    actor_id=envelope.actor_id,
+                    expected_revision=current_revision,
+                ),
+            )
+            if crash_hook:
+                crash_hook("after_task_restore_commit")
+            for item in restores:
+                progress = intent["instance_progress"][item["instance_id"]]
+                if progress["state"] != "FAILED":
+                    progress.update({"state": "RESTORED", "completed_at": utc_now()})
+            intent["aggregate_restored"] = True
+            atomic_write_json(intent_path, intent)
+        self._sync_task_navigation(task_id, archived=False)
+        restored: list[str] = []
+        failed: list[dict[str, Any]] = []
+        for instance_id in snapshot["stopped_instance_ids"]:
+            progress = intent["instance_progress"][instance_id]
+            if progress["state"] == "RESTORED":
+                restored.append(instance_id)
+            elif progress["state"] == "FAILED":
+                failed.append(deepcopy(progress["error"]))
+        task = self.store.task.get(task_id, task_id)
+        result = {
+            "task": deepcopy(task),
+            "restored_status": snapshot["pre_archive_status"],
+            "restored_instance_ids": restored,
+            "failed_instances": failed,
+        }
+        intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
+        atomic_write_json(intent_path, intent)
+        if crash_hook:
+            crash_hook("after_resume_task_intent_commit")
+        return deepcopy(result)
+
+    def _compensate_failed_resume(
+        self,
+        task_id: str,
+        instance_id: str,
+        operation_id: str,
+        adapter: AgentAdapter,
+    ) -> bool:
+        """Fail closed when a resumed process cannot reopen work admission."""
+
+        admission_reclosed = False
+        try:
+            result = adapter.quiesce(
+                instance_id,
+                self._derived_id("requiesce", operation_id, instance_id),
+            )
+            admission_reclosed = bool(
+                result.accepted and result.details.get("quiesced") is True
+            )
+        except Exception as exc:
+            self._observation_logger.warning(
+                "Failed to reclose work admission while compensating a task resume",
+                extra={
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "failure_type": type(exc).__name__,
+                },
+            )
+        try:
+            suspended = self.supervisor.suspend_instance(
+                task_id,
+                instance_id,
+                idempotency_key=self._derived_id(
+                    "resume-compensation", operation_id, instance_id
+                ),
+            )
+        except Exception as exc:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The failed resume could not stop its newly started process.",
+                {
+                    "instance_id": instance_id,
+                    "failure_type": type(exc).__name__,
+                    "admission_reclosed": admission_reclosed,
+                },
+            ) from exc
+        process = suspended.get("process")
+        if not isinstance(process, dict) or process.get("state") != "EXITED":
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The failed resume did not reach a safe stopped process state.",
+                {
+                    "instance_id": instance_id,
+                    "process_state": (
+                        process.get("state") if isinstance(process, dict) else None
+                    ),
+                    "admission_reclosed": admission_reclosed,
+                },
+            )
+        return admission_reclosed
+
+    def _latest_archive_snapshot(self, task_id: str) -> dict[str, Any] | None:
+        candidates: list[dict[str, Any]] = []
+        for path in self.intent_root.glob("*.json"):
+            intent = read_json(path)
+            if (
+                intent.get("kind") == "ARCHIVE_TASK"
+                and intent.get("state") == "COMMITTED"
+                and intent.get("request", {}).get("task_id") == task_id
+                and isinstance(intent.get("snapshot"), dict)
+            ):
+                candidates.append(intent)
+        if not candidates:
+            return None
+        latest = max(candidates, key=lambda item: str(item.get("committed_at") or ""))
+        snapshot = deepcopy(latest["snapshot"])
+        if not isinstance(snapshot.get("instance_statuses"), dict):
+            # Snapshots written before per-instance statuses were recorded can
+            # be rebuilt from the frozen target list of the same intent.
+            snapshot["instance_statuses"] = {
+                item["instance_id"]: item["initial_status"]
+                for item in latest.get("target_instances", [])
+                if isinstance(item.get("instance_id"), str)
+                and isinstance(item.get("initial_status"), str)
+            }
+        return snapshot
+
+    def _require_task_not_archived(self, task_id: str) -> None:
+        task = self.store.task.get(task_id, task_id)
+        if task is not None and task.get("status") == "ARCHIVED":
+            raise HarnessError(
+                "TASK_ARCHIVED",
+                "The task is archived and read-only; resume it before issuing changes.",
+                {"task_id": task_id},
+            )
+
+    def _sync_task_navigation(self, task_id: str, *, archived: bool) -> None:
+        """Keep the sidebar archived flag consistent with the task lifecycle."""
+
+        current = self.store.task_navigation.get(task_id, task_id)
+        current_revision = self.store.task_navigation.revision(task_id, task_id)
+        if current is None:
+            task = self.store.task.get(task_id, task_id)
+            if task is None:
+                return
+            current = {
+                "schema_version": "1.0",
+                "task_id": task_id,
+                "pinned_at": None,
+                "archived_at": None,
+                "display_order": 0,
+                "revision": 0,
+                "updated_at": task["updated_at"],
+            }
+        if (current.get("archived_at") is not None) == archived:
+            return
+        now = utc_now()
+        updated = deepcopy(current)
+        updated["archived_at"] = now if archived else None
+        if archived:
+            updated["pinned_at"] = None
+        updated["revision"] = current_revision + 1
+        updated["updated_at"] = now
+        self.store.task_navigation.put(
+            task_id,
+            task_id,
+            updated,
+            expected_revision=current_revision,
+            actor=Actor("system", "task_archive"),
+            command="sync_task_archive_navigation",
+            idempotency_key=f"sync-nav-archive-{task_id}-{archived}-{current_revision}",
+        )
+
     def start_instance(
         self,
         task_id: str,
@@ -815,6 +1550,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 "VALIDATION_ERROR",
                 "Only a human or Master may retry a rejected delivery.",
             )
+        self._require_task_not_archived(task_id)
         with (
             FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
             self.commands.task_guard(task_id),
@@ -906,6 +1642,7 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         validate_identifier(operation_id, "operation_id")
         if envelope.actor_type != "human":
             raise HarnessError("VALIDATION_ERROR", "Only a human may archive an instance.")
+        self._require_task_not_archived(task_id)
         with FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds):
             replayed = self._replayed_instance_transition(
                 task_id, instance_id, "ARCHIVED", envelope.idempotency_key
