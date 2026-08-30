@@ -72,6 +72,31 @@ class DeliveryCandidatePreviewTests(unittest.TestCase):
             )
         self.assertEqual(corrupted.exception.code, "ASSET_CORRUPTED")
 
+    def test_private_image_uses_image_preview_limit(self) -> None:
+        image = b"\x89PNG\r\n\x1a\n" + b"x" * 24
+        path = self.instance_root / "outputs" / "large-preview.png"
+        path.write_bytes(image)
+        descriptor = {
+            "private_relative_path": "instances/i_image_1/outputs/large-preview.png",
+            "mime_type": "image/png",
+            "size_bytes": len(image),
+            "sha256": hashlib.sha256(image).hexdigest(),
+        }
+        self.assets.preview_limit_bytes = 16
+        self.assets.image_preview_limit_bytes = len(image)
+
+        preview = self.assets.preview_delivery_candidate(
+            "t_preview", "i_image_1", descriptor
+        )
+        self.assertEqual(preview["content"], image)
+
+        self.assets.image_preview_limit_bytes = len(image) - 1
+        with self.assertRaises(HarnessError) as too_large:
+            self.assets.preview_delivery_candidate(
+                "t_preview", "i_image_1", descriptor
+            )
+        self.assertEqual(too_large.exception.code, "ASSET_VALIDATION_FAILED")
+
 
 if __name__ == "__main__":
     unittest.main()

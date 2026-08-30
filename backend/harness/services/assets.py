@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import uuid
 import zipfile
 from collections.abc import Callable
@@ -14,6 +15,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn, cast
 from urllib.parse import quote
+
+from PIL import Image, UnidentifiedImageError
 
 from ..core.errors import HarnessError
 from ..storage.atomic import (
@@ -65,6 +68,10 @@ DEFAULT_ALLOWED_MIME = {
     "text/plain",
 }
 _SAFE_FILENAME = re.compile(r"^[^/\\\x00-\x1f\x7f]{1,255}$")
+_THUMBNAIL_MAX_SIZE = (640, 640)
+_THUMBNAIL_MAX_PIXELS = 24_000_000
+_THUMBNAIL_JPEG_QUALITY = 82
+_THUMBNAIL_MAX_CONCURRENCY = 2
 
 
 class AssetService(AssetRecoveryMixin):
@@ -78,12 +85,15 @@ class AssetService(AssetRecoveryMixin):
         max_task_bytes: int = 250 * 1024 * 1024,
         allowed_mime_types: set[str] | None = None,
         preview_limit_bytes: int = 512 * 1024,
+        image_preview_limit_bytes: int = 20 * 1024 * 1024,
     ) -> None:
         self.store = store
         self.max_file_bytes = max_file_bytes
         self.max_task_bytes = max_task_bytes
         self.allowed_mime_types = allowed_mime_types or DEFAULT_ALLOWED_MIME
         self.preview_limit_bytes = preview_limit_bytes
+        self.image_preview_limit_bytes = image_preview_limit_bytes
+        self._thumbnail_slots = threading.BoundedSemaphore(_THUMBNAIL_MAX_CONCURRENCY)
 
     def initialize_task_workspace(self, task_id: str) -> Path:
         self._require_task(task_id)
@@ -821,10 +831,13 @@ class AssetService(AssetRecoveryMixin):
                         "mime_type": mime_type,
                         "size_bytes": size,
                         "sha256": sha256,
-                        "previewable": size <= self.preview_limit_bytes
-                        and (
+                        "previewable": (
                             mime_type.startswith("image/")
-                            or mime_type in SAFE_PREVIEW_MIME
+                            and size <= self.image_preview_limit_bytes
+                        )
+                        or (
+                            mime_type in SAFE_PREVIEW_MIME
+                            and size <= self.preview_limit_bytes
                         ),
                     }
                 )
@@ -879,12 +892,53 @@ class AssetService(AssetRecoveryMixin):
                 )
         return entries
 
-    def preview(self, task_id: str, relative_path: str) -> dict[str, Any]:
+    def _preview_limit_for(self, mime_type: str) -> int:
+        # Images are returned as-is, so a larger cap is safe; the tighter
+        # default keeps text/JSON UTF-8 validation bounded in memory.
+        if mime_type.startswith("image/"):
+            return self.image_preview_limit_bytes
+        return self.preview_limit_bytes
+
+    def _image_thumbnail(self, stream: BinaryIO) -> bytes:
+        """Decode a bounded image into a small, browser-friendly gallery thumbnail."""
+
+        with self._thumbnail_slots:
+            try:
+                stream.seek(0)
+                with Image.open(stream) as source:
+                    width, height = source.size
+                    if width <= 0 or height <= 0 or width * height > _THUMBNAIL_MAX_PIXELS:
+                        self._invalid("The image dimensions are too large to preview safely.")
+                    source.seek(0)
+                    source.thumbnail(_THUMBNAIL_MAX_SIZE, Image.Resampling.LANCZOS)
+                    image = source.convert("RGBA")
+                    canvas = Image.new("RGB", image.size, "white")
+                    canvas.paste(image, mask=image.getchannel("A"))
+                    output = io.BytesIO()
+                    canvas.save(
+                        output,
+                        format="JPEG",
+                        quality=_THUMBNAIL_JPEG_QUALITY,
+                        optimize=True,
+                    )
+                    return output.getvalue()
+            except (Image.DecompressionBombError, UnidentifiedImageError, OSError):
+                self._invalid("The image cannot be safely decoded for preview.")
+
+    def preview(
+        self, task_id: str, relative_path: str, *, thumbnail: bool = False
+    ) -> dict[str, Any]:
         workspace = self.initialize_task_workspace(task_id)
         with self._open_browser_file(task_id, workspace, relative_path) as opened:
-            if opened.size_bytes > self.preview_limit_bytes:
+            if opened.size_bytes > self._preview_limit_for(opened.mime_type):
                 self._invalid("The file cannot be safely previewed.")
             if opened.mime_type.startswith("image/"):
+                if thumbnail:
+                    return {
+                        "mime_type": "image/jpeg",
+                        "content": self._image_thumbnail(opened.stream),
+                        "encoding": None,
+                    }
                 return {
                     "mime_type": opened.mime_type,
                     "content": opened.stream.read(),
@@ -944,7 +998,7 @@ class AssetService(AssetRecoveryMixin):
                     "ASSET_CORRUPTED",
                     "The delivery candidate changed after it was frozen.",
                 )
-            if size_bytes > self.preview_limit_bytes:
+            if size_bytes > self._preview_limit_for(mime_type):
                 self._invalid("The delivery candidate is too large to preview safely.")
             if mime_type.startswith("image/"):
                 return {

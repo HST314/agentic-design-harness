@@ -170,10 +170,18 @@ class GeneralAgent:
         self.timeout = int(os.environ.get("GENERAL_AGENT_TIMEOUT_SECONDS", "180"))
         self.max_rounds = int(os.environ.get("GENERAL_AGENT_MAX_TOOL_ROUNDS", "8"))
         self.running = False
-        self.work_admission_path = Path(os.environ["HARNESS_WORK_ADMISSION_FILE"])
+        admission_file = os.environ.get("HARNESS_WORK_ADMISSION_FILE")
+        self.work_admission_path: Path | None = (
+            Path(admission_file) if admission_file else None
+        )
         self.state = self._load_or_initialize()
 
     def is_quiesced(self) -> bool:
+        # Legacy and direct construction paths are not managed by the Harness
+        # admission gate. Managed launches always provide the file explicitly
+        # and continue to fail closed if it becomes unreadable or corrupt.
+        if self.work_admission_path is None:
+            return False
         try:
             value = json.loads(self.work_admission_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

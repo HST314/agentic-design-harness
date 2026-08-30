@@ -524,7 +524,7 @@ class TaskArchiveResumeTests(unittest.TestCase):
         finally:
             self.fake_adapter.runtime_spec = original_spec
 
-        self.assertEqual(result["task"]["status"], "RUNNING")
+        self.assertEqual(result["task"]["status"], "FAILED")
         self.assertEqual(result["restored_instance_ids"], [])
         self.assertEqual(result["failed_instances"][0]["code"], "PROCESS_START_FAILED")
         instance = self.store.instance.get("t_resume_failure", "i_image_1")

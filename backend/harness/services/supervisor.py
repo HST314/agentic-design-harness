@@ -576,7 +576,8 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
             or (
                 not suspended_resume
                 and (
-                    plan["task"]["status"] not in {"RUNNING", "FAILED"}
+                    plan["task"]["status"]
+                    not in {"RUNNING", "FAILED", "WAITING_APPROVAL"}
                     or instance["status"]
                     not in {"READY", "FAILED_TO_START", "FAILED", "CRASHED"}
                 )

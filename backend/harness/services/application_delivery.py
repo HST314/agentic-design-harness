@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
@@ -16,6 +17,9 @@ from ..storage.locks import FileLock
 from ..storage.repository import Actor, utc_now
 
 CrashHook = Callable[[str], None]
+# The 2s background observer already reconciles continuously; the read-path
+# sweep only tops up stale coverage instead of running on every poll.
+_DELIVERY_OBSERVE_SWEEP_INTERVAL_SECONDS = 2.0
 _DELIVERY_REJECTION_CODES = {
     "ASSET_CORRUPTED",
     "ASSET_VALIDATION_FAILED",
@@ -679,6 +683,23 @@ class ApplicationDeliveryMixin:
         intent.update({"state": "COMMITTED", "committed_at": utc_now(), "result": result})
         atomic_write_json(intent_path, intent)
         return result
+
+    def observe_delivery_sources_throttled(self, task_id: str) -> None:
+        """Sweep at most once per interval and task.
+
+        The workbench bridge polls delivery reads every 250ms after the human
+        clicks complete; an unthrottled sweep made every poll re-post candidate
+        finalization to every active agent and piled onto its project lock.
+        """
+
+        now = time.monotonic()
+        swept_at = self._delivery_observe_swept_at
+        if now - swept_at.get(task_id, float("-inf")) < (
+            _DELIVERY_OBSERVE_SWEEP_INTERVAL_SECONDS
+        ):
+            return
+        swept_at[task_id] = now
+        self.observe_delivery_sources(task_id)
 
     def observe_delivery_sources(self, task_id: str) -> None:
         """Reconcile active bundle-producing instances before a delivery read.

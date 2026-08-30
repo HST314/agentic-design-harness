@@ -747,9 +747,8 @@ class TaskCommandService:
         actual = self.store.task.revision(task_id, task_id)
         if envelope.expected_revision != actual:
             self._raise_revision(envelope.expected_revision, actual, "task", task_id)
-        if task["status"] == "ARCHIVED":
-            self.machine.transition("main_task", task["status"], target_status)
-        elif task["status"] != target_status:
+        was_archived = task["status"] == "ARCHIVED"
+        if not was_archived and task["status"] != target_status:
             raise HarnessError(
                 "INVALID_STATE_TRANSITION",
                 "The task is no longer archived and cannot be restored.",
@@ -757,6 +756,8 @@ class TaskCommandService:
             )
         plan = self.store.plan.get(task_id, task_id)
         if plan is None:
+            if was_archived:
+                self.machine.transition("main_task", "ARCHIVED", target_status)
             if request["instance_restores"]:
                 raise HarnessError(
                     "INSTANCE_NOT_FOUND", "The requested instance does not exist."
@@ -792,6 +793,14 @@ class TaskCommandService:
                 self._activate_lifecycle(instance, now)
         self._refresh_stages(plan, now)
         plan["task"]["status"] = target_status
+        restored_status = self._aggregate_task(
+            plan, preserve_start_confirmation=False
+        )
+        if was_archived:
+            self.machine.transition("main_task", "ARCHIVED", restored_status)
+        elif restored_status != target_status:
+            self.machine.transition("main_task", target_status, restored_status)
+        plan["task"]["status"] = restored_status
         plan["task"]["updated_at"] = now
         return self._persist_aggregate(plan, envelope, "restore_archived", request, actual)
 
