@@ -177,22 +177,9 @@ function NewTaskIntakePage(): React.JSX.Element {
         <footer>
           <div className="intake-chat__footer-meta">
             {!sent ? (
-              <label className="workbench-icon-button intake-chat__attach" title="图片 20 MiB、PDF 50 MiB、文本 5 MiB；仅创建时可添加">
-                <Icon name="upload" />
-                <input
-                  type="file"
-                  multiple
-                  className="sr-only"
-                  aria-label="添加附件（图片 / PDF / TXT / MD）"
-                  accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.md,.markdown,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown"
-                  onChange={(event) => {
-                    addFiles(Array.from(event.currentTarget.files ?? []));
-                    event.currentTarget.value = "";
-                  }}
-                />
-              </label>
+              <TaskAssetFilePicker onFiles={addFiles} />
             ) : null}
-            <span>已输入 {prompt.length.toLocaleString("zh-CN")} 字{uploads.length ? ` · ${uploads.length} 个附件将随首条消息上传` : " · 后续对话仍可添加附件"}</span>
+            <span>已输入 {prompt.length.toLocaleString("zh-CN")} 字{uploads.length ? ` · ${uploads.length} 个附件将随首条消息上传` : ""}</span>
           </div>
           <button type="submit" className="workbench-primary-button" aria-label="发送并创建任务" disabled={!prompt.trim() || sent}>
             {create.isPending ? "正在创建…" : "发送消息"}
