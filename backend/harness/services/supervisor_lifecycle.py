@@ -149,17 +149,18 @@ class SupervisorLifecycleMixin:
         """
 
         with self._instance_thread_lock(task_id, instance_id):
-            self._instance(task_id, instance_id)
+            instance = self._instance(task_id, instance_id)
             active = self._active_launch_for_instance(task_id, instance_id)
             if active is not None:
                 self._interrupt_model_calls(task_id, instance_id, "suspended")
                 self._stop_launch(active, "SUSPENDED")
-            self._transition(
-                task_id,
-                instance_id,
-                "STOPPED",
-                idempotency_key or f"suspend-{instance_id}",
-            )
+            if instance["status"] != "STOPPED":
+                self._transition(
+                    task_id,
+                    instance_id,
+                    "STOPPED",
+                    idempotency_key or f"suspend-{instance_id}",
+                )
             return deepcopy(self._instance(task_id, instance_id))
 
     def archive_instance(

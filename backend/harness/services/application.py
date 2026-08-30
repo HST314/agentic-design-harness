@@ -11,7 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from ..adapters import AdapterRegistry, PrepareRequest
+from ..adapters import AdapterRegistry, AgentAdapter, PrepareRequest
 from ..adapters.base import AgentWorkState
 from ..adapters.types import AgentInstanceSnapshot, StageSnapshot, TaskCard
 from ..core.errors import HarnessError
@@ -1186,6 +1186,21 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                 atomic_write_json(intent_path, intent)
             if progress["state"] in {"PROCESS_RUNNING", "RESTORED", "SKIPPED", "FAILED"}:
                 continue
+            if progress["state"] == "COMPENSATING":
+                instance = self._instance(task_id, instance_id)
+                admission_reclosed = self._compensate_failed_resume(
+                    task_id,
+                    instance_id,
+                    operation_id,
+                    self.adapters.get(instance["agent_type"]),
+                )
+                progress["error"].setdefault("details", {})[
+                    "admission_reclosed"
+                ] = admission_reclosed
+                progress.update({"state": "FAILED", "completed_at": utc_now()})
+                progress.pop("compensation_error", None)
+                atomic_write_json(intent_path, intent)
+                continue
             progress.update(
                 {
                     "state": "WAKING",
@@ -1262,9 +1277,22 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
                     "message": "The resumed instance did not reopen work admission.",
                     "details": {"failure_type": type(exc).__name__},
                 }
-                progress.update(
-                    {"state": "FAILED", "error": failure, "completed_at": utc_now()}
-                )
+                progress.update({"state": "COMPENSATING", "error": failure})
+                atomic_write_json(intent_path, intent)
+                try:
+                    admission_reclosed = self._compensate_failed_resume(
+                        task_id, instance_id, operation_id, adapter
+                    )
+                except HarnessError as compensation_error:
+                    progress["compensation_error"] = {
+                        "code": compensation_error.code,
+                        "message": compensation_error.message,
+                        "details": deepcopy(compensation_error.details),
+                    }
+                    atomic_write_json(intent_path, intent)
+                    raise
+                failure["details"]["admission_reclosed"] = admission_reclosed
+                progress.update({"state": "FAILED", "completed_at": utc_now()})
                 atomic_write_json(intent_path, intent)
                 continue
             if crash_hook:
@@ -1331,6 +1359,66 @@ class HarnessApplicationService(ApplicationDeliveryMixin, ApplicationPlanningMix
         if crash_hook:
             crash_hook("after_resume_task_intent_commit")
         return deepcopy(result)
+
+    def _compensate_failed_resume(
+        self,
+        task_id: str,
+        instance_id: str,
+        operation_id: str,
+        adapter: AgentAdapter,
+    ) -> bool:
+        """Fail closed when a resumed process cannot reopen work admission."""
+
+        admission_reclosed = False
+        try:
+            result = adapter.quiesce(
+                instance_id,
+                self._derived_id("requiesce", operation_id, instance_id),
+            )
+            admission_reclosed = bool(
+                result.accepted and result.details.get("quiesced") is True
+            )
+        except Exception as exc:
+            self._observation_logger.warning(
+                "Failed to reclose work admission while compensating a task resume",
+                extra={
+                    "task_id": task_id,
+                    "instance_id": instance_id,
+                    "failure_type": type(exc).__name__,
+                },
+            )
+        try:
+            suspended = self.supervisor.suspend_instance(
+                task_id,
+                instance_id,
+                idempotency_key=self._derived_id(
+                    "resume-compensation", operation_id, instance_id
+                ),
+            )
+        except Exception as exc:
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The failed resume could not stop its newly started process.",
+                {
+                    "instance_id": instance_id,
+                    "failure_type": type(exc).__name__,
+                    "admission_reclosed": admission_reclosed,
+                },
+            ) from exc
+        process = suspended.get("process")
+        if not isinstance(process, dict) or process.get("state") != "EXITED":
+            raise HarnessError(
+                "PROCESS_START_FAILED",
+                "The failed resume did not reach a safe stopped process state.",
+                {
+                    "instance_id": instance_id,
+                    "process_state": (
+                        process.get("state") if isinstance(process, dict) else None
+                    ),
+                    "admission_reclosed": admission_reclosed,
+                },
+            )
+        return admission_reclosed
 
     def _latest_archive_snapshot(self, task_id: str) -> dict[str, Any] | None:
         candidates: list[dict[str, Any]] = []

@@ -549,6 +549,55 @@ class TaskArchiveResumeTests(unittest.TestCase):
         )
         self.assertEqual(restarted["state"], "QUEUED")
 
+    def test_resume_unquiesce_failure_recloses_admission_and_stops_launch(self) -> None:
+        self._start_running_task("t_unquiesce_failure")
+        self.application.archive_task(
+            "t_unquiesce_failure",
+            operation_id="archive_t_unquiesce_failure",
+            envelope=envelope(
+                "archive-t-unquiesce-failure",
+                self._task_revision("t_unquiesce_failure"),
+            ),
+        )
+        revision = self._task_revision("t_unquiesce_failure")
+        original_unquiesce = self.fake_adapter.unquiesce
+
+        def fail_after_reopening(instance_id: str, operation_id: str) -> None:
+            original_unquiesce(instance_id, operation_id)
+            raise RuntimeError("work admission verification failed")
+
+        self.fake_adapter.unquiesce = fail_after_reopening
+        try:
+            result = self.application.resume_task(
+                "t_unquiesce_failure",
+                operation_id="resume_t_unquiesce_failure",
+                envelope=envelope("resume-t-unquiesce-failure", revision),
+            )
+        finally:
+            self.fake_adapter.unquiesce = original_unquiesce
+
+        self.assertEqual(result["task"]["status"], "FAILED")
+        self.assertEqual(result["restored_instance_ids"], [])
+        self.assertEqual(result["failed_instances"][0]["code"], "PROCESS_START_FAILED")
+        instance = self.store.instance.get("t_unquiesce_failure", "i_image_1")
+        self.assertEqual(instance["status"], "FAILED")
+        self.assertEqual(instance["process"]["state"], "EXITED")
+        launches = self._launches("t_unquiesce_failure", "i_image_1")
+        self.assertEqual(len(launches), 2)
+        self.assertEqual(launches[-1]["state"], "EXITED")
+        self.assertEqual(launches[-1]["exit_reason"], "SUSPENDED")
+        self.assertTrue(self.fake_adapter.quiesced)
+
+        replay = self.application.resume_task(
+            "t_unquiesce_failure",
+            operation_id="resume_t_unquiesce_failure",
+            envelope=envelope("resume-t-unquiesce-failure", revision),
+        )
+        self.assertEqual(replay, result)
+        self.assertEqual(
+            len(self._launches("t_unquiesce_failure", "i_image_1")), 2
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
