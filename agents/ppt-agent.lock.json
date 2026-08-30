@@ -2,11 +2,11 @@
   "schema_version": "1.1",
   "agent": "ppt-agent",
   "repository": "https://github.com/HST314/ppt-agent.git",
-  "revision": "08907fa5d96d42bf28fe002f8ddfa0b94486782a",
+  "revision": "402f5f135e8b8f15eb8256d3ab61cb37ca26bb39",
   "package_version": "0.3.0",
   "contract_version": "1.0",
   "embedded_path": "agents/ppt-agent",
-  "source_content_sha256": "5c26b5361e43aebb1c6bb3bc3e3ea53fc369dc14ffe00c6456eaa158983ca668",
+  "source_content_sha256": "87bdc5310c25c1574bb498d310d356c81bbc9c8da8ca71a914943c328c7fb034",
   "dependencies": {
     "files": [
       {
