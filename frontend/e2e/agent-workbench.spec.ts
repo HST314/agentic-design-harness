@@ -283,7 +283,7 @@ test("embeds a server-approved READY PPT workbench", async ({ page }) => {
   await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
 });
 
-test("shows PPT STARTING without creating an iframe", async ({ page }) => {
+test("shows PPT STARTING as a loading state without creating an iframe", async ({ page }) => {
   const item = workItem("ppt");
   item.current_instance.status = "STARTING";
   item.raw_status = "STARTING";
@@ -293,19 +293,32 @@ test("shows PPT STARTING without creating an iframe", async ({ page }) => {
   await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: item.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "STARTING", task_revision: 8, ui_url: null, link_status: "STARTING", start_operation: { operation_id: "start_ppt", state: "RUNNING" }, embeddable: false, frame_policy: "NOT_CHECKED", diagnostic: "Starting." }) }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
-  await expect(page.getByRole("heading", { name: "演示文稿助手 正在启动" })).toBeVisible();
+  await expect(page.getByText("正在获取受控 演示文稿助手 工作台地址…")).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: /正在启动/ })).toHaveCount(0);
 });
 
-test("routes an unstarted PPT task back to the Master launch surface", async ({ page }) => {
+test("routes an unstarted PPT task back to the gated board card", async ({ page }) => {
   const ppt = workItem("ppt");
   await page.route("**/api/v1/tasks/task_workbench_e2e/work-items/work_ppt", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, item: ppt, refresh_after_ms: 5000, projection_revision: "ppt-gated" }) }));
+  await page.route("**/api/v1/tasks/task_workbench_e2e/work-items", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task, stages: [ppt.stage], items: [ppt], summary: { TODO: 1, RUNNING: 0, WAITING_APPROVAL: 0, COMPLETED: 0, EXCEPTION: 0 }, refresh_after_ms: 5000, projection_revision: "ppt-gated-list" }) }));
   await page.route("**/api/v1/instances/instance_ppt/ui-link?*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ schema_version: "1.0", task_id: task.task_id, work_item_id: ppt.work_item_id, instance_id: "instance_ppt", agent_type: "ppt", instance_status: "READY", task_revision: 9, ui_url: null, link_status: "NO_UI_URL", start_operation: null, embeddable: false, frame_policy: "NOT_CHECKED", diagnostic: "Not started." }) }));
 
   await page.goto("/tasks/task_workbench_e2e/work-items/work_ppt");
-  await expect(page.getByText("PPT 工作台尚未启动，请返回 Master 面板启动。")).toBeVisible();
-  await expect(page.getByRole("link", { name: "返回 Master" })).toHaveAttribute("href", "/tasks/task_workbench_e2e/master");
-  await expect(page.getByRole("button", { name: /启动 PPT/ })).toHaveCount(0);
+  // The old red retry panel is deleted: deep links to a not-ready workbench
+  // land back on the board, where the gated card renders like any other card
+  // and opens the not-ready dialog instead of navigating.
+  await expect(page).toHaveURL(/\/tasks\/task_workbench_e2e\/board$/);
+  const entry = page.getByRole("button", { name: "发布会演示文稿，待办，PPT工作台未就绪，打开提示" });
+  await expect(entry).toBeVisible();
+  await expect(entry.getByRole("heading", { name: "发布会演示文稿" })).toBeVisible();
+  await entry.click();
+  const gate = page.getByRole("dialog", { name: "工作台未就绪" });
+  await expect(gate).toBeVisible();
+  await expect(gate).toContainText("尚未启动");
+  await expect(gate.getByRole("link", { name: "前往 Master" })).toHaveAttribute("href", "/tasks/task_workbench_e2e/master");
+  await gate.getByRole("button", { name: "知道了" }).click();
+  await expect(gate).toHaveCount(0);
 });
 
 test("shows PPT FRAME_BLOCKED with a controlled external fallback", async ({ page }) => {
