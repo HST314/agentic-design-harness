@@ -248,6 +248,24 @@ class PptAgentAdapter:
             raise HarnessError("VALIDATION_ERROR", "The stop reason is invalid.")
         return AdapterCommandResult(True, operation_id, {"project_id": instance_id})
 
+    def has_active_work(self, instance_id: str) -> bool:
+        if not self.available:
+            return False
+        try:
+            task_id = self._task_id_for_instance(instance_id)
+            view = self._request(
+                self._base_url(task_id, instance_id), "GET", f"/api/projects/{instance_id}"
+            )
+        except HarnessError:
+            return False
+        if not isinstance(view, dict):
+            return False
+        active_job = view.get("active_job")
+        return isinstance(active_job, dict) and active_job.get("status") in {
+            "queued",
+            "running",
+        }
+
     def get_status(self, instance_id: str) -> AdapterObservation:
         task_id = self._task_id_for_instance(instance_id)
         view = self._request(

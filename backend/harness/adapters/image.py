@@ -557,6 +557,23 @@ class ImageAgentAdapter(ImageObservationMixin):
             details={"job_id": job_id, "job_status": job_status},
         )
 
+    def has_active_work(self, instance_id: str) -> bool:
+        if not self.available:
+            return False
+        try:
+            task_id = self._task_id_for_instance(instance_id)
+            state = self._state(task_id, instance_id)
+            job_id = state.get("job_id")
+            if not isinstance(job_id, str):
+                return False
+            job = self._request(
+                self._base_url(task_id, instance_id), "GET", f"/api/jobs/{job_id}"
+            )
+            job = self._require_job(job)
+            return job["status"] in _ACTIVE_JOB_STATES
+        except HarnessError:
+            return False
+
     def get_status(self, instance_id: str) -> AdapterObservation:
         if not self.available:
             return AdapterObservation(

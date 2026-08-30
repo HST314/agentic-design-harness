@@ -139,6 +139,29 @@ class SupervisorLifecycleMixin:
             )
             return deepcopy(self._instance(task_id, instance_id))
 
+    def suspend_instance(
+        self, task_id: str, instance_id: str, *, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
+        """Park a live instance into the reversible STOPPED state.
+
+        Unlike archive, the workspace stays writable and the instance can be
+        restarted later through the regular restart pipeline.
+        """
+
+        with self._instance_thread_lock(task_id, instance_id):
+            self._instance(task_id, instance_id)
+            active = self._active_launch_for_instance(task_id, instance_id)
+            if active is not None:
+                self._interrupt_model_calls(task_id, instance_id, "suspended")
+                self._stop_launch(active, "SUSPENDED")
+            self._transition(
+                task_id,
+                instance_id,
+                "STOPPED",
+                idempotency_key or f"suspend-{instance_id}",
+            )
+            return deepcopy(self._instance(task_id, instance_id))
+
     def archive_instance(
         self, task_id: str, instance_id: str, *, idempotency_key: str | None = None
     ) -> dict[str, Any]:

@@ -58,6 +58,7 @@
         "CRASHED",
         "CANCELLED",
         "SUPERSEDED",
+        "STOPPED",
         "ARCHIVED"
       ]
     },

@@ -80,6 +80,10 @@ class UnavailableAgentAdapter:
     def get_status(self, instance_id: str) -> AdapterObservation:
         self._raise(instance_id)
 
+    def has_active_work(self, instance_id: str) -> bool:
+        del instance_id
+        return False
+
     def request_advance(
         self,
         instance_id: str,
@@ -151,6 +155,10 @@ class AgentAdapter(Protocol):
     ) -> AdapterCommandResult: ...
 
     def get_status(self, instance_id: str) -> AdapterObservation: ...
+
+    def has_active_work(self, instance_id: str) -> bool:
+        """Report whether the Agent has in-flight work a drain should wait for."""
+        ...
 
     def request_advance(
         self,

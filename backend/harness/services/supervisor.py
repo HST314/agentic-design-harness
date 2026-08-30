@@ -495,11 +495,25 @@ class ProcessSupervisor(SupervisorLifecycleMixin):
                     is not None
                     or stage_dependencies_authorized(stage, stage_by_id, instance_by_id)
                 )
+        suspended_resume = instance["status"] == "STOPPED" and plan["task"]["status"] in {
+            "RUNNING",
+            "WAITING_APPROVAL",
+            "BLOCKED_UNAVAILABLE",
+            "FAILED",
+            "SUCCEEDED",
+            "PARTIAL",
+        }
         if (
             planned_instance is None
-            or plan["task"]["status"] not in {"RUNNING", "FAILED"}
-            or instance["status"] not in {"READY", "FAILED_TO_START", "FAILED", "CRASHED"}
             or not stage_authorized
+            or (
+                not suspended_resume
+                and (
+                    plan["task"]["status"] not in {"RUNNING", "FAILED"}
+                    or instance["status"]
+                    not in {"READY", "FAILED_TO_START", "FAILED", "CRASHED"}
+                )
+            )
         ):
             raise HarnessError(
                 "INVALID_STATE_TRANSITION",

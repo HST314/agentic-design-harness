@@ -190,6 +190,12 @@ class GeneralAgentAdapter:
         self._task_id_for_instance(instance_id)
         return AdapterCommandResult(True, operation_id)
 
+    def has_active_work(self, instance_id: str) -> bool:
+        # Chat turns are short-lived and the process stop pipeline is already
+        # graceful, so the General Agent never blocks an archive drain.
+        del instance_id
+        return False
+
     def get_status(self, instance_id: str) -> AdapterObservation:
         task_id = self._task_id_for_instance(instance_id)
         instance = self.store.instance.get(task_id, instance_id)

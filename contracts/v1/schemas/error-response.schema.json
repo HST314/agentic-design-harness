@@ -4,7 +4,10 @@
   "title": "ErrorResponse",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "error"],
+  "required": [
+    "schema_version",
+    "error"
+  ],
   "properties": {
     "schema_version": {
       "$ref": "common.schema.json#/$defs/schemaVersion"
@@ -12,7 +15,12 @@
     "error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message", "retryable", "details"],
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
       "properties": {
         "code": {
           "type": "string",
@@ -32,6 +40,8 @@
             "CONFIG_INTEGRITY_FAILED",
             "IDEMPOTENCY_CONFLICT",
             "INVALID_STATE_TRANSITION",
+            "ARCHIVE_DRAIN_TIMEOUT",
+            "TASK_ARCHIVED",
             "ADAPTER_UNAVAILABLE",
             "UI_LINK_REJECTED",
             "BUDGET_GATE_DENIED",

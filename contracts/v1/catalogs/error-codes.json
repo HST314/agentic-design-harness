@@ -92,6 +92,18 @@
       "meaning": "The requested state transition is not present in the status catalog."
     },
     {
+      "code": "TASK_ARCHIVED",
+      "http_status": 409,
+      "retryable": false,
+      "meaning": "The task is archived and read-only; resume it before issuing changes."
+    },
+    {
+      "code": "ARCHIVE_DRAIN_TIMEOUT",
+      "http_status": 409,
+      "retryable": true,
+      "meaning": "Archiving timed out while waiting for in-flight Agent work to finish."
+    },
+    {
       "code": "ADAPTER_UNAVAILABLE",
       "http_status": 409,
       "retryable": false,

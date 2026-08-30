@@ -11,21 +11,24 @@
       "FAILED",
       "SUCCEEDED",
       "PARTIAL",
-      "CANCELLED"
+      "CANCELLED",
+      "ARCHIVED"
     ],
     "terminal": ["SUCCEEDED", "PARTIAL", "CANCELLED"],
     "transitions": {
-      "DRAFT": ["PLANNED", "CANCELLED"],
+      "DRAFT": ["PLANNED", "CANCELLED", "ARCHIVED"],
       "PLANNED": [
         "AWAITING_START_CONFIRMATION",
         "RUNNING",
         "BLOCKED_UNAVAILABLE",
-        "CANCELLED"
+        "CANCELLED",
+        "ARCHIVED"
       ],
       "AWAITING_START_CONFIRMATION": [
         "RUNNING",
         "BLOCKED_UNAVAILABLE",
-        "CANCELLED"
+        "CANCELLED",
+        "ARCHIVED"
       ],
       "RUNNING": [
         "WAITING_APPROVAL",
@@ -33,7 +36,8 @@
         "FAILED",
         "SUCCEEDED",
         "PARTIAL",
-        "CANCELLED"
+        "CANCELLED",
+        "ARCHIVED"
       ],
       "WAITING_APPROVAL": [
         "RUNNING",
@@ -41,13 +45,26 @@
         "FAILED",
         "SUCCEEDED",
         "PARTIAL",
-        "CANCELLED"
+        "CANCELLED",
+        "ARCHIVED"
       ],
-      "BLOCKED_UNAVAILABLE": ["PLANNED", "RUNNING", "PARTIAL", "CANCELLED"],
-      "FAILED": ["PLANNED", "RUNNING", "PARTIAL", "CANCELLED"],
-      "SUCCEEDED": [],
-      "PARTIAL": [],
-      "CANCELLED": []
+      "BLOCKED_UNAVAILABLE": ["PLANNED", "RUNNING", "PARTIAL", "CANCELLED", "ARCHIVED"],
+      "FAILED": ["PLANNED", "RUNNING", "PARTIAL", "CANCELLED", "ARCHIVED"],
+      "SUCCEEDED": ["ARCHIVED"],
+      "PARTIAL": ["ARCHIVED"],
+      "CANCELLED": ["ARCHIVED"],
+      "ARCHIVED": [
+        "DRAFT",
+        "PLANNED",
+        "AWAITING_START_CONFIRMATION",
+        "RUNNING",
+        "WAITING_APPROVAL",
+        "BLOCKED_UNAVAILABLE",
+        "FAILED",
+        "SUCCEEDED",
+        "PARTIAL",
+        "CANCELLED"
+      ]
     }
   },
   "stage": {
@@ -89,6 +106,7 @@
       "CRASHED",
       "CANCELLED",
       "SUPERSEDED",
+      "STOPPED",
       "ARCHIVED"
     ],
     "terminal": ["ARCHIVED"],
@@ -96,22 +114,24 @@
       "CREATED": ["READY", "UNAVAILABLE"],
       "UNAVAILABLE": ["READY", "CANCELLED", "ARCHIVED"],
       "READY": ["STARTING", "FAILED_TO_START", "CANCELLED"],
-      "STARTING": ["RUNNING", "FAILED_TO_START", "CRASHED", "CANCELLED"],
+      "STARTING": ["RUNNING", "FAILED_TO_START", "CRASHED", "CANCELLED", "STOPPED"],
       "RUNNING": [
         "WAITING_APPROVAL",
         "FAILED_TO_START",
         "SUCCEEDED",
         "FAILED",
         "CRASHED",
-        "CANCELLED"
+        "CANCELLED",
+        "STOPPED"
       ],
-      "WAITING_APPROVAL": ["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"],
+      "WAITING_APPROVAL": ["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "STOPPED"],
       "FAILED_TO_START": ["READY", "STARTING", "SUPERSEDED", "CANCELLED", "ARCHIVED"],
-      "FAILED": ["READY", "STARTING", "SUPERSEDED", "CANCELLED", "ARCHIVED"],
+      "FAILED": ["READY", "STARTING", "SUPERSEDED", "CANCELLED", "STOPPED", "ARCHIVED"],
       "CRASHED": ["READY", "STARTING", "SUPERSEDED", "CANCELLED", "ARCHIVED"],
-      "SUCCEEDED": ["ARCHIVED"],
+      "SUCCEEDED": ["STOPPED", "ARCHIVED"],
       "CANCELLED": ["ARCHIVED"],
       "SUPERSEDED": ["ARCHIVED"],
+      "STOPPED": ["STARTING", "CANCELLED", "ARCHIVED"],
       "ARCHIVED": []
     }
   },

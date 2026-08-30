@@ -64,6 +64,7 @@ class FakeImageAdapter:
         self.prepare_error = None
         self.start_error = None
         self.prepare_calls = []
+        self.active_work = False
 
     def validate_task_card(self, card):
         if self.validation_delegate is not None:
@@ -93,6 +94,9 @@ class FakeImageAdapter:
         if self.observation_delay:
             time.sleep(self.observation_delay)
         return self.observation
+
+    def has_active_work(self, instance_id):
+        return self.active_work
 
     def request_advance(self, instance_id, action, payload, operation_id):
         if self.advance_delay:

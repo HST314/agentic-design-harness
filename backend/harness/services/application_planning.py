@@ -370,6 +370,7 @@ class ApplicationPlanningMixin:
             raise HarnessError(
                 "VALIDATION_ERROR", "Only a human or Master may control an instance."
             )
+        self._require_task_not_archived(task_id)
         request = {
             "task_id": task_id,
             "instance_id": instance_id,
@@ -418,6 +419,7 @@ class ApplicationPlanningMixin:
                     "FAILED_TO_START",
                     "FAILED",
                     "CRASHED",
+                    "STOPPED",
                 }
             if instance["status"] not in allowed:
                 raise HarnessError(

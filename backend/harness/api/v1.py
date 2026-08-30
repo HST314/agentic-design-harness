@@ -170,6 +170,18 @@ class InstanceOperationRequest(StrictRequest):
     envelope: CommandEnvelope
 
 
+class ArchiveTaskRequest(StrictRequest):
+    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+    drain_timeout_seconds: float | None = Field(default=None, ge=0, le=3600)
+    force: bool = False
+
+
+class ResumeTaskRequest(StrictRequest):
+    operation_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+    envelope: CommandEnvelope
+
+
 class ManualFinishedRequest(StrictRequest):
     envelope: CommandEnvelope
 
@@ -694,6 +706,28 @@ def build_v1_router(container: Container) -> APIRouter:
     async def cancel_task(task_id: str, body: InstanceOperationRequest) -> dict[str, Any]:
         result = await run_in_threadpool(
             container.application.cancel_task,
+            task_id,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+        )
+        return {"schema_version": "1.0", **result}
+
+    @router.post("/tasks/{task_id}/archive", tags=["tasks"])
+    async def archive_task(task_id: str, body: ArchiveTaskRequest) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.application.archive_task,
+            task_id,
+            operation_id=body.operation_id,
+            envelope=body.envelope,
+            drain_timeout_seconds=body.drain_timeout_seconds,
+            force=body.force,
+        )
+        return {"schema_version": "1.0", **result}
+
+    @router.post("/tasks/{task_id}/resume", tags=["tasks"])
+    async def resume_task(task_id: str, body: ResumeTaskRequest) -> dict[str, Any]:
+        result = await run_in_threadpool(
+            container.application.resume_task,
             task_id,
             operation_id=body.operation_id,
             envelope=body.envelope,

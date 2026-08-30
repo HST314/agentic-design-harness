@@ -219,10 +219,32 @@ class TaskIntakeApiTests(unittest.TestCase):
                     },
                 )
                 self.assertIsNone(archived.json()["navigation"]["pinned_at"])
-                self.assertEqual(archived.json()["task"]["status"], "DRAFT")
+                self.assertIsNotNone(archived.json()["navigation"]["archived_at"])
+                self.assertEqual(archived.json()["task"]["status"], "ARCHIVED")
                 listing = client.get("/api/v1/tasks").json()["items"][0]
                 self.assertEqual(listing["title"], "秋季发布会主视觉")
                 self.assertIsNotNone(listing["archived_at"])
+
+                archive_replay = client.patch(
+                    f"/api/v1/tasks/{task_id}/presentation",
+                    json={
+                        "archived": True,
+                        "envelope": self._envelope("archive-task", 2),
+                    },
+                )
+                self.assertEqual(archive_replay.status_code, 200, archive_replay.text)
+                self.assertEqual(archive_replay.json(), archived.json())
+
+                resumed = client.patch(
+                    f"/api/v1/tasks/{task_id}/presentation",
+                    json={
+                        "archived": False,
+                        "envelope": self._envelope("resume-task", 3),
+                    },
+                )
+                self.assertEqual(resumed.status_code, 200, resumed.text)
+                self.assertEqual(resumed.json()["task"]["status"], "DRAFT")
+                self.assertIsNone(resumed.json()["navigation"]["archived_at"])
 
             recovered_app = create_app(settings)
             with TestClient(recovered_app) as recovered_client:
