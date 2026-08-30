@@ -421,6 +421,7 @@ class TaskCommandService:
             )
         task_id = request["task_id"]
         plan = self._plan(task_id)
+        self._require_plan_mutable(plan)
         actual = self.store.task.revision(task_id, task_id)
         if envelope.expected_revision != actual:
             self._raise_revision(envelope.expected_revision, actual, "task", task_id)
@@ -485,6 +486,7 @@ class TaskCommandService:
             )
         task_id = request["task_id"]
         plan = self._plan(task_id)
+        self._require_plan_mutable(plan)
         actual = self.store.task.revision(task_id, task_id)
         if envelope.expected_revision != actual:
             self._raise_revision(envelope.expected_revision, actual, "task", task_id)
@@ -573,6 +575,7 @@ class TaskCommandService:
             )
         task_id = request["task_id"]
         plan = self._plan(task_id)
+        self._require_plan_mutable(plan)
         actual = self.store.task.revision(task_id, task_id)
         if envelope.expected_revision != actual:
             self._raise_revision(envelope.expected_revision, actual, "task", task_id)
@@ -602,9 +605,12 @@ class TaskCommandService:
             raise HarnessError("INSTANCE_NOT_FOUND", "The requested instance does not exist.")
         self.machine.transition("agent_instance", instance["status"], request["target_status"])
         instance["status"] = request["target_status"]
-        cleared_manual_status = instance.pop("manual_business_status", None)
-        if cleared_manual_status is not None and instance["agent_type"] == "image":
-            instance["manual_finished"] = False
+        if request["target_status"] != "STOPPED":
+            # Suspension preserves the operator completion gates so an archived
+            # Image branch still satisfies the PPT start gate after a resume.
+            cleared_manual_status = instance.pop("manual_business_status", None)
+            if cleared_manual_status is not None and instance["agent_type"] == "image":
+                instance["manual_finished"] = False
         if request["target_status"] in {
             "SUCCEEDED",
             "FAILED_TO_START",
@@ -665,6 +671,138 @@ class TaskCommandService:
             task["status"] = target
         task["updated_at"] = utc_now()
         return self._persist_aggregate(plan, envelope, "reject_instance_delivery", request, actual)
+
+    def archive_task(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
+        request = {"task_id": task_id}
+        return self._idempotent(
+            task_id,
+            "archive_task",
+            request,
+            envelope,
+            lambda: self._archive_task(request, envelope),
+        )
+
+    def _archive_task(self, request: dict[str, Any], envelope: CommandEnvelope) -> dict[str, Any]:
+        task_id = request["task_id"]
+        task = self._task(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        self.machine.transition("main_task", task["status"], "ARCHIVED")
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            task = {**task, "status": "ARCHIVED", "updated_at": utc_now()}
+            result = {"task": deepcopy(task), "revision": actual + 1}
+            self.store.task.put(
+                task_id,
+                task_id,
+                task,
+                expected_revision=actual,
+                actor=self._actor(envelope),
+                command="archive_task",
+                idempotency_key=envelope.idempotency_key,
+                command_result=result,
+                request_sha256=self._request_digest("archive_task", request),
+            )
+            return result
+        plan = deepcopy(plan)
+        plan["task"]["status"] = "ARCHIVED"
+        plan["task"]["updated_at"] = utc_now()
+        return self._persist_aggregate(plan, envelope, "archive_task", request, actual)
+
+    def restore_archived(
+        self,
+        task_id: str,
+        *,
+        instance_restores: list[dict[str, str]],
+        target_status: str,
+        envelope: CommandEnvelope,
+    ) -> dict[str, Any]:
+        """Atomically restore an archived aggregate to its pre-archive snapshot.
+
+        Each entry in ``instance_restores`` carries ``instance_id`` and
+        ``target_status``; only instances still parked in STOPPED are moved,
+        so a replay after a partial commit converges instead of failing.
+        """
+
+        request = {
+            "task_id": task_id,
+            "instance_restores": deepcopy(instance_restores),
+            "target_status": target_status,
+        }
+        return self._idempotent(
+            task_id,
+            "restore_archived",
+            request,
+            envelope,
+            lambda: self._restore_archived(request, envelope),
+        )
+
+    def _restore_archived(
+        self, request: dict[str, Any], envelope: CommandEnvelope
+    ) -> dict[str, Any]:
+        task_id = request["task_id"]
+        target_status = request["target_status"]
+        task = self._task(task_id)
+        actual = self.store.task.revision(task_id, task_id)
+        if envelope.expected_revision != actual:
+            self._raise_revision(envelope.expected_revision, actual, "task", task_id)
+        was_archived = task["status"] == "ARCHIVED"
+        if not was_archived and task["status"] != target_status:
+            raise HarnessError(
+                "INVALID_STATE_TRANSITION",
+                "The task is no longer archived and cannot be restored.",
+                {"current": task["status"], "target": target_status},
+            )
+        plan = self.store.plan.get(task_id, task_id)
+        if plan is None:
+            if was_archived:
+                self.machine.transition("main_task", "ARCHIVED", target_status)
+            if request["instance_restores"]:
+                raise HarnessError(
+                    "INSTANCE_NOT_FOUND", "The requested instance does not exist."
+                )
+            task = {**task, "status": target_status, "updated_at": utc_now()}
+            result = {"task": deepcopy(task), "revision": actual + 1}
+            self.store.task.put(
+                task_id,
+                task_id,
+                task,
+                expected_revision=actual,
+                actor=self._actor(envelope),
+                command="restore_archived",
+                idempotency_key=envelope.idempotency_key,
+                command_result=result,
+                request_sha256=self._request_digest("restore_archived", request),
+            )
+            return result
+        plan = deepcopy(plan)
+        now = utc_now()
+        instance_by_id = {item["instance_id"]: item for item in plan["instances"]}
+        for restore in request["instance_restores"]:
+            instance = instance_by_id.get(restore["instance_id"])
+            if instance is None:
+                raise HarnessError(
+                    "INSTANCE_NOT_FOUND", "The requested instance does not exist."
+                )
+            if instance["status"] != "STOPPED":
+                continue
+            self.machine.transition("agent_instance", "STOPPED", restore["target_status"])
+            instance["status"] = restore["target_status"]
+            if instance["status"] in {"STARTING", "RUNNING"}:
+                self._activate_lifecycle(instance, now)
+        self._refresh_stages(plan, now)
+        plan["task"]["status"] = target_status
+        restored_status = self._aggregate_task(
+            plan, preserve_start_confirmation=False
+        )
+        if was_archived:
+            self.machine.transition("main_task", "ARCHIVED", restored_status)
+        elif restored_status != target_status:
+            self.machine.transition("main_task", target_status, restored_status)
+        plan["task"]["status"] = restored_status
+        plan["task"]["updated_at"] = now
+        return self._persist_aggregate(plan, envelope, "restore_archived", request, actual)
 
     def cancel_task(self, task_id: str, envelope: CommandEnvelope) -> dict[str, Any]:
         request = {"task_id": task_id}
@@ -739,6 +877,7 @@ class TaskCommandService:
             )
         task_id = request["task_id"]
         plan = self._plan(task_id)
+        self._require_plan_mutable(plan)
         actual = self.store.task.revision(task_id, task_id)
         if envelope.expected_revision != actual:
             self._raise_revision(envelope.expected_revision, actual, "task", task_id)
@@ -1302,6 +1441,15 @@ class TaskCommandService:
         if task is None:
             raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
         return deepcopy(task)
+
+    @staticmethod
+    def _require_plan_mutable(plan: dict[str, Any]) -> None:
+        if plan["task"]["status"] == "ARCHIVED":
+            raise HarnessError(
+                "TASK_ARCHIVED",
+                "The task is archived and read-only; resume it before issuing changes.",
+                {"task_id": plan["task"]["task_id"]},
+            )
 
     def _plan(self, task_id: str) -> dict[str, Any]:
         plan = self.store.plan.get(task_id, task_id)

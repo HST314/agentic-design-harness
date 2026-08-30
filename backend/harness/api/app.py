@@ -244,7 +244,7 @@ def build_container(
         task_config,
         runtime_settings,
     )
-    task_intakes = TaskIntakeService(store, commands, assets, task_config)
+    task_intakes = TaskIntakeService(store, commands, assets, task_config, application)
     master_orchestrator = MasterOrchestrator(
         store,
         task_config,

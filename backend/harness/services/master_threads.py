@@ -143,6 +143,7 @@ class MasterThreadService:
     ) -> dict[str, Any]:
         if envelope.actor_type != "human":
             raise HarnessError("VALIDATION_ERROR", "Only a human may add a Master message.")
+        self._require_task_not_archived(task_id)
         normalized = content.strip()
         if not normalized:
             raise HarnessError("VALIDATION_ERROR", "The Master message is invalid.")
@@ -281,6 +282,7 @@ class MasterThreadService:
 
         if envelope.actor_type != "human":
             raise HarnessError("VALIDATION_ERROR", "Only a human may revise a task card.")
+        self._require_task_not_archived(task_id)
         if proposal_revision != expected_proposal_revision:
             self._revision_conflict(
                 "plan_proposal",
@@ -468,6 +470,7 @@ class MasterThreadService:
         instance_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         self._require_human_confirmation(envelope.actor_type)
+        self._require_task_not_archived(task_id)
         intent_path = self._confirm_intent_path(task_id, proposal_revision)
         with self.commands.task_guard(task_id):
             if intent_path.exists():
@@ -1366,6 +1369,14 @@ class MasterThreadService:
         if task is None:
             raise HarnessError("TASK_NOT_FOUND", "The requested task does not exist.")
         return deepcopy(task)
+
+    def _require_task_not_archived(self, task_id: str) -> None:
+        if self._task(task_id).get("status") == "ARCHIVED":
+            raise HarnessError(
+                "TASK_ARCHIVED",
+                "The task is archived and read-only; resume it before issuing changes.",
+                {"task_id": task_id},
+            )
 
     def _confirm_intent_path(self, task_id: str, revision: int) -> Path:
         return self.intent_root / f"{self._identifier('confirm', task_id, str(revision))}.json"

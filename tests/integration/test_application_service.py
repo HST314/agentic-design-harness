@@ -17,6 +17,7 @@ from harness.adapters import (
     AdapterObservation,
     AdapterRecoveryResult,
     AdapterRegistry,
+    AgentWorkState,
     ValidationResult,
 )
 from harness.adapters.image import ImageAgentAdapter
@@ -64,6 +65,10 @@ class FakeImageAdapter:
         self.prepare_error = None
         self.start_error = None
         self.prepare_calls = []
+        self.work_state = AgentWorkState.IDLE
+        self.quiesced = False
+        self.quiesce_calls = []
+        self.unquiesce_calls = []
 
     def validate_task_card(self, card):
         if self.validation_delegate is not None:
@@ -93,6 +98,24 @@ class FakeImageAdapter:
         if self.observation_delay:
             time.sleep(self.observation_delay)
         return self.observation
+
+    def probe_work_state(self, instance_id):
+        return self.work_state
+
+    def quiesce(self, instance_id, operation_id):
+        self.quiesced = True
+        self.quiesce_calls.append((instance_id, operation_id))
+        return AdapterCommandResult(True, operation_id, {"quiesced": True})
+
+    def unquiesce(self, instance_id, operation_id):
+        self.quiesced = False
+        self.unquiesce_calls.append((instance_id, operation_id))
+        return AdapterCommandResult(True, operation_id, {"quiesced": False})
+
+    def submit_concurrent_work(self):
+        if self.quiesced:
+            raise HarnessError("AGENT_QUIESCED", "The Agent is not accepting new work.")
+        self.work_state = AgentWorkState.ACTIVE
 
     def request_advance(self, instance_id, action, payload, operation_id):
         if self.advance_delay:

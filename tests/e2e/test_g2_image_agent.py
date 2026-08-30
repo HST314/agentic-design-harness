@@ -109,6 +109,107 @@ class RealImageAgentG2Tests(unittest.TestCase):
                         )
                 self._make_tree_removable(runtime_root)
 
+    def test_waiting_real_agent_survives_task_archive_and_resume(self) -> None:
+        with (
+            g3_fixtures.deterministic_provider() as (provider_url, _provider),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
+            runtime_root = Path(temporary)
+            settings = HarnessSettings(
+                control_root=runtime_root / "control-data",
+                workspace_root=runtime_root / "workspace",
+                contracts_root=ROOT / "contracts" / "v1",
+                image_agent_root=Path(str(IMAGE_AGENT_ROOT)),
+                image_agent_python=Path(str(IMAGE_AGENT_PYTHON)),
+                image_agent_dependency_root=Path(str(IMAGE_AGENT_DEPENDENCY_ROOT)),
+                config_snapshot=build_config_snapshot(
+                    base_url=provider_url,
+                    api_key="synthetic-g2-archive-provider-key",
+                ),
+            )
+            app = create_app(settings)
+            instance_id = "i_g2_real_image"
+            try:
+                with TestClient(app) as client:
+                    self._create_task(client)
+                    selected = self._import_brief(app)
+                    saved = self._save_plan(client, selected)
+                    started = client.post(
+                        "/api/v1/tasks/t_g2_real_image/confirm-start",
+                        json={
+                            "operation_id": "start_g2_real_image",
+                            "envelope": self._envelope(
+                                "start-g2-real-image", saved["task_revision"]
+                            ),
+                        },
+                    )
+                    self.assertEqual(started.status_code, 200, started.text)
+                    self._wait_for_status(client, instance_id, "WAITING_APPROVAL")
+
+                    revision = app.state.container.store.task.revision(
+                        "t_g2_real_image", "t_g2_real_image"
+                    )
+                    archived = client.post(
+                        "/api/v1/tasks/t_g2_real_image/archive",
+                        json={
+                            "operation_id": "archive_g2_real_image",
+                            "envelope": self._envelope(
+                                "archive-g2-real-image", revision
+                            ),
+                        },
+                    )
+                    self.assertEqual(archived.status_code, 200, archived.text)
+                    self.assertEqual(archived.json()["task"]["status"], "ARCHIVED")
+                    self.assertEqual(
+                        archived.json()["archive_snapshot"]["pre_archive_status"],
+                        "WAITING_APPROVAL",
+                    )
+
+                    revision = app.state.container.store.task.revision(
+                        "t_g2_real_image", "t_g2_real_image"
+                    )
+                    resumed = client.post(
+                        "/api/v1/tasks/t_g2_real_image/resume",
+                        json={
+                            "operation_id": "resume_g2_real_image",
+                            "envelope": self._envelope("resume-g2-real-image", revision),
+                        },
+                    )
+                    self.assertEqual(resumed.status_code, 200, resumed.text)
+                    self.assertEqual(resumed.json()["failed_instances"], [])
+                    self.assertEqual(
+                        resumed.json()["task"]["status"], "WAITING_APPROVAL"
+                    )
+                    detail = self._wait_for_status(
+                        client, instance_id, "WAITING_APPROVAL"
+                    )
+                    self.assertTrue(detail["observation"]["capabilities"])
+            finally:
+                if app.state.container.store.instance.get(
+                    "t_g2_real_image", instance_id
+                ) is not None:
+                    with suppress(Exception):
+                        app.state.container.application.cancel_instance(
+                            "t_g2_real_image", instance_id
+                        )
+                self._make_tree_removable(runtime_root)
+
+    def _wait_for_status(
+        self, client: TestClient, instance_id: str, expected_status: str
+    ) -> dict:
+        deadline = time.monotonic() + 30
+        detail = None
+        while time.monotonic() < deadline:
+            response = client.get(f"/api/v1/instances/{instance_id}")
+            self.assertEqual(response.status_code, 200, response.text)
+            detail = response.json()
+            status = detail["instance"]["status"]
+            if status == expected_status:
+                return detail
+            self.assertNotIn(status, {"FAILED", "FAILED_TO_START"}, detail)
+            time.sleep(0.1)
+        self.fail(f"Image Agent did not reach {expected_status}: {detail}")
+
     def _create_task(self, client: TestClient) -> None:
         response = client.post(
             "/api/v1/tasks",

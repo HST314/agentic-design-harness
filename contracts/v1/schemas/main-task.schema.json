@@ -53,7 +53,8 @@
         "FAILED",
         "SUCCEEDED",
         "PARTIAL",
-        "CANCELLED"
+        "CANCELLED",
+        "ARCHIVED"
       ]
     },
     "created_at": {

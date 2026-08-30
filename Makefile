@@ -10,9 +10,9 @@ REAL_PROVIDER_EVIDENCE_PATH ?= build/real-provider-evidence.json
 REAL_PROVIDER_LOG_FILE ?= build/real-provider-smoke.log
 REAL_PROVIDER_ENV_ARG = $(if $(strip $(REAL_PROVIDER_ENV_FILE)),--env-file "$(REAL_PROVIDER_ENV_FILE)",)
 
-.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check docs-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env g2-e2e g3-e2e g4-e2e g5-e2e p4-acceptance p6-acceptance evidence dev-setup dev-doctor dev-smoke
+.PHONY: test test-env lint typecheck compile secret-scan dependency-audit sbom boundary-check contract-check lock-check docs-check frontend-contracts capacity-benchmark check verify serve frontend-check frontend-unit frontend-e2e frontend-integration real-provider-preflight real-provider-smoke image-agent-env ppt-agent-env g2-e2e g3-e2e g4-e2e g5-e2e p4-acceptance p6-acceptance evidence dev-setup dev-doctor dev-smoke
 
-test: test-env image-agent-env
+test: test-env image-agent-env ppt-agent-env
 	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) -m unittest discover -s tests -v
 
 lint: test-env
@@ -107,6 +107,9 @@ dev-smoke:
 	$(PYTHON) scripts/dev.py start --check
 
 image-agent-env: $(IMAGE_AGENT_ENV_STAMP)
+
+ppt-agent-env: test-env
+	PYTHONPATH="$(PYTHONPATH_VALUE)" $(PYTHON) scripts/dev.py setup-ppt-runtime
 
 $(IMAGE_AGENT_ENV_STAMP): $(IMAGE_AGENT_ROOT)/requirements.lock requirements/image-agent-web.in
 	$(PYTHON) -m pip install --disable-pip-version-check --upgrade \

@@ -372,6 +372,7 @@ class ApplicationDeliveryMixin:
         validate_identifier(operation_id, "operation_id")
         initial_approval = self.approvals.get_approval(approval_id)
         task_id = initial_approval["approval"]["task_id"]
+        self._require_task_not_archived(task_id)
         request = {
             "approval_id": approval_id,
             "decision": decision,

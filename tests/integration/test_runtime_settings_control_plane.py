@@ -12,6 +12,7 @@ from harness.adapters import (
     AdapterObservation,
     AdapterRecoveryResult,
     AdapterRegistry,
+    AgentWorkState,
     ValidationResult,
 )
 from harness.api.app import create_app
@@ -93,6 +94,15 @@ class SafePointImageAdapter:
 
     def start(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
         return AdapterCommandResult(True, operation_id)
+
+    def probe_work_state(self, instance_id: str) -> AgentWorkState:
+        return AgentWorkState.IDLE
+
+    def quiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        return AdapterCommandResult(True, operation_id, {"quiesced": True})
+
+    def unquiesce(self, instance_id: str, operation_id: str) -> AdapterCommandResult:
+        return AdapterCommandResult(True, operation_id, {"quiesced": False})
 
     def stop(self, instance_id: str, reason: str, operation_id: str):
         return AdapterCommandResult(True, operation_id)

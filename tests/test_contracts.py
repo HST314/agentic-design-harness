@@ -1594,7 +1594,11 @@ class CatalogTests(unittest.TestCase):
                         f"{domain}.{source} references an unknown target",
                     )
                 for terminal in section["terminal"]:
-                    self.assertEqual(section["transitions"][terminal], [])
+                    # ARCHIVED is a reversible suspension, not business
+                    # progression, so terminal states may keep exactly that
+                    # one outgoing edge (main_task only).
+                    edges = section["transitions"][terminal]
+                    self.assertIn(edges, ([], ["ARCHIVED"]))
 
     def test_status_transitions_match_frozen_rfc_golden_table(self) -> None:
         catalog = load_json(CATALOGS / "status-codes.json")
