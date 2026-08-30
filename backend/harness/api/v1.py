@@ -1279,13 +1279,25 @@ def build_v1_router(container: Container) -> APIRouter:
         return {"schema_version": "1.0", "manifest": manifest}
 
     @router.get("/tasks/{task_id}/files/preview", tags=["assets"])
-    async def preview_task_file(task_id: str, path: str = Query(min_length=1)) -> Response:
-        preview = await run_in_threadpool(container.assets.preview, task_id, path)
+    async def preview_task_file(
+        task_id: str,
+        path: str = Query(min_length=1),
+        variant: Literal["original", "thumbnail"] = Query(default="original"),
+    ) -> Response:
+        preview = await run_in_threadpool(
+            container.assets.preview,
+            task_id,
+            path,
+            thumbnail=variant == "thumbnail",
+        )
         content = preview["content"]
         return Response(
             content=content.encode("utf-8") if isinstance(content, str) else content,
             media_type=preview["mime_type"],
             headers={
+                "Cache-Control": (
+                    "private, max-age=3600" if variant == "thumbnail" else "no-store, private"
+                ),
                 "X-Content-Type-Options": "nosniff",
                 "Content-Security-Policy": "default-src 'none'; sandbox",
             },

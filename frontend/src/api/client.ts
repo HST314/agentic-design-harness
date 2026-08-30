@@ -1273,6 +1273,10 @@ export class ApiClient {
     return `${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/files/preview?path=${encodeURIComponent(path)}`;
   }
 
+  thumbnailUrl(taskId: string, path: string): string {
+    return `${this.previewUrl(taskId, path)}&variant=thumbnail`;
+  }
+
   downloadUrl(taskId: string, path: string): string {
     return `${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/files/download?path=${encodeURIComponent(path)}`;
   }
