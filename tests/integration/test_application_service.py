@@ -2016,6 +2016,8 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         instance_root = self.assets.initialize_instance_workspace(task_id, "i_image_1")
         (instance_root / "outputs" / "fast-path-image.png").write_bytes(image)
         (instance_root / "outputs" / "fast-path-note.md").write_bytes(note)
+        (instance_root / "outputs" / "alternate-fast-path-image.png").write_bytes(image)
+        (instance_root / "outputs" / "alternate-fast-path-note.md").write_bytes(note)
         card = self.store.plan.get(task_id, task_id)["task_cards"][0]
         candidate = {
             "schema_version": "1.0",
@@ -2046,7 +2048,19 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             "actor": None,
             "publication_batch_id": None,
         }
-        self.fake_adapter.delivery_bundles = [candidate]
+        alternate = deepcopy(candidate)
+        alternate.update(
+            bundle_id="bundle_fast_path_02",
+            checkpoint_id="checkpoint_89abcdef0123456701234567",
+            created_at="2026-08-30T07:01:00Z",
+        )
+        alternate["image"]["private_relative_path"] = (
+            "instances/i_image_1/outputs/alternate-fast-path-image.png"
+        )
+        alternate["design_note"]["private_relative_path"] = (
+            "instances/i_image_1/outputs/alternate-fast-path-note.md"
+        )
+        self.fake_adapter.delivery_bundles = [candidate, alternate]
         self.fake_adapter.observation = AdapterObservation(
             "RUNNING", step_id="completed", details={"completed": True}
         )
@@ -2065,6 +2079,27 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(status["status"], "UNKNOWN")
         self.assertEqual(collections, [])
 
+        with patch.object(
+            self.application,
+            "_commit_delivery_completion_result",
+            side_effect=SimulatedCrash("before_complete_result_commit"),
+        ), self.assertRaises(SimulatedCrash):
+            self.application.complete_delivery_bundle(
+                task_id,
+                "i_image_1",
+                candidate["bundle_id"],
+                operation_id="complete_fast_path_01",
+                envelope=envelope(
+                    "complete-fast-path-01",
+                    self.store.task.revision(task_id, task_id),
+                ),
+            )
+        bound_intent = read_json(self.application._intent_path("complete_fast_path_01"))
+        self.assertEqual(bound_intent["kind"], "COMPLETE_DELIVERY_BUNDLE")
+        self.assertEqual(bound_intent["state"], "BOUND")
+        self.assertIsNone(bound_intent["result"])
+        self.application.recover()
+
         result = self.application.complete_delivery_bundle(
             task_id,
             "i_image_1",
@@ -2077,6 +2112,10 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "PUBLISHED")
+        committed_intent = read_json(
+            self.application._intent_path("complete_fast_path_01")
+        )
+        self.assertEqual(committed_intent["state"], "COMMITTED")
         self.assertEqual(collections, ["i_image_1"])
         self.assertEqual(
             {item["manifest"]["relative_path"] for item in self.assets.list_assets(task_id)},
@@ -2098,6 +2137,45 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         )
         self.assertEqual(replay["status"], "PUBLISHED")
         self.assertEqual(collections, ["i_image_1"])
+
+        alternate_result = self.application.complete_delivery_bundle(
+            task_id,
+            "i_image_1",
+            alternate["bundle_id"],
+            operation_id="complete_fast_path_02",
+            envelope=envelope(
+                "complete-fast-path-02",
+                self.store.task.revision(task_id, task_id),
+            ),
+        )
+        self.assertEqual(alternate_result["status"], "PUBLISHED")
+
+        with self.assertRaises(HarnessError) as different_bundle:
+            self.application.complete_delivery_bundle(
+                task_id,
+                "i_image_1",
+                alternate["bundle_id"],
+                operation_id="complete_fast_path_01",
+                envelope=envelope(
+                    "complete-fast-path-01",
+                    self.store.task.revision(task_id, task_id),
+                ),
+            )
+        self.assertEqual(different_bundle.exception.code, "IDEMPOTENCY_CONFLICT")
+
+        with self.assertRaises(HarnessError) as different_actor:
+            self.application.complete_delivery_bundle(
+                task_id,
+                "i_image_1",
+                candidate["bundle_id"],
+                operation_id="complete_fast_path_01",
+                envelope=envelope(
+                    "complete-fast-path-01",
+                    self.store.task.revision(task_id, task_id),
+                    actor_id="alternate_human",
+                ),
+            )
+        self.assertEqual(different_actor.exception.code, "IDEMPOTENCY_CONFLICT")
 
     def test_delivery_read_sweep_skips_agents_without_bundle_collection(self) -> None:
         task_id = "t_delivery_sweep_scope"
