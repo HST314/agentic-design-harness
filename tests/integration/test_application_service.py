@@ -736,6 +736,14 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             "RUNNING",
             envelope("gate-running", starting["task_revision"], "adapter"),
         )
+        self.assertEqual(
+            next(
+                item
+                for item in running["plan"]["instances"]
+                if item["instance_id"] == "i_image_1"
+            )["status"],
+            "RUNNING",
+        )
         self.fake_adapter.observation = AdapterObservation(
             "WAITING_APPROVAL",
             step_id="waiting_human_approval",
