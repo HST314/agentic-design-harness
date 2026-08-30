@@ -14,6 +14,7 @@ from harness.core.errors import HarnessError, SimulatedCrash
 from harness.services import asset_reader
 from harness.services.assets import AssetService, file_digest
 from harness.storage.ndjson import recover_records
+from PIL import Image
 from runtime_helpers import build_service, create_task, envelope, image_plan
 
 
@@ -278,6 +279,29 @@ class AssetServiceTests(unittest.TestCase):
         with self.assertRaises(HarnessError) as rejected:
             self.assets.preview("t_assets", large_image["relative_path"])
         self.assertEqual(rejected.exception.code, "ASSET_VALIDATION_FAILED")
+
+    def test_image_thumbnail_is_resized_and_flattened_for_gallery_use(self) -> None:
+        self.assets.max_file_bytes = 64 * 1024
+        self.assets.max_task_bytes = 64 * 1024
+        source = io.BytesIO()
+        Image.new("RGBA", (1200, 600), (255, 0, 0, 128)).save(source, format="PNG")
+        imported = self.assets.import_bytes(
+            "t_assets",
+            filename="wide.png",
+            content=source.getvalue(),
+            description="Gallery thumbnail source",
+            source="user_upload",
+            idempotency_key="gallery-thumbnail",
+        )
+
+        preview = self.assets.preview(
+            "t_assets", imported["relative_path"], thumbnail=True
+        )
+
+        self.assertEqual(preview["mime_type"], "image/jpeg")
+        with Image.open(io.BytesIO(preview["content"])) as thumbnail:
+            self.assertEqual(thumbnail.mode, "RGB")
+            self.assertEqual(thumbnail.size, (640, 320))
 
     def test_path_traversal_symlinks_and_unknown_mime_are_rejected(self) -> None:
         with self.assertRaises(HarnessError) as absolute:

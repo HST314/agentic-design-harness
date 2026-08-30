@@ -177,9 +177,10 @@ export function DeliveryGallery({
             onClick={() => onZoom(item.file)}
           >
             <img
-              src={api.previewUrl(taskId, item.file.relative_path)}
+              src={api.thumbnailUrl(taskId, item.file.relative_path)}
               alt={item.file.filename}
               loading="lazy"
+              decoding="async"
             />
           </button>
           {item.notePath ? (

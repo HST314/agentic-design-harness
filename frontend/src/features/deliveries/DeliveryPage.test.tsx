@@ -49,7 +49,9 @@ describe("DeliveryGallery", () => {
     const markup = renderToStaticMarkup(<DeliveryGallery taskId="task_x" items={items} />);
 
     expect(markup.match(/delivery-tile__thumb/g)).toHaveLength(2);
-    expect(markup).toContain("/api/v1/tasks/task_x/files/preview?path=resources%2Fshared%2Fbundle_a.png");
+    expect(markup).toContain("/api/v1/tasks/task_x/files/preview?path=resources%2Fshared%2Fbundle_a.png&amp;variant=thumbnail");
+    expect(markup).toContain('loading="lazy"');
+    expect(markup).toContain('decoding="async"');
     expect(markup).not.toContain("delivery-tile__meta");
     expect(markup).not.toContain(">放大</button>");
     expect(markup.match(/设计理念<\/button>/g)).toHaveLength(1);
