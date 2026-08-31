@@ -17,12 +17,7 @@ from urllib.request import Request, urlopen
 
 from ..contracts import ContractRegistry
 from ..core.errors import HarnessError
-from ..services.process_runtime import (
-    AgentRuntimeArtifact,
-    AgentRuntimeIdentity,
-    ProcessSpec,
-    runtime_artifact_identity,
-)
+from ..services.process_runtime import AgentRuntimeArtifact, AgentRuntimeIdentity, ProcessSpec
 from ..storage.atomic import atomic_write_bytes, atomic_write_json, digest_json, read_json
 from ..storage.layout import validate_identifier
 from ..storage.store import FileStateStore
@@ -34,21 +29,14 @@ from .base import (
     PrepareRequest,
     ValidationResult,
 )
-from .image_runtime import content_tree_sha256, dependency_tree_sha256
+from .image_runtime import content_tree_sha256
 from .ppt_attestation import attest_ppt_runtime
 from .ppt_lock import PptAgentReleaseLock
+from .ppt_runtime import PPT_LAUNCHER, PptRuntimeBuilder, verify_ppt_runtime_identity
 from .types import AgentInstanceSnapshot, DeliveryCandidate, TaskCard, UsageEvent
 from .work_admission import initialize_work_admission, write_work_admission
 
 _PACKAGE_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
-_LAUNCHER = (
-    "import runpy,sys; p=sys.argv[1]; "
-    "sys.path.insert(0,str(__import__('pathlib').Path(p).parent)); "
-    "m=runpy.run_path(p); "
-    "__import__('uvicorn').run(m['app'],host=sys.argv[2],port=int(sys.argv[3]))"
-)
-
-
 class PptAgentAdapter:
     agent_type = "ppt"
     available = True
@@ -78,7 +66,18 @@ class PptAgentAdapter:
         self.host = host
         self.request_timeout_seconds = request_timeout_seconds
         self._validate_runtime()
-        self.runtime_root = self._prepare_runtime_artifact()
+        self.runtime_builder = PptRuntimeBuilder(
+            self.source_root,
+            self.dependency_root,
+            self.source_root.parent.parent / "requirements" / "ppt-agent.lock",
+            revision=self.release_lock.revision,
+            package_version=self.release_lock.package_version,
+            source_content_sha256=self.release_lock.source_content_sha256,
+            dependency_content_sha256=self.dependency_sha256,
+        )
+        self.runtime_root = self.runtime_builder.prepare(
+            self.dependency_root.parent / "ppt-runtime"
+        )
         self.runtime_identity = self._verify_runtime_identity()
 
     def validate_task_card(self, card: TaskCard) -> ValidationResult:
@@ -181,7 +180,14 @@ class PptAgentAdapter:
             )
         )
         return ProcessSpec(
-            command=(str(self.interpreter), "-c", _LAUNCHER, str(entrypoint), "{host}", "{port}"),
+            command=(
+                str(self.interpreter),
+                "-c",
+                PPT_LAUNCHER,
+                str(entrypoint),
+                "{host}",
+                "{port}",
+            ),
             runtime_artifact=artifact,
             verified_runtime_identity=self.runtime_identity,
             public_environment={
@@ -582,79 +588,11 @@ class PptAgentAdapter:
         )
 
     def _verify_runtime_identity(self) -> AgentRuntimeIdentity:
-        entrypoint = self.runtime_root / "main_front.py"
-        return runtime_artifact_identity(
-            ProcessSpec(
-                command=(
-                    str(self.interpreter),
-                    "-c",
-                    _LAUNCHER,
-                    str(entrypoint),
-                    "{host}",
-                    "{port}",
-                ),
-                runtime_artifact=self._runtime_artifact(),
-            )
+        return verify_ppt_runtime_identity(
+            self.runtime_root,
+            revision=self.release_lock.revision,
+            interpreter=self.interpreter,
         )
-
-    def _prepare_runtime_artifact(self) -> Path:
-        cache_root = self.dependency_root.parent / "ppt-runtime"
-        destination = cache_root / f"{self.release_lock.revision}-{self.dependency_sha256[:16]}"
-        if destination.is_dir():
-            return self._validated_cached_runtime(destination)
-        cache_root.mkdir(parents=True, exist_ok=True)
-        temporary = Path(tempfile.mkdtemp(prefix=".ppt-runtime-", dir=cache_root))
-        try:
-            shutil.copytree(
-                self.source_root,
-                temporary,
-                dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns(
-                    ".git", "__pycache__", ".pytest_cache", ".ruff_cache"
-                ),
-            )
-            if content_tree_sha256(temporary) != self.release_lock.source_content_sha256:
-                raise HarnessError(
-                    "ADAPTER_UNAVAILABLE", "The copied PPT Agent source does not match its lock."
-                )
-            shutil.copytree(self.dependency_root, temporary / "_dependencies")
-            shutil.copyfile(
-                self.source_root.parent.parent / "requirements" / "ppt-agent.lock",
-                temporary / "_harness-ppt-requirements.lock",
-            )
-            for path in sorted(temporary.rglob("*"), reverse=True):
-                path.chmod(0o555 if path.is_dir() else 0o444)
-            temporary.chmod(0o555)
-            try:
-                temporary.replace(destination)
-            except OSError:
-                if not destination.is_dir():
-                    raise
-            return self._validated_cached_runtime(destination)
-        finally:
-            if temporary.exists():
-                temporary.chmod(0o755)
-                for path in temporary.rglob("*"):
-                    with suppress(OSError):
-                        path.chmod(0o755 if path.is_dir() else 0o644)
-                shutil.rmtree(temporary)
-
-    def _validated_cached_runtime(self, destination: Path) -> Path:
-        if content_tree_sha256(
-            destination,
-            ignored_names={"_harness-ppt-requirements.lock"},
-            ignored_root_names={"_dependencies"},
-        ) != self.release_lock.source_content_sha256:
-            raise HarnessError(
-                "ADAPTER_UNAVAILABLE",
-                "The cached PPT Agent runtime does not match its release lock.",
-            )
-        if dependency_tree_sha256(destination / "_dependencies") != self.dependency_sha256:
-            raise HarnessError(
-                "ADAPTER_UNAVAILABLE",
-                "The cached PPT Agent dependencies do not match their proof.",
-            )
-        return destination.resolve()
 
     def _task_id_for_instance(self, instance_id: str) -> str:
         validate_identifier(instance_id, "instance_id")

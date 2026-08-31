@@ -74,8 +74,7 @@ class UnavailableAgentAdapter:
         return self.cause.message
 
     def validate_task_card(self, card: TaskCard) -> ValidationResult:
-        del card
-        return ValidationResult(False, (self.availability_message,))
+        self._raise(card.get("instance_id"))
 
     def prepare(self, request: PrepareRequest) -> ProcessSpec:
         self._raise(request.instance.get("instance_id"))

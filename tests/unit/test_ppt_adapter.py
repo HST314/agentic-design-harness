@@ -142,7 +142,7 @@ class PptAgentAdapterTests(unittest.TestCase):
 
         with (
             patch.object(self.adapter, "_validate_runtime") as validate_runtime,
-            patch("harness.adapters.ppt.runtime_artifact_identity") as identity,
+            patch("harness.adapters.ppt.verify_ppt_runtime_identity") as identity,
         ):
             spec = self.adapter.prepare(
                 PrepareRequest(instance, card, task_root, task_root / "unused.yaml")

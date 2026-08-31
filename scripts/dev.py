@@ -282,6 +282,10 @@ class DevelopmentLauncher:
         return self.runtime_root / "image-runtime"
 
     @property
+    def ppt_runtime_root(self) -> Path:
+        return self.runtime_root / "ppt-runtime"
+
+    @property
     def image_python(self) -> Path:
         return self.venv_python
 
@@ -890,6 +894,68 @@ class DevelopmentLauncher:
             ),
         )
 
+    def prepare_ppt_runtime(
+        self,
+        *,
+        force: bool = False,
+        runtime_python: Path | None = None,
+    ) -> dict[str, Any]:
+        """Attest, publish, and process-verify the immutable PPT artifact."""
+
+        from harness.adapters.ppt_attestation import attest_ppt_runtime
+        from harness.adapters.ppt_lock import load_ppt_agent_lock
+        from harness.adapters.ppt_runtime import (
+            PptRuntimeBuilder,
+            verify_ppt_runtime_identity,
+        )
+        from harness.core.errors import HarnessError
+
+        selected_python = Path(os.path.abspath(runtime_python or self.venv_python))
+        print(
+            "[prepare] Verifying and warming the PPT Agent runtime artifact...",
+            flush=True,
+        )
+        started = time.monotonic()
+        try:
+            release_lock = load_ppt_agent_lock(self.ppt_agent_lock_path)
+            dependency_sha256 = attest_ppt_runtime(
+                release_lock,
+                source_root=self.ppt_agent_root,
+                dependency_root=self.ppt_dependency_root,
+                harness_root=self.root,
+                interpreter=selected_python,
+            )
+            builder = PptRuntimeBuilder(
+                self.ppt_agent_root,
+                self.ppt_dependency_root,
+                self.ppt_requirements_lock,
+                revision=release_lock.revision,
+                package_version=release_lock.package_version,
+                source_content_sha256=release_lock.source_content_sha256,
+                dependency_content_sha256=dependency_sha256,
+            )
+            artifact_root = builder.prepare(self.ppt_runtime_root, force=force)
+            identity = verify_ppt_runtime_identity(
+                artifact_root,
+                revision=release_lock.revision,
+                interpreter=selected_python,
+            )
+        except HarnessError as exc:
+            stage = exc.details.get("stage")
+            location = f" during {stage}" if isinstance(stage, str) else ""
+            _fail(f"PPT Agent runtime artifact preparation failed{location}: {exc.message}")
+        elapsed = time.monotonic() - started
+        disposition = "reused" if builder.cache_hit else "prepared"
+        print(
+            f"[ok] PPT Agent runtime artifact {disposition} in {elapsed:.1f}s",
+            flush=True,
+        )
+        return {
+            "artifact_root": str(artifact_root),
+            "artifact_cache_hit": builder.cache_hit,
+            "artifact_sha256": identity.digest,
+        }
+
     def frontend_input_digest(self) -> str:
         return input_digest([self.frontend_root / "package-lock.json"], root=self.root)
 
@@ -931,6 +997,7 @@ class DevelopmentLauncher:
         self.install_backend(force=force)
         self.install_image_dependencies(force=force)
         self.install_ppt_dependencies(force=force)
+        self.prepare_ppt_runtime(force=force)
         self.prepare_image_runtime()
         self.install_frontend(force=force)
         print("[ok] Development environment is ready.", flush=True)
@@ -1085,17 +1152,13 @@ class DevelopmentLauncher:
                 flush=True,
             )
         ppt_degraded = False
-        if not self.ppt_runtime_is_attested(self.ppt_dependency_root):
-            message = (
-                "PPT Agent dependencies are missing, stale, or inconsistent; "
-                "run scripts/dev.py setup-ppt-runtime --force."
-            )
+        try:
+            self.prepare_ppt_runtime()
+        except LauncherError as exc:
             if not allow_ppt_degraded:
-                _fail(message)
+                raise
             ppt_degraded = True
-            print("[degraded] PPT Adapter will be disabled: " + message, flush=True)
-        else:
-            print("[ok] PPT Agent isolated dependencies match their lock.", flush=True)
+            print("[degraded] PPT Adapter will be disabled: " + str(exc), flush=True)
         if not self.frontend_is_current():
             _fail("Frontend node_modules is missing or stale; run scripts/dev.py setup.")
         print("[ok] Frontend package-lock installation", flush=True)
@@ -1357,6 +1420,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "setup-ppt-runtime":
             launcher.install_ppt_dependencies(
+                force=args.force,
+                runtime_python=launcher.python,
+            )
+            launcher.prepare_ppt_runtime(
                 force=args.force,
                 runtime_python=launcher.python,
             )

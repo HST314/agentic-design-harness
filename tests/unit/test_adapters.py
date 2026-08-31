@@ -4,6 +4,7 @@ import json
 import unittest
 from io import BytesIO
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 from harness.adapters import (
@@ -12,6 +13,7 @@ from harness.adapters import (
     AgentWorkState,
     GeneralAgentAdapter,
     PptAgentAdapter,
+    TaskCard,
     UnavailableAgentAdapter,
 )
 from harness.core.errors import HarnessError
@@ -71,6 +73,11 @@ class AdapterContractTests(unittest.TestCase):
         self.assertIsInstance(adapter, AgentAdapter)
         self.assertFalse(adapter.available)
         self.assertEqual(adapter.recover({}).status, "UNAVAILABLE")
+        with self.assertRaises(HarnessError) as unavailable:
+            adapter.validate_task_card(
+                cast(TaskCard, {"instance_id": "instance_ppt"})
+            )
+        self.assertEqual(unavailable.exception.code, "ADAPTER_UNAVAILABLE")
 
     def test_registry_is_explicit_and_rejects_duplicate_ownership(self) -> None:
         adapter = object.__new__(PptAgentAdapter)
