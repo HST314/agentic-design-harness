@@ -340,7 +340,7 @@ export function SystemSettingsPage(): React.JSX.Element {
           </section>
 
           <section className="settings-section settings-section--muted">
-            <div className="settings-section__heading"><h2>运行环境</h2><p>基础运行参数由系统统一维护，无需在设计工作台中手动设置。</p></div>
+            <div className="settings-section__heading"><h2>运行环境</h2><p>基础运行参数由系统统一维护，无需在 DesignHarness 中手动设置。</p></div>
           </section>
         </div>
       ) : (

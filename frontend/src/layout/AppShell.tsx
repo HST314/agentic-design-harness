@@ -9,6 +9,7 @@ import {
 } from "react-router-dom";
 import type { ReadyResponse, TaskSummary } from "../api/client";
 import { api, inboxQuery, readinessQuery, taskHistoryQuery } from "../api/queries";
+import { BRAND } from "../brand";
 import { Icon } from "../components/Icon";
 import { WorkItemDetailsPanel } from "../features/task-board/TaskBoardPage";
 
@@ -261,9 +262,14 @@ export function AppShell(): React.JSX.Element {
       <div className={`workbench-shell${collapsed ? " workbench-shell--collapsed" : ""}`}>
         <aside className="workbench-sidebar" aria-label="主任务历史">
           <div className="workbench-brand-row">
-            <Link className="workbench-brand" to="/tasks/new" aria-label="返回新任务页">
-              <span className="workbench-brand__mark" aria-hidden="true">DW</span>
-              <span className="workbench-label"><strong>Design Workbench</strong><small>多智能体控制平面</small></span>
+            <Link
+              className="workbench-brand"
+              to="/tasks/new"
+              aria-label={`${BRAND.fullName}，返回新任务页`}
+              title={BRAND.fullName}
+            >
+              <span className="workbench-brand__mark" aria-hidden="true">{BRAND.mark}</span>
+              <span className="workbench-label"><strong>{BRAND.name}</strong><small>{BRAND.sidebarTagline}</small></span>
             </Link>
             <button
               className="workbench-icon-button"

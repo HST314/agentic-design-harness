@@ -120,6 +120,18 @@ test("root enters the accessible task-intake application shell", async ({ page }
   await page.goto("/");
 
   await expect(page).toHaveURL(/\/tasks\/new$/);
+  await expect(page).toHaveTitle("面向广告全案交付的企业级多智能体设计操作系统");
+  const brand = page.getByRole("link", {
+    name: "面向广告全案交付的企业级多智能体设计操作系统，返回新任务页",
+  });
+  await expect(brand).toHaveAttribute("title", "面向广告全案交付的企业级多智能体设计操作系统");
+  await expect(brand).toContainText("DH");
+  await expect(brand).toContainText("DesignHarness");
+  await expect(brand).toContainText("企业级多智能体设计操作系统");
+  await expect(page.locator('link[rel~="icon"]')).toHaveAttribute("href", "/favicon.svg");
+  const faviconResponse = await page.request.get("/favicon.svg");
+  expect(faviconResponse.ok()).toBe(true);
+  expect(await faviconResponse.text()).toContain("DesignHarness (DH)");
   await expect(page.getByRole("heading", { name: "创建新的设计任务" })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "主任务历史" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "任务历史" })).toContainText("秋季发布会主视觉");
@@ -153,7 +165,7 @@ test("master, board and plan deep links share one stable shell", async ({ page }
   for (const route of ["master", "board", "plan"]) {
     await page.goto(`/tasks/task_launch_campaign/${route}`);
     await expect(page.getByRole("complementary", { name: "主任务历史" })).toBeVisible();
-    await expect(page.getByRole("navigation", { name: "任务工作区" })).toBeVisible();
+    await expect(page.locator("#workbench-main")).toBeVisible();
     await expect(page.locator(".workbench-topbar")).toContainText("秋季发布会主视觉");
     if (route === "board") {
       await expect(page.locator(".task-projection--board")).toBeVisible();

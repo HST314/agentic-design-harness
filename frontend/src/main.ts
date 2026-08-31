@@ -53,6 +53,7 @@ import {
   usageCompletenessBadge,
   wireNavigation,
 } from "./ui";
+import { BRAND } from "./brand";
 
 let root: HTMLDivElement;
 const api = new ApiClient();
@@ -109,9 +110,9 @@ function render(): void {
     <a class="skip-link" href="#main-content">跳到主要内容</a>
     <div class="shell">
       <aside class="sidebar" aria-label="主导航">
-        <a class="brand" href="${routePath("tasks")}" data-nav="tasks" aria-label="返回任务面板">
-          <span class="brand-mark" aria-hidden="true">DH</span>
-          <span><strong>Design Harness</strong><small>Control plane</small></span>
+        <a class="brand" href="${routePath("tasks")}" data-nav="tasks" aria-label="${BRAND.fullName}，返回任务面板" title="${BRAND.fullName}">
+          <span class="brand-mark" aria-hidden="true">${BRAND.mark}</span>
+          <span><strong>${BRAND.name}</strong><small>${BRAND.sidebarTagline}</small></span>
         </a>
         <nav aria-label="主导航">
           ${navigation
