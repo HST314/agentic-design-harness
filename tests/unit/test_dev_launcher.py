@@ -271,7 +271,11 @@ class DevelopmentLauncherTests(unittest.TestCase):
                 "require_current_image_dependencies",
                 side_effect=LauncherError("run scripts/dev.py setup --force"),
             ),
-            patch.object(DevelopmentLauncher, "ppt_runtime_is_attested", return_value=True),
+            patch.object(
+                DevelopmentLauncher,
+                "prepare_ppt_runtime",
+                return_value={"artifact_cache_hit": True},
+            ),
             patch.object(DevelopmentLauncher, "frontend_is_current", return_value=True),
             patch.object(DevelopmentLauncher, "_check_configuration"),
             patch.object(DevelopmentLauncher, "_check_writable_runtime"),
@@ -308,7 +312,11 @@ class DevelopmentLauncherTests(unittest.TestCase):
                 "attest_image_runtime",
                 return_value=attestation,
             ) as attest,
-            patch.object(DevelopmentLauncher, "ppt_runtime_is_attested", return_value=True),
+            patch.object(
+                DevelopmentLauncher,
+                "prepare_ppt_runtime",
+                return_value={"artifact_cache_hit": True},
+            ) as prepare_ppt,
             patch.object(DevelopmentLauncher, "frontend_is_current", return_value=True),
             patch.object(DevelopmentLauncher, "_check_configuration"),
             patch.object(DevelopmentLauncher, "_check_writable_runtime"),
@@ -316,6 +324,7 @@ class DevelopmentLauncherTests(unittest.TestCase):
             launcher.doctor(check_ports=False)
 
         attest.assert_called_once_with(prepare_artifact=True)
+        prepare_ppt.assert_called_once_with()
 
     def test_doctor_can_continue_with_an_actionable_ppt_degradation(self) -> None:
         launcher = DevelopmentLauncher(root=Path("workspace"))
@@ -346,7 +355,13 @@ class DevelopmentLauncherTests(unittest.TestCase):
                     "package_version": "1.8.6",
                 },
             ),
-            patch.object(DevelopmentLauncher, "ppt_runtime_is_attested", return_value=False),
+            patch.object(
+                DevelopmentLauncher,
+                "prepare_ppt_runtime",
+                side_effect=LauncherError(
+                    "run scripts/dev.py setup-ppt-runtime --force"
+                ),
+            ),
             patch.object(DevelopmentLauncher, "frontend_is_current", return_value=True),
             patch.object(DevelopmentLauncher, "_check_configuration"),
             patch.object(DevelopmentLauncher, "_check_writable_runtime"),
@@ -409,10 +424,17 @@ class DevelopmentLauncherTests(unittest.TestCase):
         )
 
     def test_ppt_runtime_setup_uses_the_current_interpreter(self) -> None:
-        with patch.object(DevelopmentLauncher, "install_ppt_dependencies") as install:
+        with (
+            patch.object(DevelopmentLauncher, "install_ppt_dependencies") as install,
+            patch.object(DevelopmentLauncher, "prepare_ppt_runtime") as prepare,
+        ):
             self.assertEqual(main(["setup-ppt-runtime", "--force"]), 0)
 
         install.assert_called_once_with(
+            force=True,
+            runtime_python=Path(sys.executable),
+        )
+        prepare.assert_called_once_with(
             force=True,
             runtime_python=Path(sys.executable),
         )

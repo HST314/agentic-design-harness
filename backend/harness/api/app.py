@@ -196,13 +196,26 @@ def build_container(
             host=settings.host,
         )
     except (HarnessError, OSError) as exc:
-        cause = (
-            exc
-            if isinstance(exc, HarnessError)
-            else HarnessError(
+        if isinstance(exc, HarnessError):
+            cause = exc
+        else:
+            details: dict[str, int | str] = {"stage": "initialize_ppt_adapter"}
+            if exc.errno is not None:
+                details["errno"] = exc.errno
+            winerror = getattr(exc, "winerror", None)
+            if isinstance(winerror, int):
+                details["winerror"] = winerror
+            cause = HarnessError(
                 "ADAPTER_UNAVAILABLE",
                 "The PPT Agent runtime artifact could not be prepared.",
+                details,
             )
+        logging.getLogger("harness.lifecycle").error(
+            "PPT adapter disabled: code=%s stage=%s errno=%s winerror=%s",
+            cause.code,
+            cause.details.get("stage", "unknown"),
+            cause.details.get("errno", "unknown"),
+            cause.details.get("winerror", "unknown"),
         )
         ppt_adapter = UnavailableAgentAdapter(
             "ppt",
