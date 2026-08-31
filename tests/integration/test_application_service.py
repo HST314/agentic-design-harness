@@ -2206,7 +2206,9 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         alternate["design_note"]["private_relative_path"] = (
             "instances/i_image_1/outputs/alternate-fast-path-note.md"
         )
-        self.fake_adapter.delivery_bundles = [candidate, alternate]
+        # The alternate branch does not exist when the first bundle is observed.
+        # It appears only after publishing the first branch terminalizes the instance.
+        self.fake_adapter.delivery_bundles = [candidate]
         self.fake_adapter.observation = AdapterObservation(
             "RUNNING", step_id="completed", details={"completed": True}
         )
@@ -2284,6 +2286,11 @@ class HarnessApplicationServiceTests(unittest.TestCase):
         self.assertEqual(replay["status"], "PUBLISHED")
         self.assertEqual(collections, ["i_image_1"])
 
+        self.assertEqual(
+            self.application._instance(task_id, "i_image_1")["status"],
+            "SUCCEEDED",
+        )
+        self.fake_adapter.delivery_bundles = [candidate, alternate]
         alternate_result = self.application.complete_delivery_bundle(
             task_id,
             "i_image_1",
@@ -2295,6 +2302,20 @@ class HarnessApplicationServiceTests(unittest.TestCase):
             ),
         )
         self.assertEqual(alternate_result["status"], "PUBLISHED")
+        self.assertEqual(collections, ["i_image_1", "i_image_1"])
+        self.assertEqual(
+            self.application._instance(task_id, "i_image_1")["status"],
+            "SUCCEEDED",
+        )
+        self.assertEqual(
+            {item["manifest"]["relative_path"] for item in self.assets.list_assets(task_id)},
+            {
+                "resources/shared/bundle_fast_path_01.png",
+                "resources/shared/bundle_fast_path_01.md",
+                "resources/shared/bundle_fast_path_02.png",
+                "resources/shared/bundle_fast_path_02.md",
+            },
+        )
 
         with self.assertRaises(HarnessError) as different_bundle:
             self.application.complete_delivery_bundle(

@@ -808,6 +808,19 @@ class ApplicationDeliveryMixin:
                 # The click path targets only its owning instance. It does not fan out
                 # across every active Agent or rely on a read poll to drive writes.
                 self.observe_instance(task_id, instance_id)
+            elif (
+                instance["status"] == "SUCCEEDED"
+                and instance["agent_type"] == "image"
+            ):
+                # Image workbenches remain usable after their first branch bundle is
+                # published. Collect a subsequently-created branch bundle without
+                # reopening or rolling back the already-terminal instance/task.
+                adapter = self.adapters.get(instance["agent_type"])
+                self._collect_succeeded_instance_bundles(
+                    task_id,
+                    instance_id,
+                    adapter,
+                )
             status = self.delivery_bundle_status(task_id, instance_id, bundle_id)
         if status["status"] == "UNKNOWN":
             raise HarnessError(
@@ -1039,24 +1052,11 @@ class ApplicationDeliveryMixin:
         adapter,
         observation,
     ) -> dict[str, Any]:
-        collector = getattr(adapter, "collect_delivery_bundles", None)
-        if not callable(collector):
-            raise HarnessError(
-                "VALIDATION_ERROR", "The owning Agent adapter cannot collect delivery bundles."
-            )
-        raw_collected = collector(instance_id)
-        if not isinstance(raw_collected, list) or any(
-            not isinstance(item, dict) for item in raw_collected
-        ):
-            raise HarnessError(
-                "VALIDATION_ERROR", "The Agent adapter returned malformed delivery bundles."
-            )
-        collected: list[dict[str, Any]] = raw_collected
-        if not collected:
-            raise HarnessError(
-                "VALIDATION_ERROR", "A completed Image Agent did not expose a delivery bundle."
-            )
-        candidates = [self._persist_delivery_bundle_candidate(item) for item in collected]
+        candidates = self._collect_delivery_bundle_candidates(
+            task_id,
+            instance_id,
+            adapter,
+        )
         instance = self._instance(task_id, instance_id)
         transition = None
         if instance["status"] == "RUNNING":
@@ -1084,11 +1084,11 @@ class ApplicationDeliveryMixin:
                 "INVALID_STATE_TRANSITION",
                 "A delivery review candidate requires a running or waiting instance.",
             )
-        approvals = [
-            self.approvals.ensure_delivery_review_approval(task_id, instance_id, candidate)
-            for candidate in candidates
-            if candidate["status"] == "PENDING_CONFIRMATION"
-        ]
+        approvals = self._ensure_delivery_bundle_approvals(
+            task_id,
+            instance_id,
+            candidates,
+        )
         return {
             "status": "PENDING_CONFIRMATION",
             "instance": deepcopy(instance),
@@ -1101,6 +1101,85 @@ class ApplicationDeliveryMixin:
                 "details": deepcopy(observation.details),
             },
         }
+
+    def _collect_delivery_bundle_candidates(
+        self,
+        task_id: str,
+        instance_id: str,
+        adapter,
+    ) -> list[dict[str, Any]]:
+        """Persist immutable branch bundles without changing instance lifecycle state."""
+
+        collected = self._read_delivery_bundle_candidates(instance_id, adapter)
+        return [self._persist_delivery_bundle_candidate(item) for item in collected]
+
+    @staticmethod
+    def _read_delivery_bundle_candidates(
+        instance_id: str,
+        adapter,
+    ) -> list[dict[str, Any]]:
+        """Read and validate bundle-shaped adapter output without holding task locks."""
+
+        collector = getattr(adapter, "collect_delivery_bundles", None)
+        if not callable(collector):
+            raise HarnessError(
+                "VALIDATION_ERROR", "The owning Agent adapter cannot collect delivery bundles."
+            )
+        raw_collected = collector(instance_id)
+        if not isinstance(raw_collected, list) or any(
+            not isinstance(item, dict) for item in raw_collected
+        ):
+            raise HarnessError(
+                "VALIDATION_ERROR", "The Agent adapter returned malformed delivery bundles."
+            )
+        collected: list[dict[str, Any]] = raw_collected
+        if not collected:
+            raise HarnessError(
+                "VALIDATION_ERROR", "A completed Image Agent did not expose a delivery bundle."
+            )
+        return collected
+
+    def _collect_succeeded_instance_bundles(
+        self,
+        task_id: str,
+        instance_id: str,
+        adapter,
+    ) -> list[dict[str, Any]]:
+        """Collect later branch bundles while preserving terminal lifecycle state."""
+
+        collected = self._read_delivery_bundle_candidates(instance_id, adapter)
+        with (
+            FileLock(self._task_lock(task_id), self.store.lock_timeout_seconds),
+            self.commands.task_guard(task_id),
+        ):
+            current = self._instance(task_id, instance_id)
+            if current["status"] != "SUCCEEDED" or current["agent_type"] != "image":
+                raise HarnessError(
+                    "INVALID_STATE_TRANSITION",
+                    "The Image instance is no longer available for branch publication.",
+                    {"instance_id": instance_id, "current": current["status"]},
+                )
+            candidates = [
+                self._persist_delivery_bundle_candidate(item) for item in collected
+            ]
+            self._ensure_delivery_bundle_approvals(
+                task_id,
+                instance_id,
+                candidates,
+            )
+            return candidates
+
+    def _ensure_delivery_bundle_approvals(
+        self,
+        task_id: str,
+        instance_id: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [
+            self.approvals.ensure_delivery_review_approval(task_id, instance_id, candidate)
+            for candidate in candidates
+            if candidate["status"] == "PENDING_CONFIRMATION"
+        ]
 
     def _publish_delivery_bundle(
         self,

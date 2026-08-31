@@ -113,9 +113,9 @@ describe("executeBridgeRequest delivery.complete", () => {
       "bundle_a",
       {
         instance_id: "instance_image",
-        operation_id: "workbench_complete_bridge_request_status01",
+        operation_id: "workbench_complete_cbf88e5f8ca79dd3",
         envelope: {
-          idempotency_key: "workbench_complete_bridge_request_status01",
+          idempotency_key: "workbench_complete_cbf88e5f8ca79dd3",
           actor_type: "human",
           actor_id: "human_operator",
           expected_revision: 7,
@@ -123,6 +123,38 @@ describe("executeBridgeRequest delivery.complete", () => {
       },
       expect.any(AbortSignal),
     );
+  });
+
+  test("reuses one completion operation across bridge retries for the same bundle", async () => {
+    vi.mocked(api.completeDeliveryBundle).mockResolvedValue({
+      bundle_id: "bundle_a",
+      instance_id: "instance_image",
+      status: "PUBLISHED",
+    } as never);
+
+    await executeBridgeRequest(
+      bridgeRequest("delivery.complete", { bundle_id: "bundle_a" }),
+      "instance_image",
+      7,
+      SCOPE,
+    );
+    await executeBridgeRequest(
+      {
+        ...bridgeRequest("delivery.complete", { bundle_id: "bundle_a" }),
+        request_id: "bridge_request_retry02",
+      },
+      "instance_image",
+      8,
+      SCOPE,
+    );
+
+    const operations = vi.mocked(api.completeDeliveryBundle).mock.calls.map(
+      (call) => call[2].operation_id,
+    );
+    expect(operations).toEqual([
+      "workbench_complete_cbf88e5f8ca79dd3",
+      "workbench_complete_cbf88e5f8ca79dd3",
+    ]);
   });
 
   test("aborts a slow completion command before the child bridge timeout", async () => {

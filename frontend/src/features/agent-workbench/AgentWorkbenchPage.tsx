@@ -12,6 +12,7 @@ import { Icon } from "../../components/Icon";
 import { TaskTabs } from "../master-thread/MasterThreadPage";
 import {
   bridgeIdempotencyKey,
+  deliveryBundleIdempotencyKey,
   isBridgeHello,
   newBridgeNonce,
   parseBridgeRequest,
@@ -59,7 +60,11 @@ export async function executeBridgeRequest(
   }
   if (request.action === "delivery.complete") {
     const bundleId = String(request.payload.bundle_id);
-    const operationId = bridgeIdempotencyKey(request.action, request.request_id);
+    const operationId = deliveryBundleIdempotencyKey(
+      scope.taskId,
+      instanceId,
+      bundleId,
+    );
     const controller = new AbortController();
     const abortAt = globalThis.setTimeout(() => controller.abort(), 25_000);
     try {

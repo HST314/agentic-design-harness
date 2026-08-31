@@ -191,3 +191,21 @@ export function bridgeIdempotencyKey(action: RuntimeSettingsBridgeAction, reques
   const intent = action.split(".").at(-1) ?? "request";
   return `workbench_${intent}_${requestId}`.slice(0, 128);
 }
+
+function stableHash(value: string, seed: number): string {
+  let hash = seed >>> 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+export function deliveryBundleIdempotencyKey(
+  taskId: string,
+  instanceId: string,
+  bundleId: string,
+): string {
+  const identity = `${taskId}\u0000${instanceId}\u0000${bundleId}`;
+  return `workbench_complete_${stableHash(identity, 0x811c9dc5)}${stableHash(identity, 0x9e3779b9)}`;
+}

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   bridgeIdempotencyKey,
+  deliveryBundleIdempotencyKey,
   isBridgeHello,
   parseBridgeRequest,
   RUNTIME_SETTINGS_BRIDGE_PROTOCOL,
@@ -107,6 +108,16 @@ describe("runtime settings bridge protocol", () => {
     expect(bridgeIdempotencyKey("delivery.complete", base.request_id)).toBe(
       "workbench_complete_bridge_request_12345678",
     );
+  });
+
+  test("derives delivery idempotency from task, instance and bundle instead of request id", () => {
+    const first = deliveryBundleIdempotencyKey("task_1", "instance_image", "bundle_a");
+    const retry = deliveryBundleIdempotencyKey("task_1", "instance_image", "bundle_a");
+    const nextBranch = deliveryBundleIdempotencyKey("task_1", "instance_image", "bundle_b");
+    expect(first).toBe("workbench_complete_cbf88e5f8ca79dd3");
+    expect(retry).toBe(first);
+    expect(nextBranch).not.toBe(first);
+    expect(first.length).toBeLessThanOrEqual(128);
   });
 
   test("accepts delivery status queries with the same bundle contract", () => {
