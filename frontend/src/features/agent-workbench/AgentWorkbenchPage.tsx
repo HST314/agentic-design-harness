@@ -201,6 +201,8 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const loadTimeoutRef = useRef<number | undefined>(undefined);
   const announceBridgeRef = useRef<() => void>(() => undefined);
+  const taskRevisionRef = useRef<number | undefined>(link.data?.task_revision);
+  taskRevisionRef.current = link.data?.task_revision;
   const [frameKey, setFrameKey] = useState(0);
   const [frameState, setFrameState] = useState<FrameState>("loading");
   const viewedInstanceRef = useRef<string | null>(null);
@@ -255,7 +257,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
       const consumedNonce = nonce;
       const nextNonce = newBridgeNonce();
       nonce = nextNonce;
-      void executeBridgeRequest(request, instanceId, link.data?.task_revision, { taskId, workItemId }).then(
+      void executeBridgeRequest(request, instanceId, taskRevisionRef.current, { taskId, workItemId }).then(
         (payload) => post({
           protocol: RUNTIME_SETTINGS_BRIDGE_PROTOCOL,
           version: RUNTIME_SETTINGS_BRIDGE_VERSION,
@@ -289,7 +291,7 @@ export function AgentWorkbenchPage({ focusMode = false }: { focusMode?: boolean 
       announceBridgeRef.current = () => undefined;
       window.removeEventListener("message", onMessage);
     };
-  }, [instanceId, item?.agent_type, link.data?.embeddable, link.data?.task_revision, link.data?.ui_url]);
+  }, [instanceId, item?.agent_type, link.data?.embeddable, link.data?.ui_url, taskId, workItemId]);
 
   const retry = (): void => {
     setFrameState("loading");
